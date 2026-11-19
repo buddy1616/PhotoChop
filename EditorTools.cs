@@ -463,28 +463,28 @@ public partial class MainWindow
     private static Cursor ToolCursor(string name) => name switch
     {
         "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" or "Masker" => ToolCursors.Eraser,
-        "Bucket" => Cursors.Cross,
+        "Bucket" => ToolCursors.Bucket,
         "Selection" or "Lasso" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.SelectionAdd : Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
         "Shape" => Cursors.SizeNESW, "Eyedropper" => ToolCursors.Eyedropper,
         "Transform" => Cursors.ScrollAll, _ => Cursors.Arrow
     };
 
+    private static readonly string[] UpperTools = ["Move", "Brush", "Eraser", "Bucket", "Chop"];
+    private IEnumerable<string> OrderedTools() => (preferences.ToolOrder ?? [.. UpperTools, .. ToolNames])
+        .Concat(ToolNames).Where(ToolNames.Contains).Distinct();
+
     private void RefreshTools()
     {
         toolsPanel.Children.Clear();
-        string[] destructive = ["Move", "Brush", "Eraser", "Bucket", "Chop"];
-        var configured = preferences.Tools ?? ToolNames;
-        var nonDestructive = ToolNames.Where(name => configured.Contains(name) && !destructive.Contains(name)).ToArray();
-        var destructiveTools = destructive.Where(configured.Contains).ToArray();
-        foreach (var name in nonDestructive.Concat(destructiveTools))
+        secondaryTools.Children.Clear();
+        var visible = preferences.Tools ?? ToolNames;
+        foreach (var name in OrderedTools().Where(visible.Contains))
         {
-            if (nonDestructive.Length > 0 && name == destructiveTools.FirstOrDefault())
-                toolsPanel.Children.Add(new Separator { Margin = new Thickness(2, 6, 2, 6) });
             var button = Button(name, () => SetTool(name));
             button.HorizontalContentAlignment = HorizontalAlignment.Left;
             if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
-            toolsPanel.Children.Add(button);
+            (UpperTools.Contains(name) ? toolsPanel : secondaryTools).Children.Add(button);
         }
 
         toolColors.Children.Clear();
@@ -592,18 +592,59 @@ public partial class MainWindow
 
     private void ConfigureTools()
     {
-        var dialog = new Window { Owner = this, Title = "Configure tools", Width = 300, SizeToContent = SizeToContent.Height,
+        var dialog = new Window { Owner = this, Title = "Configure tools", Width = 475, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
         var panel = new StackPanel { Margin = new Thickness(12) };
-        foreach (var name in ToolNames)
-            panel.Children.Add(new CheckBox { Content = name, IsChecked = (preferences.Tools ?? ToolNames).Contains(name), Margin = new Thickness(3) });
+        var sections = new Grid();
+        sections.ColumnDefinitions.Add(new ColumnDefinition());
+        sections.ColumnDefinitions.Add(new ColumnDefinition());
+        var order = OrderedTools().ToArray();
+        var visible = preferences.Tools ?? ToolNames;
+        ListBox Section(int column, string title, IEnumerable<string> names)
+        {
+            var section = new StackPanel { Margin = new Thickness(5) };
+            Grid.SetColumn(section, column);
+            sections.Children.Add(section);
+            section.Children.Add(new TextBlock { Text = title, Margin = new Thickness(2, 0, 0, 5) });
+            var items = new ListBox { MinHeight = 175 };
+            foreach (string name in names)
+            {
+                var check = new CheckBox { Content = name, IsChecked = visible.Contains(name), Margin = new Thickness(3) };
+                check.PreviewMouseLeftButtonDown += (_, _) => items.SelectedItem = check;
+                items.Items.Add(check);
+            }
+            items.SelectedIndex = 0;
+            section.Children.Add(items);
+            var move = new StackPanel { Orientation = Orientation.Horizontal };
+            void Reorder(int offset)
+            {
+                int current = items.SelectedIndex, target = current + offset;
+                if (current < 0 || target < 0 || target >= items.Items.Count) return;
+                var item = items.Items[current];
+                items.Items.RemoveAt(current);
+                items.Items.Insert(target, item);
+                items.SelectedItem = item;
+                items.ScrollIntoView(item);
+            }
+            move.Children.Add(Button("↑ Up", () => Reorder(-1)));
+            move.Children.Add(Button("↓ Down", () => Reorder(1)));
+            section.Children.Add(move);
+            return items;
+        }
+        var upper = Section(0, "Upper section", order.Where(UpperTools.Contains));
+        var lower = Section(1, "Lower section", order.Where(name => !UpperTools.Contains(name)));
+        panel.Children.Add(sections);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var ok = Button("Apply", () => dialog.DialogResult = true);
         ok.IsDefault = true;
-        panel.Children.Add(ok);
+        buttons.Children.Add(ok);
+        buttons.Children.Add(new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(2) });
+        panel.Children.Add(buttons);
         dialog.Content = panel;
         if (dialog.ShowDialog() != true) return;
-        preferences.Tools = panel.Children.OfType<CheckBox>().Where(box => box.IsChecked == true)
-            .Select(box => (string)box.Content).ToArray();
+        var checks = upper.Items.Cast<CheckBox>().Concat(lower.Items.Cast<CheckBox>()).ToArray();
+        preferences.ToolOrder = checks.Select(check => (string)check.Content).ToArray();
+        preferences.Tools = checks.Where(check => check.IsChecked == true).Select(check => (string)check.Content).ToArray();
         RefreshTools();
     }
 
@@ -627,6 +668,8 @@ public partial class MainWindow
             Key.Z => () => Run("history.undo", 0), Key.Y => () => Run("history.redo", 0),
             Key.D => () => Run<Area?>("document.selection", null),
             Key.G when !shift => Group,
+            Key.OemSemicolon when !shift => ToggleGuides,
+            Key.R when !shift => ToggleRulers,
             Key.OemPlus or Key.Add => () => ZoomBy(1.25), Key.OemMinus or Key.Subtract => () => ZoomBy(.8),
             Key.T => () => BeginTransform(SpatialKind.FreeTransform),
             Key.D0 or Key.NumPad0 => Fit, Key.D1 or Key.NumPad1 => ActualPixels,

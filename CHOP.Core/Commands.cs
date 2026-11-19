@@ -264,17 +264,16 @@ public sealed class CommandEngine(IRasterBackend backend)
             if (parent is not null) EnsureEditable(layers, parent);
         }
 
-        Document ApplySpatial(SpatialKind kind, Projective transform)
+        Document ApplySpatial(Projective transform)
         {
             var layer = Wanted();
             EnsureEditable(layers, layer.Id);
             if (transform == Projective.Identity) return doc;
             if (doc.Selection is { } area) return TransformSelected(doc, layer, area, transform);
             var local = backend.ToParentSpace(doc, layer, transform);
-            int next = layer.SpatialEdits.Length;
-            while (layer.SpatialEdits.Any(item => item.Id == $"{layer.Id}-{next}")) next++;
-            return Edit(item => item with { SpatialEdits = [.. item.SpatialEdits, new SpatialEdit(
-                $"{item.Id}-{next}", kind, local)] });
+            var combined = (layer.Transform.Warp ?? Projective.Identity).Then(local);
+            combined.Inverse();
+            return Edit(item => item with { Transform = item.Transform with { Warp = combined } });
         }
 
         switch (command.Name)
@@ -428,26 +427,20 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (scale.AnchorX is < 0 or > 2 || scale.AnchorY is < 0 or > 2)
                     throw new InvalidDataException("Choose a transform anchor.");
                 var scaleArea = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
-                return ApplySpatial(SpatialKind.Scale, Projective.Anchored(scale.X, scale.Y,
+                return ApplySpatial(Projective.Anchored(scale.X, scale.Y,
                     scaleArea.X + scaleArea.Width * scale.AnchorX / 2d, scaleArea.Y + scaleArea.Height * scale.AnchorY / 2d));
             case "layer.flip":
                 bool horizontal = command.Read<FlipArgs>().Horizontal;
                 var flipArea = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
-                return ApplySpatial(horizontal ? SpatialKind.FlipHorizontal : SpatialKind.FlipVertical,
-                    Projective.Anchored(horizontal ? -1 : 1, horizontal ? 1 : -1,
+                return ApplySpatial(Projective.Anchored(horizontal ? -1 : 1, horizontal ? 1 : -1,
                         flipArea.X + flipArea.Width / 2d, flipArea.Y + flipArea.Height / 2d));
             case "layer.warp":
                 var warp = command.Read<WarpArgs>();
                 if (warp.Kind is not (SpatialKind.FreeTransform or SpatialKind.Rotate or SpatialKind.Skew))
                     throw new InvalidDataException("Unknown transform.");
-                return ApplySpatial(warp.Kind, Projective.FromQuad(warp.Source, warp.Corners));
-            case "layer.removeSpatial":
-                int removeIndex = command.Read<int>();
-                return Edit(layer => layer with { SpatialEdits = layer.SpatialEdits.Where((_, i) => i != removeIndex).ToArray() });
-            case "layer.toggleSpatial":
-                int toggleIndex = command.Read<int>();
-                return Edit(layer => layer with { SpatialEdits = layer.SpatialEdits.Select((item, i) =>
-                    i == toggleIndex ? item with { Enabled = !item.Enabled } : item).ToArray() });
+                return ApplySpatial(Projective.FromQuad(warp.Source, warp.Corners));
+            case "layer.resetTransform":
+                return Edit(layer => layer with { Transform = new Transform() });
             case "layer.bucket":
                 var bucket = command.Read<BucketArgs>();
                 Range(bucket.Tolerance, 0, 255);
@@ -455,8 +448,10 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return Edit(layer =>
                 {
                     if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer for the paint bucket.");
-                    if (backend.BucketRegion(doc, layer, bucket) is not { } region) return layer;
-                    return ApplyInk(doc, layer, region.Bounds, region.Contains, bucketColor);
+                    var editable = backend.PrepareRasterEditing(doc, layer);
+                    var working = With(Update(layers, layer.Id, _ => editable));
+                    if (backend.BucketRegion(working, editable, bucket) is not { } region) return layer;
+                    return ApplyInk(working, editable, region.Bounds, region.Contains, bucketColor);
                 });
             case "layer.fillPixels":
                 var fillInk = Format.Color(command.Read<string>());
@@ -488,13 +483,19 @@ public sealed class CommandEngine(IRasterBackend backend)
                 EnsureEditable(layers, selectedLayer.Id);
                 if (selectedLayer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to edit pixels.");
                 if (selectedLayer.Pixels is null) return doc;
-                var edited = backend.EditSelection(doc, selectedLayer, selectedArea, delta);
+                if (delta is { } selectionMove)
+                {
+                    var dx = PixelDelta(selectionMove.X);
+                    var dy = PixelDelta(selectionMove.Y);
+                    if (dx == 0 && dy == 0) return doc;
+                    var moved = backend.MoveSelection(doc, selectedLayer, selectedArea, dx, dy);
+                    if (moved is null) return doc;
+                    var movedDoc = Edit(layer => moved);
+                    return TranslateSelection(movedDoc, dx, dy);
+                }
+                var edited = backend.ClearSelection(doc, selectedLayer);
                 if (edited.Shift is not { } pixelEdit) return doc;
-                var updated = delta is not null
-                    ? Edit(layer => layer with { Pixels = edited.Pixels, RasterX = edited.X, RasterY = edited.Y, PixelShifts = [] })
-                    : Edit(layer => layer with { PixelShifts = [.. layer.PixelShifts, pixelEdit] });
-                return delta is { } displacement
-                    ? TranslateSelection(updated, PixelDelta(displacement.X), PixelDelta(displacement.Y)) : updated;
+                return Edit(layer => layer with { PixelShifts = [.. layer.PixelShifts, pixelEdit] });
             case "mask.add":
                 return Edit(layer => layer.Mask is not null ? layer : layer with
                 {
@@ -575,7 +576,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.ungroup":
                 var ungroup = Wanted();
                 EnsureEditable(layers, ungroup.Id);
-                if (ungroup.Kind != LayerKind.Group || ungroup.Transform != new Transform() || ungroup.SpatialEdits.Length != 0 ||
+                if (ungroup.Kind != LayerKind.Group || ungroup.Transform != new Transform() ||
                     ungroup.Mask is not null || !ungroup.Visible || ungroup.Opacity != 1 || ungroup.Effects.Length != 0 || ungroup.Blend != Blend.Normal)
                     throw new InvalidDataException("Ungroup requires a visible group with default transform, opacity and blend and no effects.");
                 return With(ReplaceItems(layers, ParentOf(layers, ungroup.Id), [ungroup], ungroup.Children));
@@ -640,8 +641,9 @@ public sealed class CommandEngine(IRasterBackend backend)
             Guides = doc.Guides.Select(guide => guide with { Position = (int)Math.Round(
                 guide.Axis == GuideAxis.Vertical ? guide.Position * sx + x : guide.Position * sy + y) })
                 .Where(guide => guide.Position >= 0 && guide.Position <= (guide.Axis == GuideAxis.Vertical ? width : height)).ToArray(),
-            Layers = doc.Layers.Select(layer => layer with { SpatialEdits = layer.SpatialEdits
-                .Select(edit => edit with { Matrix = inverse.Then(edit.Matrix).Then(framing) }).ToArray(), Placement = new(
+            Layers = doc.Layers.Select(layer => layer with
+            { Transform = layer.Transform.Warp is { } warp ? layer.Transform with { Warp = inverse.Then(warp).Then(framing) } : layer.Transform,
+                Placement = new(
                 layer.Placement.X * sx + x, layer.Placement.Y * sy + y,
                 layer.Placement.ScaleX * sx, layer.Placement.ScaleY * sy) }).ToArray()
         };
@@ -937,6 +939,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         Range(Math.Abs(t.ScaleX), 0.001, 1000);
         Range(Math.Abs(t.ScaleY), 0.001, 1000);
         Range(t.Rotation, -360_000, 360_000);
+        t.Warp?.Inverse();
     }
 
     internal static void CheckEffect(Effect effect)

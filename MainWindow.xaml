@@ -42,21 +42,11 @@
         <StatusBar DockPanel.Dock="Bottom" Background="#242730">
             <TextBlock x:Name="Status" Foreground="#D4D9E4" Margin="6,2" />
         </StatusBar>
-        <Grid>
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition />
-            </Grid.ColumnDefinitions>
-            <ContentControl x:Name="ToolPantry" Width="126" Background="#242730"
-                            HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
-            <DockPanel Grid.Column="1">
-                <Border DockPanel.Dock="Top" Background="#242730" Padding="8,4" Height="40">
-                    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
-                        <StackPanel x:Name="ToolOptions" Orientation="Horizontal" VerticalAlignment="Center" />
-                    </ScrollViewer>
-                </Border>
-                <dock:DockingManager x:Name="Dock" />
-            </DockPanel>
-        </Grid>
+        <Border DockPanel.Dock="Top" Background="#242730" Padding="8,4" Height="40">
+            <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                <StackPanel x:Name="ToolOptions" Orientation="Horizontal" VerticalAlignment="Center" />
+            </ScrollViewer>
+        </Border>
+        <dock:DockingManager x:Name="Dock" />
     </DockPanel>
 </Window>

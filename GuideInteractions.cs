@@ -24,14 +24,9 @@ public partial class MainWindow
     {
         var show = new MenuItem { Header = "Show…" };
         view.Items.Add(show);
-        rulersMenu = Item(show, "Show Rulers", ToggleRulers);
+        rulersMenu = Item(show, "Show Rulers", ToggleRulers, "Ctrl+R");
         rulersMenu.IsCheckable = true;
-        showGuidesMenu = Item(show, "Show Guides", () =>
-        {
-            preferences.ShowGuides = !preferences.ShowGuides;
-            if (!preferences.ShowGuides) CancelGuide();
-            UpdateRulers();
-        });
+        showGuidesMenu = Item(show, "Show Guides", ToggleGuides, "Ctrl+;");
         showGuidesMenu.IsCheckable = true;
         var guides = new MenuItem { Header = "Guides" };
         view.Items.Add(guides);
@@ -49,6 +44,13 @@ public partial class MainWindow
                 UpdateRulers();
             }
         });
+        UpdateRulers();
+    }
+
+    private void ToggleGuides()
+    {
+        preferences.ShowGuides = !preferences.ShowGuides;
+        if (!preferences.ShowGuides) CancelGuide();
         UpdateRulers();
     }
 

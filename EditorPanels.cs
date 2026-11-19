@@ -170,8 +170,9 @@ public partial class MainWindow
         var toolDock = new DockPanel();
         DockPanel.SetDock(toolColors, System.Windows.Controls.Dock.Bottom);
         toolDock.Children.Add(toolColors);
-        toolDock.Children.Add(new ScrollViewer { Content = toolsPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        ToolPantry.Content = toolDock;
+        toolDock.Children.Add(new ScrollViewer { Content = secondaryTools, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        panelContent.Add("Tools", new ScrollViewer { Content = toolsPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        panelContent.Add("More Tools", toolDock);
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("History", history);
@@ -435,28 +436,13 @@ public partial class MainWindow
     {
         if (effectEditor is not { } panel) return;
         panel.Children.Clear();
-        if (layer.SpatialEdits.Length != 0)
+        var transformRow = new WrapPanel();
+        transformRow.Children.Add(Button("Transform…", EditTransform, "Edit the layer’s combined transform"));
+        transformRow.Children.Add(Button("Reset Transform", () =>
         {
-            panel.Children.Add(new TextBlock { Text = "Transforms", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
-            for (int i = 0; i < layer.SpatialEdits.Length; i++)
-            {
-                var entry = layer.SpatialEdits[i];
-                int index = i;
-                var controls = new WrapPanel();
-                var name = entry.Kind switch
-                {
-                    SpatialKind.FreeTransform => "Free Transform",
-                    SpatialKind.FlipHorizontal => "Flip Horizontal",
-                    SpatialKind.FlipVertical => "Flip Vertical",
-                    _ => entry.Kind.ToString()
-                };
-                var enabled = new CheckBox { Content = name, IsChecked = entry.Enabled, VerticalAlignment = VerticalAlignment.Center };
-                enabled.Click += (_, _) => RunLayer("layer.toggleSpatial", index);
-                controls.Children.Add(enabled);
-                controls.Children.Add(Button("×", () => RunLayer("layer.removeSpatial", index), "Remove transform"));
-                panel.Children.Add(controls);
-            }
-        }
+            if (Confirm("Reset the layer transform to its defaults?")) RunLayer("layer.resetTransform", 0);
+        }));
+        panel.Children.Add(transformRow);
         panel.Children.Add(new TextBlock { Text = "Effects", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
         var effectKinds = new ComboBox { ItemsSource = Enum.GetValues<EffectKind>(), SelectedIndex = 0, Margin = new Thickness(2) };
         var add = Button("Add effect", () => { if (effectKinds.SelectedItem is EffectKind kind) AddEffect(kind); });
@@ -490,11 +476,32 @@ public partial class MainWindow
     private void EditTransform()
     {
         if (ActiveLayer() is not { } layer) return;
-        var transform = layer.Transform;
-        var v = Form("Layer transform", ("X (pixels)", transform.X.ToString()), ("Y (pixels)", transform.Y.ToString()),
-            ("Rotation (degrees)", transform.Rotation.ToString()));
-        if (v is not null) Guard(() => RunLayer("layer.transform", new Chop.Core.Transform(Number(v[0]), Number(v[1]),
-            transform.ScaleX, transform.ScaleY, Number(v[2]))));
+        var p = layer.Placement;
+        var placement = new Projective(p.ScaleX, 0, p.X, 0, p.ScaleY, p.Y);
+        var matrix = layer.Transform.NativeMatrix().Then(placement)
+            .Then(layer.Transform.Warp ?? Projective.Identity);
+        double w = Math.Abs(matrix.I) > .000001 ? matrix.I : 1;
+        double x = matrix.C / w, y = matrix.F / w;
+        double a = matrix.A / w, b = matrix.B / w, d = matrix.D / w, e = matrix.E / w;
+        double g = matrix.G / w, h = matrix.H / w;
+        double sx = Math.Sqrt(a * a + d * d);
+        if (sx < .000001) { Say("The layer transform is too small to edit numerically."); return; }
+        double angle = Math.Atan2(d, a), cos = Math.Cos(angle), sin = Math.Sin(angle);
+        double sy = -sin * b + cos * e, skew = cos * b + sin * e;
+        var values = Form("Layer Transform", ("X (pixels)", x.ToString()), ("Y (pixels)", y.ToString()),
+            ("Scale X", sx.ToString()), ("Scale Y", sy.ToString()), ("Rotation (degrees)", (angle * 180 / Math.PI).ToString()),
+            ("Shear", skew.ToString()), ("Perspective X", g.ToString()), ("Perspective Y", h.ToString()));
+        if (values is null) return;
+        Guard(() =>
+        {
+            double radians = Number(values[4]) * Math.PI / 180;
+            double c = Math.Cos(radians), s = Math.Sin(radians);
+            double scaleX = Number(values[2]), scaleY = Number(values[3]), shear = Number(values[5]);
+            var updated = new Projective(c * scaleX, c * shear - s * scaleY, Number(values[0]),
+                s * scaleX, s * shear + c * scaleY, Number(values[1]), Number(values[6]), Number(values[7]), matrix.I / w);
+            var warp = placement.Inverse().Then(updated);
+            Run("layer.transform", new Chop.Core.Transform(Warp: warp), layer.Id);
+        });
     }
 
     private Window EditorOwner => Window.GetWindow(canvas) ?? this;

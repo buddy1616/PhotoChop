@@ -9,7 +9,15 @@ public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianB
 
 public readonly record struct PointD(double X, double Y);
 public readonly record struct Area(int X, int Y, int Width, int Height);
-public sealed record Transform(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1, double Rotation = 0);
+public sealed record Transform(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1, double Rotation = 0, Projective? Warp = null)
+{
+    public Projective NativeMatrix()
+    {
+        double radians = Rotation * Math.PI / 180;
+        return new Projective(Math.Cos(radians) * ScaleX, -Math.Sin(radians) * ScaleY, X,
+            Math.Sin(radians) * ScaleX, Math.Cos(radians) * ScaleY, Y);
+    }
+}
 public sealed record Placement(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1);
 public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal);
 
@@ -29,11 +37,14 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     [JsonIgnore] public Pixels? Pixels { get; init; }
     [JsonIgnore] public AlphaMask? Mask { get; init; }
     [JsonIgnore] public PixelShift[] PixelShifts { get; init; } = [];
-    public SpatialEdit[] SpatialEdits { get; init; } = [];
+    // Version 6 projects stored transforms as a list. It is merged on read.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SpatialEdit[]? SpatialEdits { get; init; }
     public Placement Placement { get; init; } = new();
     public bool TransformsEnabled { get; init; } = true;
     [JsonIgnore] public Transform ActiveTransform => TransformsEnabled ? Transform : new();
     public bool MaskEnabled { get; init; } = true;
+    public Projective? RasterGrid { get; init; }
     public int RasterX { get; init; }
     public int RasterY { get; init; }
     public string Text { get; init; } = "Text";
@@ -53,8 +64,8 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
         return this with
         {
             Placement = Placement with { X = Placement.X + x, Y = Placement.Y + y },
-            SpatialEdits = SpatialEdits.Length == 0 ? SpatialEdits : SpatialEdits.Select(edit =>
-                edit with { Matrix = inverse.Then(edit.Matrix).Then(translation) }).ToArray()
+            Transform = Transform.Warp is { } warp
+                ? Transform with { Warp = inverse.Then(warp).Then(translation) } : Transform
         };
     }
 
@@ -114,8 +125,10 @@ public interface IRasterBackend
     RasterEdit? ResolveRaster(Layer layer);
     Projective ToParentSpace(Document document, Layer layer, Projective transform);
     RasterEdit? TransformPixels(Document document, Layer layer, Area selection, Projective transform);
+    Layer PrepareRasterEditing(Document document, Layer layer);
     PixelSelection? BucketRegion(Document document, Layer layer, BucketArgs options);
-    RasterEdit EditSelection(Document document, Layer layer, Area selection, PointD? delta);
+    Layer? MoveSelection(Document document, Layer layer, Area selection, int dx, int dy);
+    RasterEdit ClearSelection(Document document, Layer layer);
     AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);
     Pixels Stroke(Document document, Layer layer, StrokeArgs stroke);
 }
