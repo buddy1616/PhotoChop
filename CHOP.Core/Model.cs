@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace Chop.Core;
 
-public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group }
+public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill }
 public enum Blend { Normal, Multiply, Screen, Overlay, Add }
 public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode }
 
@@ -15,7 +15,8 @@ public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, dou
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
 public sealed record Pixels(int Width, int Height, byte[] Rgba);
 public sealed record AlphaMask(int Width, int Height, byte[] Alpha);
-public sealed record RasterEdit(Pixels Pixels, int X, int Y);
+public sealed record RasterEdit(Pixels Pixels, int X, int Y, PixelShift? Shift = null);
+public sealed record PixelShift(Area Source, byte[] Bits, int Dx, int Dy, bool Clear = false, Pixels? Patch = null);
 
 public sealed record Layer(string Id, string Name, LayerKind Kind)
 {
@@ -26,6 +27,8 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public Blend Blend { get; init; }
     [JsonIgnore] public Pixels? Pixels { get; init; }
     [JsonIgnore] public AlphaMask? Mask { get; init; }
+    [JsonIgnore] public PixelShift[] PixelShifts { get; init; } = [];
+    public bool MaskEnabled { get; init; } = true;
     public int RasterX { get; init; }
     public int RasterY { get; init; }
     public string Text { get; init; } = "Text";
@@ -45,6 +48,10 @@ public sealed record Document(string Id, int Width, int Height)
     public Dictionary<string, string> Metadata { get; init; } = [];
     public Layer[] Layers { get; init; } = [];
     [JsonIgnore] public Area? Selection { get; init; }
+
+    [JsonIgnore] public PixelSelection? SelectionMask { get; init; }
+    public bool Selected(int x, int y) => SelectionMask?.Contains(x, y) ??
+        (Selection is { } area && x >= area.X && y >= area.Y && x < area.X + area.Width && y < area.Y + area.Height);
 
     public IEnumerable<Layer> AllLayers() => Descendants(Layers);
     private static IEnumerable<Layer> Descendants(IEnumerable<Layer> layers) =>
@@ -81,6 +88,7 @@ public interface IRasterBackend
     Pixels DecodePng(byte[] data);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
+    RasterEdit? ResolveRaster(Layer layer);
     RasterEdit EditSelection(Document document, Layer layer, Area selection, PointD? delta);
     AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);
     Pixels Stroke(Document document, Layer layer, StrokeArgs stroke);

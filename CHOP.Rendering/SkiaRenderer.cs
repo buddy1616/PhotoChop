@@ -107,7 +107,7 @@ public sealed class SkiaRenderer : IRasterBackend
             groupCanvas.Clear(SKColors.Transparent);
             foreach (var child in layer.Children) Draw(groupCanvas, child, doc, world);
             groupCanvas.Flush();
-            if (!layer.Effects.Any(ProcessesPixels) && layer.Mask is null)
+            if (!layer.Effects.Any(ProcessesPixels) && (layer.Mask is null || !layer.MaskEnabled))
             {
                 canvas.DrawBitmap(group, 0, 0, paint);
                 return;
@@ -115,7 +115,7 @@ public sealed class SkiaRenderer : IRasterBackend
 
             var frame = Evaluate(Unpremultiply(group), layer.Effects);
             using var adjusted = Bitmap(frame.Pixels);
-            if (layer.Mask is not { } groupMask)
+            if (layer.Mask is not { } groupMask || !layer.MaskEnabled)
             {
                 canvas.DrawBitmap(adjusted, frame.X, frame.Y, paint);
                 return;
@@ -140,12 +140,16 @@ public sealed class SkiaRenderer : IRasterBackend
             return;
         }
 
-        Pixels? source = layer.Kind == LayerKind.Raster ? layer.Pixels : vectors.GetValue(layer, Rasterize);
+        var raster = layer.Kind == LayerKind.Raster ? ResolveRaster(layer) : null;
+        Pixels? source = layer.Kind switch
+        {
+            LayerKind.Raster => raster?.Pixels,
+            LayerKind.Fill => FillSource(layer, layer.Width, layer.Height),
+            _ => vectors.GetValue(layer, Rasterize)
+        };
         if (source is null) return;
-        int originX = layer.Kind == LayerKind.Raster ? layer.RasterX : 0;
-        int originY = layer.Kind == LayerKind.Raster ? layer.RasterY : 0;
-        var evaluated = Evaluate(source, layer.Effects, originX, originY);
-        if (layer.Mask is { } mask) evaluated = ApplyMask(evaluated, mask);
+        var evaluated = Evaluate(source, layer.Effects, raster?.X ?? 0, raster?.Y ?? 0);
+        if (layer.MaskEnabled && layer.Mask is { } mask) evaluated = ApplyMask(evaluated, mask);
         using var bitmap = Bitmap(evaluated.Pixels);
         using var image = SKImage.FromBitmap(bitmap);
         canvas.Save();
@@ -366,7 +370,7 @@ public sealed class SkiaRenderer : IRasterBackend
             bytes[p] = bytes[p + 1] = bytes[p + 2] = mask.Alpha[i];
             bytes[p + 3] = 255;
         }
-        var painted = Stroke(doc, layer with { Pixels = new(mask.Width, mask.Height, bytes), RasterX = 0, RasterY = 0 },
+        var painted = Stroke(doc, layer with { Pixels = new(mask.Width, mask.Height, bytes), RasterX = 0, RasterY = 0, PixelShifts = [] },
             stroke.Erase ? stroke with { Color = "#FF000000", Erase = false } : stroke, mask: true);
         var alpha = new byte[mask.Alpha.Length];
         for (int i = 0; i < alpha.Length; i++)
@@ -377,50 +381,111 @@ public sealed class SkiaRenderer : IRasterBackend
         return mask with { Alpha = alpha };
     }
 
+    private readonly ConditionalWeakTable<Layer, RasterEdit> resolved = new();
+    private readonly ConditionalWeakTable<Layer, Dictionary<(int, int), Pixels>> fills = new();
+
+    private Pixels FillSource(Layer layer, int width, int height)
+    {
+        var sizes = fills.GetOrCreateValue(layer);
+        lock (sizes)
+        {
+            if (sizes.TryGetValue((width, height), out var pixels)) return pixels;
+            using var image = Surface(width, height);
+            image.Erase(new SKColor(Format.Color(layer.Color)));
+            sizes.Clear();
+            return sizes[(width, height)] = Unpremultiply(image);
+        }
+    }
+
+    /// <summary>Show the selected mask alone as opaque grayscale in document coordinates.</summary>
+    public Pixels MaskView(Document doc, Layer layer)
+    {
+        var mask = layer.Mask!;
+        var bytes = new byte[mask.Alpha.Length * 4];
+        for (int i = 0; i < mask.Alpha.Length; i++)
+        {
+            int p = i * 4;
+            bytes[p] = bytes[p + 1] = bytes[p + 2] = mask.Alpha[i];
+            bytes[p + 3] = 255;
+        }
+        using var output = Surface(doc.Width, doc.Height);
+        using var canvas = new SKCanvas(output);
+        using var image = Bitmap(new(mask.Width, mask.Height, bytes));
+        canvas.Clear(SKColors.White);
+        canvas.Concat(FindMatrix(doc.Layers, layer.Id, SKMatrix.Identity, SKMatrix.Identity, false) ?? SKMatrix.Identity);
+        canvas.DrawBitmap(image, 0, 0);
+        canvas.Flush();
+        return Unpremultiply(output);
+    }
+
+    public RasterEdit? ResolveRaster(Layer layer)
+    {
+        if (layer.Pixels is not { } source) return null;
+        if (layer.PixelShifts.Length == 0) return new(source, layer.RasterX, layer.RasterY);
+        return resolved.GetValue(layer, _ =>
+        {
+            var edited = new RasterEdit(source, layer.RasterX, layer.RasterY);
+            foreach (var shift in layer.PixelShifts) edited = ApplyShift(edited, shift);
+            return edited;
+        });
+    }
+
     public RasterEdit EditSelection(Document doc, Layer layer, Area selection, PointD? delta)
     {
-        var source = layer.Pixels!;
+        var raster = ResolveRaster(layer)!;
+        var source = raster.Pixels;
         var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
         var offset = delta is { } motion ? inverse.MapVector((float)motion.X, (float)motion.Y) : default;
         int dx = checked((int)Math.Round(offset.X)), dy = checked((int)Math.Round(offset.Y));
-        int left = layer.RasterX, top = layer.RasterY, right = left + source.Width, bottom = top + source.Height;
-        var selected = new BitArray(source.Width * source.Height);
-        bool hasPixels = false;
-        for (int y = 0; y < source.Height; y++)
-        for (int x = 0; x < source.Width; x++)
+        if (delta is not null && dx == 0 && dy == 0) return raster;
+        var mask = PixelSelection.Create(source.Width, source.Height, (x, y) =>
         {
-            int index = (y * source.Width + x) * 4;
-            if (source.Rgba[index + 3] == 0) continue;
-            int lx = x + layer.RasterX, ly = y + layer.RasterY;
-            var p = world.MapPoint(lx + .5f, ly + .5f);
-            if (p.X < selection.X || p.Y < selection.Y || p.X >= selection.X + selection.Width || p.Y >= selection.Y + selection.Height) continue;
-            selected[index / 4] = true;
-            hasPixels = true;
-            left = Math.Min(left, lx + dx);
-            top = Math.Min(top, ly + dy);
-            right = Math.Max(right, lx + dx + 1);
-            bottom = Math.Max(bottom, ly + dy + 1);
-        }
-        if (!hasPixels || (delta is not null && dx == 0 && dy == 0))
-            return new(source, layer.RasterX, layer.RasterY);
-        int width = right - left, height = bottom - top;
+            if (source.Rgba[(y * source.Width + x) * 4 + 3] == 0) return false;
+            var p = world.MapPoint(x + raster.X + .5f, y + raster.Y + .5f);
+            return doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y));
+        });
+        if (mask.Bounds is not { } bounds) return raster;
+        var operation = new PixelShift(bounds with { X = bounds.X + raster.X, Y = bounds.Y + raster.Y },
+            mask.Mask?.Bits ?? [], dx, dy, Clear: delta is null);
+        return ApplyShift(raster, operation) with { Shift = operation };
+    }
+
+    private static RasterEdit ApplyShift(RasterEdit raster, PixelShift shift)
+    {
+        var source = raster.Pixels;
+        var area = shift.Source;
+        int left = Math.Min(raster.X, checked(area.X + shift.Dx));
+        int top = Math.Min(raster.Y, checked(area.Y + shift.Dy));
+        int right = Math.Max(raster.X + source.Width, checked(area.X + area.Width + shift.Dx));
+        int bottom = Math.Max(raster.Y + source.Height, checked(area.Y + area.Height + shift.Dy));
+        int width = checked(right - left), height = checked(bottom - top);
         Format.Dimensions(width, height);
         var rgba = new byte[width * height * 4];
         int Index(int x, int y) => ((y - top) * width + x - left) * 4;
+        bool Selected(int x, int y) => shift.Bits.Length == 0 || shift.Bits[(y - area.Y) * area.Width + x - area.X] != 0;
         for (int y = 0; y < source.Height; y++)
-            Buffer.BlockCopy(source.Rgba, y * source.Width * 4, rgba, Index(layer.RasterX, layer.RasterY + y), source.Width * 4);
-        for (int i = 0; i < selected.Length; i++)
-            if (selected[i]) Array.Clear(rgba, Index(layer.RasterX + i % source.Width, layer.RasterY + i / source.Width), 4);
-        if (delta is not null)
-            for (int i = 0; i < selected.Length; i++)
+            Buffer.BlockCopy(source.Rgba, y * source.Width * 4, rgba, Index(raster.X, raster.Y + y), source.Width * 4);
+        if (shift.Patch is { } patch)
+        {
+            for (int y = 0; y < patch.Height; y++)
+                Array.Copy(patch.Rgba, y * patch.Width * 4, rgba, Index(area.X, area.Y + y), patch.Width * 4);
+            return new(new(width, height, rgba), left, top);
+        }
+        for (int y = area.Y; y < area.Y + area.Height; y++)
+        for (int x = area.X; x < area.X + area.Width; x++)
+            if (Selected(x, y)) Array.Clear(rgba, Index(x, y), 4);
+        if (!shift.Clear)
+            for (int y = area.Y; y < area.Y + area.Height; y++)
+            for (int x = area.X; x < area.X + area.Width; x++)
             {
-                if (!selected[i]) continue;
-                int destination = Index(layer.RasterX + i % source.Width + dx, layer.RasterY + i / source.Width + dy);
-                int pixel = i * 4;
+                if (!Selected(x, y)) continue;
+                int destination = Index(x + shift.Dx, y + shift.Dy);
+                int pixel = ((y - raster.Y) * source.Width + x - raster.X) * 4;
                 double alpha = source.Rgba[pixel + 3] / 255.0;
                 double retained = rgba[destination + 3] / 255.0 * (1 - alpha);
                 double output = alpha + retained;
+                if (output == 0) continue;
                 for (int c = 0; c < 3; c++)
                     rgba[destination + c] = Mix(rgba[destination + c], source.Rgba[pixel + c], retained, alpha, output);
                 rgba[destination + 3] = Byte(output);
@@ -432,11 +497,12 @@ public sealed class SkiaRenderer : IRasterBackend
 
     private Pixels Stroke(Document doc, Layer layer, StrokeArgs stroke, bool mask)
     {
-        int width = layer.Pixels?.Width ?? layer.Width;
-        int height = layer.Pixels?.Height ?? layer.Height;
-        var bytes = layer.Pixels is { } source ? (byte[])source.Rgba.Clone() : new byte[width * height * 4];
+        var raster = ResolveRaster(layer);
+        int width = raster?.Pixels.Width ?? layer.Width;
+        int height = raster?.Pixels.Height ?? layer.Height;
+        var bytes = raster?.Pixels is { } source ? (byte[])source.Rgba.Clone() : new byte[width * height * 4];
         var world = FindMatrix(doc.Layers, layer.Id, SKMatrix.Identity, SKMatrix.Identity, !mask) ?? SKMatrix.Identity;
-        world = SKMatrix.Concat(world, SKMatrix.CreateTranslation(layer.RasterX, layer.RasterY));
+        world = SKMatrix.Concat(world, SKMatrix.CreateTranslation(raster?.X ?? layer.RasterX, raster?.Y ?? layer.RasterY));
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
         double radius = stroke.Size / 2;
         uint color = Format.Color(stroke.Color);
@@ -466,7 +532,8 @@ public sealed class SkiaRenderer : IRasterBackend
             {
                 var p = world.MapPoint(x + .5f, y + .5f);
                 if (p.X < selection.X || p.X >= selection.X + selection.Width ||
-                    p.Y < selection.Y || p.Y >= selection.Y + selection.Height) continue;
+                    p.Y < selection.Y || p.Y >= selection.Y + selection.Height || (doc.SelectionMask is not null &&
+                    !doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y)))) continue;
                 double dx = p.X - point.X, dy = p.Y - point.Y;
                 double distance = Math.Sqrt(dx * dx + dy * dy);
                 byte mask = Byte(Math.Clamp((radius - distance) / Math.Max(.5, radius * (1 - stroke.Hardness)), 0, 1));

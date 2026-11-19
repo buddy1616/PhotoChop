@@ -20,22 +20,25 @@ public partial class MainWindow
     private Point gestureStart;
     private Point panOrigin;
     private Area? selectionOrigin;
+    private Chop.Core.SelectionMode selectionMode;
     private PointD? selectionDragDelta;
     private readonly List<PointD> stroke = [];
 
-    private void HookCanvas()
+    private void HookCanvas(EditorCanvas view)
     {
-        canvas.MouseWheel += (_, e) =>
+        view.MouseWheel += (_, e) =>
         {
-            if (active is null || gesture is not null) return;
+            if (gesture is not null) return;
+            if (sessions.FirstOrDefault(session => ReferenceEquals(session.View, view)) is { } hovered) Activate(hovered);
+            if (active is null) return;
             ZoomBy(Math.Pow(1.15, e.Delta / 120.0), e.GetPosition(canvas));
             e.Handled = true;
         };
-        canvas.MouseDown += CanvasDown;
-        canvas.MouseMove += CanvasMove;
-        canvas.MouseUp += CanvasUp;
-        canvas.LostMouseCapture += (_, _) => CancelGesture();
-        canvas.MouseLeave += (_, _) => { if (gesture is null) { lastCursor = null; Say(); } };
+        view.MouseDown += CanvasDown;
+        view.MouseMove += CanvasMove;
+        view.MouseUp += CanvasUp;
+        view.LostMouseCapture += (_, _) => CancelGesture();
+        view.MouseLeave += (_, _) => { if (gesture is null) { lastCursor = null; Say(); } };
     }
 
     private void CanvasDown(object sender, MouseButtonEventArgs e)
@@ -60,7 +63,10 @@ public partial class MainWindow
                 case "Eyedropper": Sample(point); return;
                 case "Transform": EditTransform(); return;
                 case "Selection":
-                    if (doc.Selection is { } selection &&
+                    selectionMode = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? Chop.Core.SelectionMode.Subtract
+                        : Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? Chop.Core.SelectionMode.Add : Chop.Core.SelectionMode.Replace;
+                    if (selectionMode == Chop.Core.SelectionMode.Replace &&
+                        doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y)) && doc.Selection is { } selection &&
                         point.X >= selection.X && point.X < selection.X + selection.Width &&
                         point.Y >= selection.Y && point.Y < selection.Y + selection.Height)
                         selectionOrigin = selection;
@@ -69,7 +75,7 @@ public partial class MainWindow
                     if (ActiveLayer() is not { Locked: false } target || !Editable(doc, target.Id)) { Say("Select an unlocked layer to move."); return; }
                     if (doc.Selection is { } selected)
                     {
-                        if (target.Kind != LayerKind.Raster || point.X < selected.X || point.X >= selected.X + selected.Width ||
+                        if (target.Kind != LayerKind.Raster || !doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y)) || point.X < selected.X || point.X >= selected.X + selected.Width ||
                             point.Y < selected.Y || point.Y >= selected.Y + selected.Height) return;
                         selectionOrigin = selected;
                         moveId = target.Id;
@@ -124,8 +130,13 @@ public partial class MainWindow
                     stroke.Add(new(point.X, point.Y));
                 canvas.InvalidateVisual();
                 break;
+            case "Selection" when selectionOrigin is not null:
+                var outline = GestureBounds(point);
+                canvas.Selection = new Area((int)outline.X, (int)outline.Y, (int)outline.Width, (int)outline.Height);
+                canvas.InvalidateVisual();
+                break;
             case "Selection":
-            case "Crop":
+            case "Chop":
             case "Shape":
                 canvas.Marquee = GestureBounds(point);
                 canvas.InvalidateVisual();
@@ -165,6 +176,8 @@ public partial class MainWindow
         var original = moveOriginal;
         string? id = moveId;
         var motion = end - gestureStart;
+        var originalSelection = selectionOrigin;
+        var mode = selectionMode;
         var moveSelection = new PointD(Math.Round(motion.X), Math.Round(motion.Y));
         bool mask = active.MaskTarget is { } maskId && ActiveLayer() is { Mask: not null } layer && layer.Id == maskId;
         CancelGesture();
@@ -182,11 +195,14 @@ public partial class MainWindow
                 if (moved is not null && moved != original) Run("layer.transform", moved, id);
                 break;
             case "Selection":
-                if (bounds.Width < 1 || bounds.Height < 1) Run<Area?>("document.selection", null);
-                else Run("document.selection", area);
+                if (originalSelection is { } previous)
+                    Run("selection.translate", new PointD(area.X - previous.X, area.Y - previous.Y));
+                else if (bounds.Width >= 1 && bounds.Height >= 1)
+                    Run("selection.rectangle", new RectangleSelection(area, mode));
+                else if (mode == Chop.Core.SelectionMode.Replace) Run<Area?>("document.selection", null);
                 break;
-            case "Crop":
-                if (bounds.Width >= 1 && bounds.Height >= 1) { Run("document.crop", area); Fit(); }
+            case "Chop":
+                if (bounds.Width >= 1 && bounds.Height >= 1) { Run("document.chop", area); Fit(); }
                 break;
             case "Shape":
                 if (bounds.Width >= 1 && bounds.Height >= 1)
@@ -220,6 +236,11 @@ public partial class MainWindow
     private void CancelGesture()
     {
         gesture = null;
+        if (selectionOrigin is not null && active?.Engine.Current is { } document)
+        {
+            canvas.Selection = document.Selection;
+            canvas.SelectionMask = document.SelectionMask;
+        }
         selectionOrigin = null;
         moveId = null;
         moveOriginal = null;
@@ -285,6 +306,7 @@ public partial class MainWindow
         canvas.Zoom = active.Zoom;
         canvas.Offset = active.Offset;
         canvas.InvalidateVisual();
+        RefreshNavigation();
         Say();
     }
 
@@ -292,21 +314,17 @@ public partial class MainWindow
     {
         CancelGesture();
         tool = name;
-        canvas.Cursor = name switch
-        {
-            "Move" => Cursors.SizeAll,
-            "Brush" => Cursors.Pen,
-            "Eraser" => Cursors.UpArrow,
-            "Selection" => Cursors.Cross,
-            "Crop" => Cursors.SizeNWSE,
-            "Text" => Cursors.IBeam,
-            "Shape" => Cursors.SizeNESW,
-            "Eyedropper" => Cursors.Hand,
-            "Transform" => Cursors.ScrollAll,
-            _ => Cursors.Arrow
-        };
+        foreach (var session in sessions) session.View.Cursor = ToolCursor(name);
         RefreshTools();
     }
+
+    private static Cursor ToolCursor(string name) => name switch
+    {
+        "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" => ToolCursors.Eraser,
+        "Selection" => Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
+        "Shape" => Cursors.SizeNESW, "Eyedropper" => ToolCursors.Eyedropper,
+        "Transform" => Cursors.ScrollAll, _ => Cursors.Arrow
+    };
 
     private void RefreshTools()
     {
@@ -350,9 +368,11 @@ public partial class MainWindow
     {
         var button = Button(label, () =>
         {
-            var result = Form(label + " color", ("Color #AARRGGBB", value));
-            if (result is null) return;
-            Guard(() => { Format.Color(result[0]); apply(result[0]); RefreshTools(); });
+            if (ColorPickerDialog.Show(this, label + " color", value) is { } color)
+            {
+                apply(color);
+                RefreshTools();
+            }
         });
         var row = new StackPanel { Orientation = Orientation.Horizontal };
         row.Children.Add(new System.Windows.Shapes.Rectangle

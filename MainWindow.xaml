@@ -18,8 +18,10 @@
                 <Button DockPanel.Dock="Right" Click="ToggleRowLock" ToolTip="Toggle lock" Padding="4,1" Margin="3,0,0,0">
                     <TextBlock Text="{Binding LockGlyph}" FontFamily="Segoe MDL2 Assets" />
                 </Button>
-                <Button DockPanel.Dock="Right" Click="ToggleRowMask" ToolTip="Select layer mask for painting" Padding="4,1"
-                        Content="{Binding MaskLabel}" Visibility="{Binding MaskVisibility}" />
+                <Button DockPanel.Dock="Right" Click="ToggleRowMask" ContextMenuOpening="OpenMaskMenu" ToolTip="Select mask for painting. Alt-click to view only the mask." Padding="4,1"
+                        Content="{Binding MaskLabel}" Visibility="{Binding MaskVisibility}">
+                    <Button.ContextMenu><ContextMenu /></Button.ContextMenu>
+                </Button>
                 <Button DockPanel.Dock="Left" Click="ToggleRowGroup" ToolTip="Expand or collapse group" Padding="3,1" Margin="{Binding Indent}"
                         Content="{Binding GroupGlyph}" Visibility="{Binding GroupVisibility}" />
                 <TextBlock Text="{Binding Layer.Name}" Margin="{Binding NameIndent}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />

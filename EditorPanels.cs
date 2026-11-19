@@ -19,7 +19,7 @@ public partial class MainWindow
         public Visibility MaskVisibility => Layer.Mask is null ? Visibility.Collapsed : Visibility.Visible;
         public string GroupGlyph => Collapsed ? "▸" : "▾";
         public string LockGlyph => Layer.Locked ? "\uE72E" : "\uE785";
-        public string MaskLabel => EditingMask ? "▣ Mask" : "□ Mask";
+        public string MaskLabel => !Layer.MaskEnabled ? "⊘ Mask" : EditingMask ? "▣ Mask" : "□ Mask";
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
         public Thickness NameIndent => Layer.Kind == LayerKind.Group ? new(2, 0, 0, 0) : new(Depth * 13 + 16, 0, 0, 0);
     }
@@ -56,7 +56,10 @@ public partial class MainWindow
     {
         var layerButtons = new WrapPanel { Margin = new Thickness(5) };
         layerButtons.Children.Add(Button("New Raster Layer", () => CreateLayer(LayerKind.Raster)));
-        layerButtons.Children.Add(Button("Mask", AddOrSelectMask, "Add a white mask or select it for painting"));
+        var maskButton = Button("Mask", AddOrSelectMask, "Add a mask. Alt-click for grayscale view.");
+        maskButton.ContextMenu = new ContextMenu();
+        maskButton.ContextMenuOpening += OpenMaskMenu;
+        layerButtons.Children.Add(maskButton);
         layerButtons.Children.Add(Button("Rename", Rename));
         layerButtons.Children.Add(Button("Duplicate", Duplicate));
         layerButtons.Children.Add(Button("Delete Layer", DeleteLayer));
@@ -73,14 +76,16 @@ public partial class MainWindow
         {
             if (syncing || active is null) return;
             active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
-            if (active.MaskTarget != active.ActiveId) active.MaskTarget = null;
+            if (active.MaskTarget != active.ActiveId) { active.MaskTarget = null; active.MaskOnly = null; UpdateCanvas(); }
             RefreshProperties();
             Say();
         };
         layers.MouseDoubleClick += (_, e) =>
         {
             if (RowAt(e.OriginalSource) is null || IsButton(e.OriginalSource)) return;
-            Rename();
+            if (ActiveLayer() is { Kind: LayerKind.Fill } fill && ColorPickerDialog.Show(this, "Fill layer color", fill.Color) is { } color)
+                Run("layer.fill", color, fill.Id);
+            else if (ActiveLayer()?.Kind != LayerKind.Fill) Rename();
             e.Handled = true;
         };
         layers.PreviewMouseLeftButtonDown += (_, e) =>
@@ -91,30 +96,31 @@ public partial class MainWindow
         layers.PreviewMouseMove += (_, e) =>
         {
             if (layerDrag is not { } row || e.LeftButton != MouseButtonState.Pressed ||
-                (e.GetPosition(layers) - layerDragStart).Length < SystemParameters.MinimumVerticalDragDistance) return;
+                (e.GetPosition(layers) - layerDragStart).Length < Math.Max(5, SystemParameters.MinimumVerticalDragDistance)) return;
             layerDrag = null;
-            DragDrop.DoDragDrop(layers, new DataObject(typeof(LayerRow), row), DragDropEffects.Move);
+            DragLayer(row);
         };
         layers.DragOver += (_, e) =>
         {
-            e.Effects = e.Data.GetDataPresent(typeof(LayerRow)) && RowAt(e.OriginalSource)?.Layer.Id !=
-                (e.Data.GetData(typeof(LayerRow)) as LayerRow)?.Layer.Id ? DragDropEffects.Move : DragDropEffects.None;
+            var hint = GetDrop(e);
+            e.Effects = hint is null ? DragDropEffects.None : DragDropEffects.Move;
+            if (layerDragAdorner is { } adorner)
+            {
+                adorner.Pointer = e.GetPosition(layers);
+                adorner.Hint = hint;
+                adorner.InvalidateVisual();
+            }
             e.Handled = true;
+        };
+        layers.DragLeave += (_, _) =>
+        {
+            if (layerDragAdorner is { } adorner) { adorner.Hint = null; adorner.InvalidateVisual(); }
         };
         layers.Drop += (_, e) =>
         {
-            if (active is null || e.Data.GetData(typeof(LayerRow)) is not LayerRow source) return;
-            var target = RowAt(e.OriginalSource);
-            if (target?.Layer.Id == source.Layer.Id) return;
-            var item = target is null ? null : layers.ItemContainerGenerator.ContainerFromItem(target) as ListBoxItem;
-            double fraction = item is null || item.ActualHeight == 0 ? 1 : e.GetPosition(item).Y / item.ActualHeight;
-            bool intoGroup = target?.Layer.Kind == LayerKind.Group && fraction > .25 && fraction < .75;
-            string? parent = intoGroup ? target!.Layer.Id : target?.Parent;
-            var siblings = layers.Items.Cast<LayerRow>().Where(row => row.Parent == parent && row.Layer.Id != source.Layer.Id).ToArray();
-            string? before = intoGroup ? null : target is null ? siblings.LastOrDefault()?.Layer.Id :
-                fraction >= .5 ? target.Layer.Id : siblings.TakeWhile(row => row.Layer.Id != target.Layer.Id).LastOrDefault()?.Layer.Id;
-            if (intoGroup) active.Collapsed.Remove(parent!);
-            Run("layer.reorder", new ReorderArgs(parent, before), source.Layer.Id, source.Layer.Id);
+            if (active is null || GetDrop(e) is not { } hint) return;
+            if (hint.IntoGroup && hint.Order.Parent is { } parent) active.Collapsed.Remove(parent);
+            Run("layer.reorder", hint.Order, hint.Source.Layer.Id, hint.Source.Layer.Id);
             e.Handled = true;
         };
 
@@ -125,13 +131,15 @@ public partial class MainWindow
                 Run("history.go", session.Engine.HistoryBase + history.SelectedIndex);
         };
 
+        BuildHistoryMenu();
+
         var logActions = new WrapPanel { Margin = new Thickness(5) };
         logActions.Children.Add(Button("Copy selected", () => ExportLog(true, true)));
         logActions.Children.Add(Button("Export script", () => ExportLog(false, false)));
         logActions.Children.Add(Button("Clear display", () =>
         {
             if (active is null) return;
-            active.LogStart = active.Log.Count;
+            active.LogStart = DisplayLog(active).Count();
             RefreshLog();
         }));
         var recording = new CheckBox { Content = "Record", IsChecked = true, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5) };
@@ -147,6 +155,7 @@ public partial class MainWindow
         toolDock.Children.Add(toolColors);
         toolDock.Children.Add(new ScrollViewer { Content = toolsPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         panelContent.Add("Tools", toolDock);
+        panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("History", history);
         panelContent.Add("Command Log", logPanel);
@@ -184,7 +193,17 @@ public partial class MainWindow
     {
         if (active is null || sender is not FrameworkElement { DataContext: LayerRow row }) return;
         active.ActiveId = row.Layer.Id;
-        active.MaskTarget = active.MaskTarget == row.Layer.Id ? null : row.Layer.Id;
+        bool isolated = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+        if (isolated)
+        {
+            active.MaskOnly = active.MaskOnly == row.Layer.Id ? null : row.Layer.Id;
+            active.MaskTarget = row.Layer.Id;
+        }
+        else
+        {
+            active.MaskOnly = null;
+            active.MaskTarget = active.MaskTarget == row.Layer.Id ? null : row.Layer.Id;
+        }
         Refresh();
     }
 
@@ -193,6 +212,8 @@ public partial class MainWindow
         if (active is null || ActiveLayer() is not { } layer) return;
         if (layer.Mask is null && !Run("mask.add", 0, layer.Id)) return;
         active.MaskTarget = layer.Id;
+        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt))
+            active.MaskOnly = active.MaskOnly == layer.Id ? null : layer.Id;
         Refresh();
     }
 
@@ -240,6 +261,11 @@ public partial class MainWindow
         string id = Format.Id();
         string text = "Text", font = "Liberation Sans", color = foreground;
         double size = 48;
+        if (kind == LayerKind.Fill)
+        {
+            if (ColorPickerDialog.Show(this, "Fill layer color", foreground) is not { } fill) return;
+            color = fill;
+        }
         if (kind == LayerKind.Text)
         {
             var input = Form("Create text layer", ("Text", text), ("Font family", font), ("Size (pixels)", size.ToString()),
@@ -260,7 +286,7 @@ public partial class MainWindow
                 origin = new(local.X, local.Y);
             }
         }
-        string name = kind == LayerKind.Raster ? NextLayerName("Layer") : kind.ToString();
+        string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), _ => kind.ToString() };
         Run("layer.create", new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
             Width: width, Height: height, Text: text, Font: font, Size: size, Color: color), selectId: id);
     }
@@ -384,11 +410,6 @@ public partial class MainWindow
             var values = Form("Layer opacity", ("Opacity (0–100)", (layer.Opacity * 100).ToString()));
             if (values is not null) Guard(() => RunLayer("layer.opacity", Number(values[0]) / 100));
         }));
-        if (layer.Mask is not null)
-            properties.Children.Add(Button("Remove mask", () =>
-            {
-                if (Confirm("Remove this mask?")) RunLayer("mask.remove", 0);
-            }));
         if (effectEditor is not null) PopulateEffects(layer);
     }
 
@@ -496,7 +517,25 @@ public partial class MainWindow
             EffectKind.Opacity => [(0, 1)],
             _ => [(0, 100)]
         };
-        var v = BuildForm(EffectName(effect.Kind), fields, ranges);
+        var documentEngine = active?.Engine;
+        var target = ActiveLayer();
+        void Live(string[]? values)
+        {
+            preview = null;
+            try
+            {
+                if (values is not null && documentEngine is not null && target is not null &&
+                    values.All(value => double.TryParse(value, out double number) && double.IsFinite(number)))
+                {
+                    var edited = effect with { A = Number(values[0]), B = values.Length == 2 ? Number(values[1]) : 0 };
+                    bool exists = target.Effects.Any(item => item.Id == effect.Id);
+                    preview = documentEngine.Preview(Command.Of(exists ? "effect.update" : "effect.add", edited, target.Id));
+                }
+            }
+            catch (InvalidDataException) { }
+            UpdateCanvas();
+        }
+        var v = BuildForm(EffectName(effect.Kind), fields, ranges, Live);
         Effect? result = null;
         if (v is not null) Guard(() => result = effect with { A = Number(v[0]), B = v.Length == 2 ? Number(v[1]) : 0 });
         return result;
@@ -515,7 +554,8 @@ public partial class MainWindow
 
     private void RefreshLog()
     {
-        commandLog.ItemsSource = active?.Log.Skip(active.LogStart).Select(entry => new LogRow(entry)).ToArray();
+        commandLog.ItemsSource = active is { } session
+            ? DisplayLog(session).Skip(session.LogStart).Select(entry => new LogRow(entry)).ToArray() : null;
         var recording = ((WrapPanel)logPanel.Children[0]).Children.OfType<CheckBox>().Single();
         recording.IsEnabled = active is not null;
         recording.IsChecked = active?.Recording == true;
@@ -526,7 +566,7 @@ public partial class MainWindow
         if (active is null) return;
         var entries = selection ? commandLog.SelectedItems.OfType<LogRow>().Select(row => row.Entry) : active.Log;
         var commands = entries.Where(entry => entry.Success && entry.Command.Name is not ("document.save" or "document.export"))
-            .OrderBy(entry => active.Log.IndexOf(entry)).Select(entry => entry.Command).ToArray();
+            .Select(entry => entry.Command).ToArray();
         if (commands.Length == 0) { Say("There are no editing commands to copy or export."); return; }
         Guard(() =>
         {

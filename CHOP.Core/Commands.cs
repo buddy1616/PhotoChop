@@ -26,7 +26,9 @@ public sealed record GroupArgs(string Id, string Name, string[] Layers, string? 
 public sealed record MergeArgs(string Id, string Name, string[] Layers);
 public sealed record EffectOrder(string Id, int Index);
 public sealed record LogEntry(DateTimeOffset Timestamp, string? DocumentId, Command Command, bool Success, string? Error);
-public sealed record HistoryEntry(string Name, Document Document);
+public sealed record HistoryEntry(string Name, Document Document, Command? Command = null,
+    bool Enabled = true, string? Error = null);
+public sealed record HistoryChange(int Index, int? Destination = null, bool? Enabled = null);
 
 /// <summary>Executes the same document commands for all clients and retains reversible snapshots.</summary>
 public sealed class CommandEngine(IRasterBackend backend)
@@ -43,6 +45,10 @@ public sealed class CommandEngine(IRasterBackend backend)
     public int Cursor => cursor;
     public IReadOnlyList<HistoryEntry> History => history;
     public event Action<LogEntry>? Executed;
+
+    /// <summary>Evaluate a command against the current document without committing it.</summary>
+    public Document Preview(Command command) => Apply(Current ?? throw new InvalidOperationException("Open a document first."), command);
+
 
     public Document? Execute(Command command)
     {
@@ -117,6 +123,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return;
             case "history.undo": cursor = Math.Max(0, cursor - 1); return;
             case "history.redo": cursor = Math.Min(history.Count - 1, cursor + 1); return;
+            case "history.change":
+                ChangeHistory(command.Read<HistoryChange>());
+                return;
             case "history.go":
                 int step = checked(command.Read<int>() - HistoryBase);
                 if (step < 0 || step >= history.Count) throw new InvalidDataException("Invalid history position.");
@@ -127,9 +136,33 @@ public sealed class CommandEngine(IRasterBackend backend)
         var result = Apply(current, command);
         if (ReferenceEquals(result, current)) return;
         history.RemoveRange(cursor + 1, history.Count - cursor - 1);
-        history.Add(new(command.Name, result));
+        history.Add(new(command.Name, result, command));
         cursor = history.Count - 1;
         TrimHistory();
+    }
+
+    private void ChangeHistory(HistoryChange change)
+    {
+        int index = change.Index - HistoryBase;
+        int destination = (change.Destination ?? change.Index) - HistoryBase;
+        if (index <= 0 || index >= history.Count || destination <= 0 || destination >= history.Count)
+            throw new InvalidDataException("Choose a history entry after the starting state.");
+        var entry = history[index];
+        history.RemoveAt(index);
+        history.Insert(destination, entry with { Enabled = change.Enabled ?? entry.Enabled });
+        for (int i = Math.Min(index, destination); i < history.Count; i++)
+        {
+            var next = history[i];
+            var doc = history[i - 1].Document;
+            string? error = null;
+            if (next.Enabled && next.Command is { } command)
+            {
+                try { doc = Apply(doc, command); }
+                catch (Exception failure) { error = failure.Message; }
+            }
+            history[i] = next with { Document = doc, Error = error };
+        }
+        cursor = history.Count - 1;
     }
 
     private void TrimHistory()
@@ -137,13 +170,21 @@ public sealed class CommandEngine(IRasterBackend backend)
         const long limit = 384L * 1024 * 1024;
         var seen = new HashSet<Pixels>(ReferenceEqualityComparer.Instance);
         var seenMasks = new HashSet<AlphaMask>(ReferenceEqualityComparer.Instance);
+        var seenMaps = new HashSet<byte[]>(ReferenceEqualityComparer.Instance);
         long size = 0;
         for (int i = history.Count - 1; i >= 0; i--)
         {
+            if (history[i].Document.SelectionMask is { } selection && seenMaps.Add(selection.Bits))
+                size += selection.Bits.LongLength;
             foreach (var layer in history[i].Document.AllLayers())
             {
                 if (layer.Pixels is { } pixels && seen.Add(pixels)) size += pixels.Rgba.LongLength;
                 if (layer.Mask is { } mask && seenMasks.Add(mask)) size += mask.Alpha.LongLength;
+                foreach (var shift in layer.PixelShifts)
+                {
+                    if (seenMaps.Add(shift.Bits)) size += shift.Bits.LongLength;
+                    if (shift.Patch is { } patch && seen.Add(patch)) size += patch.Rgba.LongLength;
+                }
             }
             if (i == history.Count - 1 || (size <= limit && history.Count - i <= 250)) continue;
             history.RemoveRange(0, i + 1);
@@ -189,12 +230,30 @@ public sealed class CommandEngine(IRasterBackend backend)
         {
             case "document.selection":
                 var selection = command.Args.Deserialize<Area?>(Format.Json);
-                return doc with { Selection = selection is { } area ? Clip(area, doc) : null };
+                return doc with { Selection = selection is { } area ? Clip(area, doc) : null, SelectionMask = null };
+            case "selection.rectangle":
+                var rect = command.Read<RectangleSelection>();
+                if (rect.Mode == SelectionMode.Replace)
+                    return WithSelection(doc, (Clip(rect.Area, doc), null));
+                return SelectPixels(doc, (x, y) =>
+                {
+                    bool hit = Contains(rect.Area, x, y);
+                    return rect.Mode == SelectionMode.Add ? hit || doc.Selected(x, y) : !hit && doc.Selected(x, y);
+                });
+            case "selection.translate":
+                var shift = command.Read<PointD>();
+                return TranslateSelection(doc, PixelDelta(shift.X), PixelDelta(shift.Y));
+            case "selection.resize":
+                return ResizeSelection(doc, command.Read<int>());
+            case "selection.colorRange":
+                var query = command.Read<ColorSelection>();
+                return WithSelection(doc, PixelSelection.ColorRange(backend.Composite(doc), query));
+            case "document.chop":
             case "document.crop":
-                var crop = Clip(command.Read<Area>(), doc);
-                return doc with { Width = crop.Width, Height = crop.Height, Selection = null,
+                var chop = Clip(command.Read<Area>(), doc);
+                return doc with { Width = chop.Width, Height = chop.Height, Selection = null, SelectionMask = null,
                     Layers = layers.Select(layer => layer with { Transform = layer.Transform with
-                    { X = layer.Transform.X - crop.X, Y = layer.Transform.Y - crop.Y } }).ToArray() };
+                    { X = layer.Transform.X - chop.X, Y = layer.Transform.Y - chop.Y } }).ToArray() };
             case "layer.create":
                 var create = command.Read<LayerArgs>();
                 NewId(create.Id);
@@ -207,8 +266,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (create.Text is null || string.IsNullOrWhiteSpace(create.Font)) throw new InvalidDataException("Invalid text settings.");
                 return With(Insert(layers, create.Parent, null, new(create.Id, Name(create.Name), create.Kind)
                 { Transform = create.Transform ?? new(), Text = create.Text, Font = create.Font, Size = create.Size,
-                    Color = create.Color, Width = create.Kind == LayerKind.Raster ? doc.Width : create.Width,
-                    Height = create.Kind == LayerKind.Raster ? doc.Height : create.Height }));
+                    Color = create.Color, Width = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Width : create.Width,
+                    Height = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Height : create.Height }));
             case "layer.importPng":
                 var import = command.Read<ImportArgs>();
                 NewId(import.Id);
@@ -256,6 +315,11 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return Edit(layer => layer.Kind == LayerKind.Text ? layer with
                     { Text = text.Text, Font = text.Font, Size = text.Size, Color = text.Color }
                     : throw new InvalidDataException("Select a text layer."));
+            case "layer.fill":
+                var fillColor = command.Read<string>();
+                Format.Color(fillColor);
+                return Edit(layer => layer.Kind == LayerKind.Fill ? layer with { Color = fillColor }
+                    : throw new InvalidDataException("Select a fill layer."));
             case "layer.shape":
                 var shape = command.Read<ShapeArgs>();
                 Format.Color(shape.Color);
@@ -277,17 +341,32 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (selectedLayer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to edit pixels.");
                 if (selectedLayer.Pixels is null) return doc;
                 var edited = backend.EditSelection(doc, selectedLayer, selectedArea, delta);
-                var updated = Edit(layer => layer with { Pixels = edited.Pixels, RasterX = edited.X, RasterY = edited.Y });
-                if (delta is not { } displacement) return updated;
-                var translated = selectedArea with { X = selectedArea.X + (int)Math.Round(displacement.X),
-                    Y = selectedArea.Y + (int)Math.Round(displacement.Y) };
-                return updated with { Selection = Intersects(translated, doc) ? Clip(translated, doc) : null };
+                if (edited.Shift is not { } pixelEdit) return doc;
+                var updated = Edit(layer => layer with { PixelShifts = [.. layer.PixelShifts, pixelEdit] });
+                return delta is { } displacement
+                    ? TranslateSelection(updated, PixelDelta(displacement.X), PixelDelta(displacement.Y)) : updated;
             case "mask.add":
                 return Edit(layer => layer.Mask is not null ? layer : layer with
                 {
                     Mask = new AlphaMask(doc.Width, doc.Height, Enumerable.Repeat((byte)255, doc.Width * doc.Height).ToArray())
                 });
-            case "mask.remove": return Edit(layer => layer with { Mask = null });
+            case "mask.remove": return Edit(layer => layer with { Mask = null, MaskEnabled = true });
+            case "mask.enable": return Edit(layer => layer with { MaskEnabled = command.Read<bool>() });
+            case "mask.paste":
+                var pasted = command.Read<AlphaMask>();
+                Format.Dimensions(pasted.Width, pasted.Height);
+                if (pasted.Alpha?.Length != pasted.Width * pasted.Height) throw new InvalidDataException("Invalid mask data.");
+                return Edit(layer => layer with { Mask = pasted, MaskEnabled = true });
+            case "mask.bake":
+                return Edit(layer =>
+                {
+                    if (layer.Mask is null) return layer;
+                    RequireEditableSubtree(layers, [layer]);
+                    var source = layer with { Opacity = 1, Blend = Blend.Normal, Visible = true, MaskEnabled = true };
+                    var pixels = backend.Composite(doc with { Layers = [source] });
+                    return new Layer(layer.Id, layer.Name, LayerKind.Raster) { Pixels = pixels, Visible = layer.Visible,
+                        Opacity = layer.Opacity, Blend = layer.Blend };
+                });
             case "mask.paintStroke":
             case "layer.paintStroke":
                 var stroke = command.Read<StrokeArgs>();
@@ -302,7 +381,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                     return Edit(layer => layer.Mask is not null ? layer with { Mask = backend.PaintMask(doc, layer, stroke) }
                         : throw new InvalidDataException("Add a mask before painting it."));
                 return Edit(layer => layer.Kind == LayerKind.Raster
-                    ? layer with { Pixels = backend.Stroke(doc, layer, stroke) }
+                    ? PaintRaster(doc, layer, stroke)
                     : throw new InvalidDataException("Select a raster layer to paint."));
             case "layer.reorder":
                 var moving = Wanted();
@@ -310,6 +389,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 EnsureEditable(layers, moving.Id);
                 CheckParent(order.Parent);
                 if (moving.Id == order.Before && ParentOf(layers, moving.Id) == order.Parent) return doc;
+                if (order.Parent == moving.Id || new Document("", 1, 1) { Layers = moving.Children }.AllLayers()
+                    .Any(child => child.Id == order.Parent)) return doc;
                 return With(Insert(Remove(layers, moving.Id), order.Parent, order.Before, moving));
             case "layer.group":
                 var group = command.Read<GroupArgs>();
@@ -378,6 +459,93 @@ public sealed class CommandEngine(IRasterBackend backend)
         var list = effects.ToList();
         edit(list);
         return list.ToArray();
+    }
+
+    private Layer PaintRaster(Document doc, Layer layer, StrokeArgs stroke)
+    {
+        var pixels = backend.Stroke(doc, layer, stroke);
+        if (layer.PixelShifts.Length == 0) return layer with { Pixels = pixels };
+        var effective = backend.ResolveRaster(layer)!;
+        var prior = effective.Pixels.Rgba;
+        int left = pixels.Width, top = pixels.Height, right = -1, bottom = -1;
+        for (int y = 0; y < pixels.Height; y++)
+        for (int x = 0; x < pixels.Width; x++)
+        {
+            int i = (y * pixels.Width + x) * 4;
+            if (prior.AsSpan(i, 4).SequenceEqual(pixels.Rgba.AsSpan(i, 4))) continue;
+            left = Math.Min(left, x);
+            top = Math.Min(top, y);
+            right = Math.Max(right, x);
+            bottom = Math.Max(bottom, y);
+        }
+        if (right < left) return layer;
+        int width = right - left + 1, height = bottom - top + 1;
+        var rgba = new byte[width * height * 4];
+        for (int y = 0; y < height; y++)
+            Array.Copy(pixels.Rgba, ((top + y) * pixels.Width + left) * 4, rgba, y * width * 4, width * 4);
+        var patch = new Pixels(width, height, rgba);
+        var area = new Area(effective.X + left, effective.Y + top, width, height);
+        return layer with { PixelShifts = [.. layer.PixelShifts, new(area, [], 0, 0, Patch: patch)] };
+    }
+
+    private static int PixelDelta(double value) => (int)Math.Round(Range(value, -32768, 32768));
+
+    private static bool Contains(Area area, int x, int y) => x >= area.X && y >= area.Y &&
+        x < (long)area.X + area.Width && y < (long)area.Y + area.Height;
+
+    private static Document WithSelection(Document doc, (Area? Bounds, PixelSelection? Mask) selection) =>
+        doc with { Selection = selection.Bounds, SelectionMask = selection.Mask };
+
+    private static Document SelectPixels(Document doc, Func<int, int, bool> test) =>
+        WithSelection(doc, PixelSelection.Create(doc.Width, doc.Height, test));
+
+    private static Document TranslateSelection(Document doc, int dx, int dy)
+    {
+        if (doc.Selection is not { } selection || (dx == 0 && dy == 0)) return doc;
+        if (doc.SelectionMask is not null) return SelectPixels(doc, (x, y) => doc.Selected(x - dx, y - dy));
+        var shifted = selection with { X = selection.X + dx, Y = selection.Y + dy };
+        return WithSelection(doc, (Intersects(shifted, doc) ? Clip(shifted, doc) : null, null));
+    }
+
+    private static Document ResizeSelection(Document doc, int amount)
+    {
+        if (doc.Selection is not { } selection || amount == 0) return doc;
+        Range(amount, -16384, 16384);
+        if (doc.SelectionMask is null)
+        {
+            var area = new Area(selection.X - amount, selection.Y - amount, selection.Width + 2 * amount, selection.Height + 2 * amount);
+            return WithSelection(doc, (area.Width > 0 && area.Height > 0 && Intersects(area, doc) ? Clip(area, doc) : null, null));
+        }
+
+        // A separable sliding window grows or shrinks arbitrary selections in linear time.
+        int width = doc.Width, height = doc.Height, radius = Math.Abs(amount);
+        bool expand = amount > 0;
+        int window = radius * 2 + 1;
+        var horizontal = new byte[width * height];
+        var result = new byte[horizontal.Length];
+        for (int y = 0; y < height; y++)
+        {
+            int count = 0;
+            for (int x = 0; x <= Math.Min(radius, width - 1); x++) if (doc.Selected(x, y)) count++;
+            for (int x = 0; x < width; x++)
+            {
+                horizontal[y * width + x] = (byte)((expand ? count > 0 : count == window) ? 1 : 0);
+                if (x - radius >= 0 && doc.Selected(x - radius, y)) count--;
+                if (x + radius + 1 < width && doc.Selected(x + radius + 1, y)) count++;
+            }
+        }
+        for (int x = 0; x < width; x++)
+        {
+            int count = 0;
+            for (int y = 0; y <= Math.Min(radius, height - 1); y++) count += horizontal[y * width + x];
+            for (int y = 0; y < height; y++)
+            {
+                result[y * width + x] = (byte)((expand ? count > 0 : count == window) ? 1 : 0);
+                if (y - radius >= 0) count -= horizontal[(y - radius) * width + x];
+                if (y + radius + 1 < height) count += horizontal[(y + radius + 1) * width + x];
+            }
+        }
+        return SelectPixels(doc, (x, y) => result[y * width + x] != 0);
     }
 
     private static Pixels SolidPixels(int width, int height, uint argb)
