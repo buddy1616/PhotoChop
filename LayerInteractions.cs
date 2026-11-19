@@ -39,10 +39,160 @@ public partial class MainWindow
         })).IsEnabled = Clipboard.ContainsData(MaskClipboardFormat);
     }
 
+    private void BuildLayerMenu()
+    {
+        var menu = new ContextMenu();
+        layers.ContextMenu = menu;
+        string? target = null;
+        layers.PreviewMouseRightButtonDown += (_, e) => target = RowAt(e.OriginalSource)?.Layer.Id;
+        layers.ContextMenuOpening += (_, e) =>
+        {
+            menu.Items.Clear();
+            var layer = active?.Engine.Current?.AllLayers().FirstOrDefault(item => item.Id == target) ?? ActiveLayer();
+            if (layer is null) { e.Handled = true; return; }
+            string kind = layer.Kind == LayerKind.Group ? "Group" : "Layer";
+            Item(menu, "Rename and Effects…", () => { SelectLayer(layer.Id); Rename(); });
+            if (layer.Kind == LayerKind.Text) Item(menu, "Edit Text…", () => EditText(layer));
+            Item(menu, "Duplicate", () => Duplicate(layer.Id));
+            Item(menu, $"Bake {kind}…", () =>
+            {
+                if (Confirm($"Bake this {kind.ToLowerInvariant()} into a single raster layer? This applies its visible transforms, effects, and mask."))
+                    Run("layer.bake", 0, layer.Id, layer.Id);
+            }).IsEnabled = Editable(active!.Engine.Current!, layer.Id);
+            Item(menu, "Delete", () => Run("layer.delete", 0, layer.Id));
+        };
+        menu.Closed += (_, _) => target = null;
+    }
+
+    private void SelectLayer(string id)
+    {
+        if (active is null) return;
+        var all = active.Engine.Current?.AllLayers().ToArray() ?? [];
+        for (string? child = id; child is not null;)
+        {
+            var parent = all.FirstOrDefault(layer => layer.Children.Any(item => item.Id == child));
+            if (parent is null) break;
+            active.Collapsed.Remove(parent.Id);
+            child = parent.Id;
+        }
+        active.ActiveId = id;
+        active.MaskTarget = active.MaskOnly = null;
+        Refresh();
+    }
+
+    private static Button LayerIconButton(string icon, string name, Action click, bool glyph = true)
+    {
+        var button = Button(icon, click, name);
+        button.MinWidth = 36;
+        button.MinHeight = 28;
+        button.FontSize = 15;
+        if (glyph) button.FontFamily = new FontFamily("Segoe MDL2 Assets");
+        System.Windows.Automation.AutomationProperties.SetName(button, name);
+        return button;
+    }
+
+    private Button LayerMaskButton()
+    {
+        var button = LayerIconButton("Mask", "Add a mask. Alt-click for grayscale view.", AddOrSelectMask, glyph: false);
+        button.Content = new System.Windows.Shapes.Path
+        {
+            Width = 18, Height = 14, Stretch = Stretch.Uniform,
+            Data = Geometry.Parse("M 0,1 L 18,1 18,13 0,13 Z M 9,3 A 4,4 0 1 0 9.01,3 Z")
+        };
+        ((System.Windows.Shapes.Path)button.Content).SetBinding(System.Windows.Shapes.Shape.StrokeProperty,
+            new System.Windows.Data.Binding(nameof(Foreground)) { Source = button });
+        return button;
+    }
+
+    private static void BindLayerDrop(Button button, string hint, Action<string> drop, bool copy = true)
+    {
+        button.AllowDrop = true;
+        string name = (string)button.ToolTip;
+        void Hover(DragEventArgs e)
+        {
+            e.Effects = e.Data.GetDataPresent(typeof(LayerRow)) ? (copy ? DragDropEffects.Copy : DragDropEffects.Move) : DragDropEffects.None;
+            if (e.Effects != DragDropEffects.None)
+            {
+                button.BorderBrush = Brushes.DeepSkyBlue;
+                button.ToolTip = hint;
+            }
+            e.Handled = true;
+        }
+        void Clear()
+        {
+            button.ClearValue(Control.BorderBrushProperty);
+            button.ToolTip = name;
+        }
+        button.DragOver += (_, e) => Hover(e);
+        button.DragLeave += (_, _) => Clear();
+        button.Drop += (_, e) =>
+        {
+            Clear();
+            if (e.Data.GetData(typeof(LayerRow)) is LayerRow row) drop(row.Layer.Id);
+            e.Handled = true;
+        };
+    }
+
+    private void ToggleRowTransforms(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: LayerRow row })
+            Run("layer.transformsEnabled", !row.Layer.TransformsEnabled, row.Layer.Id);
+    }
+
     private void BuildHistoryMenu()
     {
         var menu = new ContextMenu();
         history.ContextMenu = menu;
+        history.AllowDrop = true;
+        Point press = default;
+        int pressedIndex = -1;
+        int IndexAt(object original)
+        {
+            var item = original is DependencyObject source ? ItemsControl.ContainerFromElement(history, source) as ListBoxItem : null;
+            return item is null ? -1 : history.ItemContainerGenerator.IndexFromContainer(item);
+        }
+
+        history.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            pressedIndex = IndexAt(e.OriginalSource);
+            if (pressedIndex < 0) return;
+            history.Focus();
+            press = e.GetPosition(history);
+            e.Handled = true;
+        };
+        history.PreviewMouseLeftButtonUp += (_, e) =>
+        {
+            int index = pressedIndex;
+            pressedIndex = -1;
+            if (index >= 0 && index == IndexAt(e.OriginalSource) && active?.Engine is { } engine)
+            {
+                Run("history.go", index + engine.HistoryBase);
+                e.Handled = true;
+            }
+        };
+        history.PreviewMouseMove += (_, e) =>
+        {
+            if (e.LeftButton != MouseButtonState.Pressed || pressedIndex <= 0 ||
+                (e.GetPosition(history) - press).Length < Math.Max(5, SystemParameters.MinimumVerticalDragDistance)) return;
+            int index = pressedIndex;
+            pressedIndex = -1;
+            DragDrop.DoDragDrop(history, new DataObject("CHOP.HistoryIndex", index), DragDropEffects.Move);
+            e.Handled = true;
+        };
+        history.DragOver += (_, e) =>
+        {
+            int target = IndexAt(e.OriginalSource);
+            e.Effects = target > 0 && e.Data.GetData("CHOP.HistoryIndex") is int source && source != target
+                ? DragDropEffects.Move : DragDropEffects.None;
+            e.Handled = true;
+        };
+        history.Drop += (_, e) =>
+        {
+            int target = IndexAt(e.OriginalSource);
+            if (target > 0 && e.Data.GetData("CHOP.HistoryIndex") is int source && source != target && active?.Engine is { } engine)
+                Run("history.change", new HistoryChange(engine.HistoryBase + source, engine.HistoryBase + target));
+            e.Handled = true;
+        };
         history.PreviewMouseRightButtonDown += (_, e) =>
         {
             var item = e.OriginalSource is DependencyObject source
@@ -83,7 +233,7 @@ public partial class MainWindow
         var adorner = new LayerDragAdorner(layers, row.Layer.Name) { Pointer = Mouse.GetPosition(layers) };
         layerDragAdorner = adorner;
         layer?.Add(adorner);
-        try { DragDrop.DoDragDrop(layers, new DataObject(typeof(LayerRow), row), DragDropEffects.Move); }
+        try { DragDrop.DoDragDrop(layers, new DataObject(typeof(LayerRow), row), DragDropEffects.Move | DragDropEffects.Copy); }
         finally { layer?.Remove(adorner); layerDragAdorner = null; }
     }
 

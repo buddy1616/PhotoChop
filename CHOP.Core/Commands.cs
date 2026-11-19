@@ -292,7 +292,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 }
                 var duplicateParent = ParentOf(layers, source.Id);
                 CheckParent(duplicateParent);
-                return With(Insert(layers, duplicateParent, source.Id, Copy(source, duplicateId) with { Name = source.Name + " copy" }));
+                return With(Insert(layers, duplicateParent, source.Id, Copy(source, duplicateId) with { Name = source.Name + " (copy)" }));
             case "layer.rename": return Edit(layer => layer with { Name = Name(command.Read<string>()) });
             case "layer.visibility": return Edit(layer => layer with { Visible = command.Read<bool>() }, false);
             case "layer.lock":
@@ -303,6 +303,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var blend = command.Read<Blend>();
                 if (!Enum.IsDefined(blend)) throw new InvalidDataException("Unknown blend mode.");
                 return Edit(layer => layer with { Blend = blend });
+            case "layer.transformsEnabled":
+                return Edit(layer => layer with { TransformsEnabled = command.Read<bool>() });
             case "layer.transform":
                 var transform = command.Read<Transform>();
                 CheckTransform(transform);
@@ -357,15 +359,26 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Format.Dimensions(pasted.Width, pasted.Height);
                 if (pasted.Alpha?.Length != pasted.Width * pasted.Height) throw new InvalidDataException("Invalid mask data.");
                 return Edit(layer => layer with { Mask = pasted, MaskEnabled = true });
+            case "layer.bake":
             case "mask.bake":
                 return Edit(layer =>
                 {
-                    if (layer.Mask is null) return layer;
+                    bool maskOnly = command.Name == "mask.bake";
+                    if (maskOnly && layer.Mask is null) return layer;
                     RequireEditableSubtree(layers, [layer]);
-                    var source = layer with { Opacity = 1, Blend = Blend.Normal, Visible = true, MaskEnabled = true };
-                    var pixels = backend.Composite(doc with { Layers = [source] });
-                    return new Layer(layer.Id, layer.Name, LayerKind.Raster) { Pixels = pixels, Visible = layer.Visible,
-                        Opacity = layer.Opacity, Blend = layer.Blend };
+                    var activeBlend = EffectiveBlend(layer);
+                    var source = layer with
+                    {
+                        Opacity = 1, Blend = Blend.Normal, Visible = true,
+                        MaskEnabled = maskOnly || layer.MaskEnabled,
+                        Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray()
+                    };
+                    var baked = backend.RasterizeLayer(doc, source);
+                    return new Layer(layer.Id, layer.Name, LayerKind.Raster)
+                    {
+                        Pixels = baked.Pixels, RasterX = baked.X, RasterY = baked.Y, Visible = layer.Visible,
+                        Opacity = layer.Opacity, Blend = activeBlend, Width = baked.Pixels.Width, Height = baked.Pixels.Height
+                    };
                 });
             case "mask.paintStroke":
             case "layer.paintStroke":
@@ -460,6 +473,9 @@ public sealed class CommandEngine(IRasterBackend backend)
         edit(list);
         return list.ToArray();
     }
+
+    public static Blend EffectiveBlend(Layer layer) =>
+        layer.Effects.LastOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.BlendMode)?.Mode ?? layer.Blend;
 
     private Layer PaintRaster(Document doc, Layer layer, StrokeArgs stroke)
     {

@@ -21,19 +21,26 @@ public partial class MainWindow
         });
     }
 
+    private Window? colorRangeWindow;
+    private Func<Session, Point, bool>? sampleColorRange;
+    private Session? colorRangeSession;
+    private bool samplingCanvas;
+    private bool IsSamplingCanvas(Session session) => samplingCanvas && ReferenceEquals(colorRangeSession, session);
+
     private void SelectColorRange()
     {
-        if (active?.Engine.Current is not { } document) return;
+        if (colorRangeWindow is { } existing) { existing.Activate(); return; }
+        if (active is not { } session || session.Engine.Current is not { } document) return;
         Guard(() =>
         {
-            var pixels = ReferenceEquals(document, active.Rendered) ? active.Composite! : renderer.Composite(document);
-            if (ColorRangeDialog(pixels) is { } query) Run("selection.colorRange", query);
+            var pixels = ReferenceEquals(document, session.Rendered) ? session.Composite! : renderer.Composite(document);
+            ShowColorRange(session, pixels);
         });
     }
 
-    private ColorSelection? ColorRangeDialog(Pixels pixels)
+    private void ShowColorRange(Session session, Pixels pixels)
     {
-        var dialog = new Window { Owner = this, Title = "Color Range", Width = 475, SizeToContent = SizeToContent.Height,
+        var dialog = new Window { Owner = EditorOwner, Title = "Color Range", Width = 330, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize };
         var root = new StackPanel { Margin = new Thickness(14) };
         dialog.Content = root;
@@ -51,24 +58,29 @@ public partial class MainWindow
         root.Children.Add(fuzziness);
         var invert = new CheckBox { Content = "Invert", Margin = new Thickness(0, 5, 0, 7) };
         root.Children.Add(invert);
-        var grid = new Grid { Height = 170, Margin = new Thickness(0, 4, 0, 4) };
-        grid.ColumnDefinitions.Add(new ColumnDefinition());
-        grid.ColumnDefinitions.Add(new ColumnDefinition());
-        var source = new Image { Source = EditorCanvas.Bitmap(pixels), Stretch = Stretch.Uniform, Cursor = ToolCursors.Eyedropper };
-        var matching = new Image { Stretch = Stretch.Uniform, Margin = new Thickness(6, 0, 0, 0) };
-        Grid.SetColumn(matching, 1);
-        grid.Children.Add(source);
-        grid.Children.Add(matching);
-        root.Children.Add(grid);
+        var sampleHint = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 5) };
+        root.Children.Add(sampleHint);
+        var matching = new Image { Height = 145, Stretch = Stretch.Uniform, Margin = new Thickness(0, 4, 0, 6) };
+        root.Children.Add(matching);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-        var ok = Button("OK", () => dialog.DialogResult = true);
-        ok.IsDefault = true;
-        buttons.Children.Add(ok);
-        buttons.Children.Add(new Button { Content = "Cancel", IsCancel = true, Margin = new Thickness(3), Padding = new Thickness(8, 3, 8, 3) });
-        root.Children.Add(buttons);
-
         string sampled = foreground;
         ColorSelection Query() => new(choices[(string)list.SelectedItem] ?? sampled, fuzziness.Value, invert.IsChecked == true);
+        var ok = Button("OK", () =>
+        {
+            var query = Query();
+            dialog.Close();
+            if (sessions.Contains(session))
+            {
+                SelectTab(session);
+                Run("selection.colorRange", query);
+            }
+        });
+        ok.IsDefault = true;
+        buttons.Children.Add(ok);
+        buttons.Children.Add(Button("Cancel", dialog.Close));
+        dialog.PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { dialog.Close(); e.Handled = true; } };
+        root.Children.Add(buttons);
+
         void Update()
         {
             amount.Text = $"Fuzziness  {fuzziness.Value:0}";
@@ -85,24 +97,39 @@ public partial class MainWindow
                 preview[i + 3] = 255;
             }
             matching.Source = EditorCanvas.Bitmap(new Pixels(width, height, preview));
-            source.Cursor = list.SelectedIndex == 0 ? ToolCursors.Eyedropper : Cursors.Arrow;
+            sampleHint.Text = list.SelectedIndex == 0 ? "Click the document canvas to sample a color." : "White areas show the color range.";
+            samplingCanvas = list.SelectedIndex == 0;
+            session.View.Cursor = samplingCanvas ? ToolCursors.Eyedropper : ToolCursor(tool);
         }
-        source.MouseLeftButtonDown += (_, e) =>
+        sampleColorRange = (target, point) =>
         {
-            if (list.SelectedIndex != 0) return;
-            var point = e.GetPosition(source);
-            double scale = Math.Min(source.ActualWidth / pixels.Width, source.ActualHeight / pixels.Height);
-            int x = (int)Math.Floor((point.X - (source.ActualWidth - pixels.Width * scale) / 2) / scale);
-            int y = (int)Math.Floor((point.Y - (source.ActualHeight - pixels.Height * scale) / 2) / scale);
-            if (x < 0 || y < 0 || x >= pixels.Width || y >= pixels.Height) return;
-            int i = (y * pixels.Width + x) * 4;
-            sampled = $"#FF{pixels.Rgba[i]:X2}{pixels.Rgba[i + 1]:X2}{pixels.Rgba[i + 2]:X2}";
-            Update();
+            if (!ReferenceEquals(target, session) || list.SelectedIndex != 0) return false;
+            Guard(() =>
+            {
+                var current = session.Engine.Current!;
+                pixels = ReferenceEquals(current, session.Rendered) ? session.Composite! : renderer.Composite(current);
+                int x = (int)Math.Floor(point.X), y = (int)Math.Floor(point.Y);
+                if (x < 0 || y < 0 || x >= pixels.Width || y >= pixels.Height) return;
+                int i = (y * pixels.Width + x) * 4;
+                sampled = $"#FF{pixels.Rgba[i]:X2}{pixels.Rgba[i + 1]:X2}{pixels.Rgba[i + 2]:X2}";
+                Update();
+            });
+            return true;
+        };
+        dialog.Closed += (_, _) =>
+        {
+            sampleColorRange = null;
+            colorRangeWindow = null;
+            colorRangeSession = null;
+            samplingCanvas = false;
+            session.View.Cursor = ToolCursor(tool);
         };
         list.SelectionChanged += (_, _) => Update();
         fuzziness.ValueChanged += (_, _) => Update();
         invert.Click += (_, _) => Update();
+        colorRangeSession = session;
         Update();
-        return dialog.ShowDialog() == true ? Query() : null;
+        colorRangeWindow = dialog;
+        dialog.Show();
     }
 }

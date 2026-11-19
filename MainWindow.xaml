@@ -18,6 +18,11 @@
                 <Button DockPanel.Dock="Right" Click="ToggleRowLock" ToolTip="Toggle lock" Padding="4,1" Margin="3,0,0,0">
                     <TextBlock Text="{Binding LockGlyph}" FontFamily="Segoe MDL2 Assets" />
                 </Button>
+                <Button DockPanel.Dock="Right" Click="ToggleRowTransforms" ToolTip="{Binding TransformTip}"
+                        Padding="4,1" Margin="3,0,0,0" Opacity="{Binding TransformIconOpacity}">
+                    <Path Width="14" Height="14" Stretch="Uniform" Data="M 1 1 L 13 1 13 13 1 13 Z M 0 4 L 0 0 4 0 M 10 14 L 14 14 14 10"
+                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+                </Button>
                 <Button DockPanel.Dock="Right" Click="ToggleRowMask" ContextMenuOpening="OpenMaskMenu" ToolTip="Select mask for painting. Alt-click to view only the mask." Padding="4,1"
                         Content="{Binding MaskLabel}" Visibility="{Binding MaskVisibility}">
                     <Button.ContextMenu><ContextMenu /></Button.ContextMenu>
@@ -30,12 +35,24 @@
     </Window.Resources>
     <DockPanel>
         <Menu x:Name="Menus" DockPanel.Dock="Top" />
-        <Border DockPanel.Dock="Top" Background="#242730" Padding="8,5">
-            <WrapPanel x:Name="ToolOptions" VerticalAlignment="Center" />
-        </Border>
         <StatusBar DockPanel.Dock="Bottom" Background="#242730">
             <TextBlock x:Name="Status" Foreground="#D4D9E4" Margin="6,2" />
         </StatusBar>
-        <dock:DockingManager x:Name="Dock" />
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition />
+            </Grid.ColumnDefinitions>
+            <ContentControl x:Name="ToolPantry" Width="126" Background="#242730"
+                            HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+            <DockPanel Grid.Column="1">
+                <Border DockPanel.Dock="Top" Background="#242730" Padding="8,4" Height="40">
+                    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                        <StackPanel x:Name="ToolOptions" Orientation="Horizontal" VerticalAlignment="Center" />
+                    </ScrollViewer>
+                </Border>
+                <dock:DockingManager x:Name="Dock" />
+            </DockPanel>
+        </Grid>
     </DockPanel>
 </Window>

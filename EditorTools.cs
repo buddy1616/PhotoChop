@@ -19,6 +19,12 @@ public partial class MainWindow
     private SKMatrix moveParentInverse = SKMatrix.Identity;
     private Point gestureStart;
     private Point panOrigin;
+    private enum MarqueeStyle { Normal, FixedRatio, FixedSize }
+    private MarqueeStyle marqueeStyle;
+    private double marqueeWidth = 1;
+    private double marqueeHeight = 1;
+    private double fixedWidth = 100;
+    private double fixedHeight = 100;
     private Area? selectionOrigin;
     private Chop.Core.SelectionMode selectionMode;
     private PointD? selectionDragDelta;
@@ -47,6 +53,12 @@ public partial class MainWindow
         var view = e.GetPosition(canvas);
         var point = canvas.FromView(view);
         canvas.Focus();
+        if (e.ChangedButton == MouseButton.Left && !Keyboard.IsKeyDown(Key.Space) &&
+            sampleColorRange?.Invoke(active, point) == true)
+        {
+            e.Handled = true;
+            return;
+        }
         if (e.ChangedButton == MouseButton.Middle || (e.ChangedButton == MouseButton.Left && Keyboard.IsKeyDown(Key.Space)))
         {
             gesture = "Pan";
@@ -59,13 +71,13 @@ public partial class MainWindow
             gestureStart = point;
             switch (tool)
             {
-                case "Text": CreateLayer(LayerKind.Text, new(Math.Floor(point.X), Math.Floor(point.Y))); return;
+                case "Text": EditTextAt(doc, new PointD(point.X, point.Y)); return;
                 case "Eyedropper": Sample(point); return;
                 case "Transform": EditTransform(); return;
                 case "Selection":
                     selectionMode = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? Chop.Core.SelectionMode.Subtract
                         : Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? Chop.Core.SelectionMode.Add : Chop.Core.SelectionMode.Replace;
-                    if (selectionMode == Chop.Core.SelectionMode.Replace &&
+                    if (marqueeStyle != MarqueeStyle.FixedSize && selectionMode == Chop.Core.SelectionMode.Replace &&
                         doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y)) && doc.Selection is { } selection &&
                         point.X >= selection.X && point.X < selection.X + selection.Width &&
                         point.Y >= selection.Y && point.Y < selection.Y + selection.Height)
@@ -85,6 +97,7 @@ public partial class MainWindow
                         return;
                     }
                     moveId = target.Id;
+                    if (!target.TransformsEnabled) { Say("Enable transforms before moving this layer."); return; }
                     moveOriginal = target.Transform;
                     moveParentInverse = SKMatrix.Identity;
                     var parent = doc.AllLayers().FirstOrDefault(layer => layer.Children.Any(child => child.Id == target.Id));
@@ -215,7 +228,21 @@ public partial class MainWindow
     private Rect GestureBounds(Point current)
     {
         if (selectionOrigin is not { } selection || active?.Engine.Current is not { } doc)
+        {
+            if (gesture != "Selection") return new Rect(gestureStart, current);
+            if (marqueeStyle == MarqueeStyle.FixedSize)
+                return new Rect(Math.Floor(current.X - fixedWidth / 2), Math.Floor(current.Y - fixedHeight / 2), fixedWidth, fixedHeight);
+            if (marqueeStyle == MarqueeStyle.FixedRatio)
+            {
+                var motion = current - gestureStart;
+                double scale = Math.Min(Math.Max(Math.Abs(motion.X) / marqueeWidth, Math.Abs(motion.Y) / marqueeHeight),
+                    32768 / Math.Max(marqueeWidth, marqueeHeight));
+                var end = new Point(gestureStart.X + (motion.X < 0 ? -1 : 1) * marqueeWidth * scale,
+                    gestureStart.Y + (motion.Y < 0 ? -1 : 1) * marqueeHeight * scale);
+                return new Rect(gestureStart, end);
+            }
             return new Rect(gestureStart, current);
+        }
         var delta = current - gestureStart;
         int x = (int)Math.Clamp(Math.Round(selection.X + delta.X), 0, doc.Width - selection.Width);
         int y = (int)Math.Clamp(Math.Round(selection.Y + delta.Y), 0, doc.Height - selection.Height);
@@ -305,16 +332,24 @@ public partial class MainWindow
         if (active is null) return;
         canvas.Zoom = active.Zoom;
         canvas.Offset = active.Offset;
+        UpdateScrollBars(active);
         canvas.InvalidateVisual();
         RefreshNavigation();
         Say();
+    }
+
+    private static void UpdateScrollBars(Session session)
+    {
+        if (session.Engine.Current is { } doc)
+            session.Viewport.UpdateBars(session.Offset, session.Zoom, doc.Width, doc.Height);
     }
 
     private void SetTool(string name)
     {
         CancelGesture();
         tool = name;
-        foreach (var session in sessions) session.View.Cursor = ToolCursor(name);
+        foreach (var session in sessions)
+            session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(name);
         RefreshTools();
     }
 
@@ -349,6 +384,7 @@ public partial class MainWindow
             SliderOption("Hardness", 0, 1, hardness, value => hardness = value);
             SliderOption("Opacity", 0, 1, brushOpacity, value => brushOpacity = value);
         }
+        if (tool == "Selection") AddMarqueeOptions();
         if (tool == "Shape")
         {
             var list = new ComboBox { ItemsSource = new[] { LayerKind.Rectangle, LayerKind.Ellipse }, SelectedItem = shapeKind };
@@ -356,6 +392,40 @@ public partial class MainWindow
             ToolOptions.Children.Add(list);
         }
         if (tool == "Transform") ToolOptions.Children.Add(Button("Edit transform…", EditTransform));
+    }
+
+    private void AddMarqueeOptions()
+    {
+        OptionLabel("Style");
+        var styles = new ComboBox { ItemsSource = new[] { "Normal", "Fixed Ratio", "Fixed Size" }, SelectedIndex = (int)marqueeStyle };
+        styles.SelectionChanged += (_, _) =>
+        {
+            if (styles.SelectedIndex < 0) return;
+            marqueeStyle = (MarqueeStyle)styles.SelectedIndex;
+            RefreshTools();
+        };
+        ToolOptions.Children.Add(styles);
+        if (marqueeStyle == MarqueeStyle.Normal) return;
+        bool size = marqueeStyle == MarqueeStyle.FixedSize;
+        AddNumber(size ? "Width (px)" : "Width ratio", size ? fixedWidth : marqueeWidth,
+            value => { if (size) fixedWidth = value; else marqueeWidth = value; });
+        AddNumber(size ? "Height (px)" : "Height ratio", size ? fixedHeight : marqueeHeight,
+            value => { if (size) fixedHeight = value; else marqueeHeight = value; });
+
+        void AddNumber(string label, double initial, Action<double> assign)
+        {
+            OptionLabel(label);
+            var input = new TextBox { Text = initial.ToString(), Width = 66, Margin = new Thickness(3, 0, 0, 0),
+                VerticalContentAlignment = VerticalAlignment.Center, ToolTip = label };
+            input.TextChanged += (_, _) =>
+            {
+                bool valid = double.TryParse(input.Text, out var number) && double.IsFinite(number) && number is >= .01 and <= 16384 &&
+                    (!size || number >= 1);
+                input.BorderBrush = valid ? SystemColors.ControlDarkBrush : Brushes.OrangeRed;
+                if (valid) assign(size ? Math.Round(number) : number);
+            };
+            ToolOptions.Children.Add(input);
+        }
     }
 
     private void SwapColors()
