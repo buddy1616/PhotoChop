@@ -18,7 +18,8 @@ public partial class MainWindow : Window
 {
     private sealed class Session(CommandEngine engine)
     {
-        public EditorCanvas View { get; } = new();
+        public DocumentViewport Viewport { get; } = new();
+        public EditorCanvas View => Viewport.Canvas;
         public LayoutDocument? Tab { get; set; }
         public string? MaskOnly { get; set; }
         public CommandEngine Engine { get; } = engine;
@@ -95,7 +96,7 @@ public partial class MainWindow : Window
         ResetLayout();
         Dock.ActiveContentChanged += (_, _) =>
         {
-            if (sessions.FirstOrDefault(session => ReferenceEquals(Dock.ActiveContent, session.View)) is { } session)
+            if (sessions.FirstOrDefault(session => ReferenceEquals(Dock.ActiveContent, session.Viewport)) is { } session)
                 Activate(session);
         };
         SetTool("Move");
@@ -113,7 +114,7 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        var path = Path.Combine(settingsFolder, "layout-v2.xml");
+        var path = Path.Combine(settingsFolder, "layout-v3.xml");
         if (!File.Exists(path)) return;
         try
         {
@@ -143,7 +144,7 @@ public partial class MainWindow : Window
         try
         {
             Directory.CreateDirectory(settingsFolder);
-            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v2.xml"));
+            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v3.xml"));
             File.WriteAllText(Path.Combine(settingsFolder, "settings.json"), JsonSerializer.Serialize(preferences, Format.Json));
         }
         catch (Exception error) { MessageBox.Show(this, error.Message, "CHOP settings"); }
@@ -154,15 +155,13 @@ public partial class MainWindow : Window
         if (Dock.Layout is { } old)
             foreach (var content in old.Descendents().OfType<LayoutContent>().ToArray()) content.Content = null;
         workspace = new LayoutDocument { Title = "Documents", ContentId = "workspace", Content = emptyCanvas, CanClose = false, CanFloat = false };
-        var left = new LayoutAnchorablePane { DockWidth = new GridLength(126) };
-        left.Children.Add(NewPanel("Tools"));
         var center = new LayoutDocumentPane();
         documentPane = center;
         if (sessions.Count == 0) center.Children.Add(workspace);
         foreach (var session in sessions)
         {
             session.Tab!.Parent?.RemoveChild(session.Tab);
-            session.Tab.Content = session.View;
+            session.Tab.Content = session.Viewport;
             center.Children.Add(session.Tab);
         }
         var right = new LayoutAnchorablePane { DockHeight = new GridLength(3, GridUnitType.Star) };
@@ -171,7 +170,7 @@ public partial class MainWindow : Window
         upper.Children.Add(NewPanel("Navigation"));
         var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
             Children = { upper, right } };
-        Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { left, center, sidebar } } };
+        Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { center, sidebar } } };
         right.SelectedContentIndex = 0;
         if (active?.Tab is { } selected) selected.IsActive = true;
     }
@@ -183,6 +182,11 @@ public partial class MainWindow : Window
 
     private void TogglePanel(string title)
     {
+        if (title == "Tools")
+        {
+            ToolPantry.Visibility = ToolPantry.IsVisible ? Visibility.Collapsed : Visibility.Visible;
+            return;
+        }
         var panel = Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(item => item.ContentId == title);
         if (panel is null)
         {
@@ -359,13 +363,20 @@ public partial class MainWindow : Window
         if (pane is null) throw new InvalidOperationException("No document pane is available.");
 
         sessions.Add(session);
-        session.Tab = new LayoutDocument { Title = session.Title, Content = session.View,
+        session.Tab = new LayoutDocument { Title = session.Title, Content = session.Viewport,
             ContentId = "document-" + Format.Id(), CanClose = true, CanFloat = true };
         session.Tab.Closing += (_, e) => e.Cancel = !CanClose(session);
         session.Tab.Closed += (_, _) => RemoveSession(session);
         session.View.SizeChanged += (_, _) =>
         {
             if (ReferenceEquals(active, session) && session.NeedsFit && canvas.ActualWidth > 0) Fit();
+            else UpdateScrollBars(session);
+        };
+        session.Viewport.Scrolled += offset =>
+        {
+            Activate(session);
+            session.Offset = offset;
+            UpdateView();
         };
         session.View.PreviewMouseDown += (_, _) => Activate(session);
         session.View.GotKeyboardFocus += (_, _) => Activate(session);
@@ -502,6 +513,7 @@ public partial class MainWindow : Window
     private void RemoveSession(Session session)
     {
         if (!sessions.Remove(session)) return;
+        if (ReferenceEquals(colorRangeSession, session)) colorRangeWindow?.Close();
         if (sessions.Count == 0 && workspace?.Parent is null)
         {
             var pane = Dock.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault();
@@ -602,6 +614,7 @@ public partial class MainWindow : Window
             canvas.Selection = selected with { X = selected.X + (int)delta.X, Y = selected.Y + (int)delta.Y };
         canvas.Zoom = active.Zoom;
         canvas.Offset = active.Offset;
+        UpdateScrollBars(active);
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;

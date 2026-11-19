@@ -25,6 +25,102 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void TransformToggleBypassesOnlyUnbakedTransformsAndSurvivesSave()
+    {
+        var engine = NewEngine(10, 8);
+        Layer(engine, new("group", "Group", LayerKind.Group, Transform: new(1, 0)));
+        Layer(engine, new("art", "Art", LayerKind.Rectangle, Parent: "group", Width: 2, Height: 1,
+            Color: "#FFFF0000", Transform: new(1, 1)));
+        engine.Execute(Command.Of("effect.add", new Effect("shift", EffectKind.Transform, Spatial: new(2, 0)), "art"));
+        engine.Execute(Command.Of("effect.add", new Effect("gray", EffectKind.Grayscale), "art"));
+        var transformed = Composite(engine);
+        engine.Execute(Command.Of("layer.transformsEnabled", false, "art"));
+        var bypassed = Composite(engine);
+        int At(int x, int y) => (y * 10 + x) * 4;
+        Assert.Equal(0, bypassed[At(4, 1) + 3]);
+        Assert.Equal(0, bypassed[At(0, 0) + 3]);
+        Assert.Equal(255, bypassed[At(1, 0) + 3]);
+        Assert.Equal(bypassed[At(1, 0)], bypassed[At(1, 0) + 1]);
+        string path = Path.Combine(folder, "transforms.chop");
+        ProjectFile.Save(path, engine.Current!);
+        var restored = ProjectFile.Open(path);
+        Assert.False(restored.Layers[0].Children[0].TransformsEnabled);
+        Assert.Equal(bypassed, renderer.Composite(restored).Rgba);
+        engine.Execute(Command.Of("layer.transformsEnabled", true, "art"));
+        Assert.Equal(transformed, Composite(engine));
+        engine.Execute(Command.Of("layer.transformsEnabled", false, "group"));
+        Assert.Equal(255, Composite(engine)[At(3, 1) + 3]);
+    }
+
+    [Fact]
+    public void BakeGroupRetainsNameAndAppearanceAndReplacesChildrenWithPixels()
+    {
+        var engine = NewEngine(12, 8);
+        Layer(engine, new("group", "Artwork", LayerKind.Group, Transform: new(2, 1)));
+        Layer(engine, new("left", "Left", LayerKind.Rectangle, Parent: "group", Width: 2, Height: 2, Color: "#FFFF2080"));
+        Layer(engine, new("right", "Right", LayerKind.Rectangle, Parent: "group", Width: 3, Height: 2,
+            Transform: new(3, 0), Color: "#FF30FF80"));
+        engine.Execute(Command.Of("effect.add", new Effect("gray", EffectKind.Grayscale), "group"));
+        engine.Execute(Command.Of("layer.opacity", .8, "group"));
+        var before = Composite(engine);
+        engine.Execute(Command.Of("layer.bake", 0, "group"));
+        var baked = Assert.Single(engine.Current!.Layers);
+        Assert.Equal("Artwork", baked.Name);
+        Assert.Equal("group", baked.Id);
+        Assert.Equal(LayerKind.Raster, baked.Kind);
+        Assert.NotNull(baked.Pixels);
+        Assert.Empty(baked.Children);
+        Assert.Empty(baked.Effects);
+        Assert.Equal(new Transform(), baked.Transform);
+        Assert.Equal(before, Composite(engine));
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(LayerKind.Group, engine.Current.Layers[0].Kind);
+    }
+
+    [Fact]
+    public void BakeLayerRetainsPixelsOutsideCanvasAndClearsEditableTransforms()
+    {
+        var engine = NewEngine(8, 6);
+        Layer(engine, new("art", "Artwork", LayerKind.Rectangle, Width: 3, Height: 2,
+            Transform: new(-2, 1, 2, 1), Color: "#FF95CAFF"));
+        engine.Execute(Command.Of("effect.add", new Effect("shift", EffectKind.Transform, Spatial: new(-1, 0)), "art"));
+        var before = Composite(engine);
+        engine.Execute(Command.Of("layer.bake", 0, "art"));
+        var baked = Assert.Single(engine.Current!.Layers);
+        Assert.Equal(-4, baked.RasterX);
+        Assert.Equal(6, baked.Pixels!.Width);
+        Assert.Empty(baked.Effects);
+        Assert.Equal(before, Composite(engine));
+    }
+
+    [Fact]
+    public void BakeNestedGroupUsesTheVisibleAreaInParentCoordinates()
+    {
+        var engine = NewEngine(12, 8);
+        Layer(engine, new("parent", "Parent", LayerKind.Group, Transform: new(-16, 0)));
+        Layer(engine, new("nested", "Nested", LayerKind.Group, Parent: "parent", Transform: new(2, 1)));
+        Layer(engine, new("art", "Artwork", LayerKind.Rectangle, Parent: "nested", Width: 2, Height: 2,
+            Transform: new(16, 0), Color: "#FFFF8040"));
+        var before = Composite(engine);
+        Assert.Contains((byte)255, before);
+        engine.Execute(Command.Of("layer.bake", 0, "nested"));
+        Assert.Equal(16, engine.Current!.Layers[0].Children[0].RasterX);
+        Assert.Equal(before, Composite(engine));
+    }
+
+    [Fact]
+    public void DuplicateGroupAppendsCopyAndClonesChildIdentities()
+    {
+        var engine = NewEngine();
+        Layer(engine, new("group", "Artwork", LayerKind.Group));
+        Layer(engine, new("art", "Child", LayerKind.Raster, Parent: "group"));
+        engine.Execute(Command.Of("layer.duplicate", "copy", "group"));
+        var copied = engine.Current!.Layers.Single(layer => layer.Id == "copy");
+        Assert.Equal("Artwork (copy)", copied.Name);
+        Assert.Equal("copy-1", Assert.Single(copied.Children).Id);
+    }
+
+    [Fact]
     public void RasterMovesAndLaterEditsRetainTheSourceAndRoundTrip()
     {
         var engine = NewEngine(12, 6);

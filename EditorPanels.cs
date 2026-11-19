@@ -19,6 +19,8 @@ public partial class MainWindow
         public Visibility MaskVisibility => Layer.Mask is null ? Visibility.Collapsed : Visibility.Visible;
         public string GroupGlyph => Collapsed ? "▸" : "▾";
         public string LockGlyph => Layer.Locked ? "\uE72E" : "\uE785";
+        public string TransformTip => Layer.TransformsEnabled ? "Hide unbaked transforms" : "Show unbaked transforms";
+        public double TransformIconOpacity => Layer.TransformsEnabled ? 1 : .4;
         public string MaskLabel => !Layer.MaskEnabled ? "⊘ Mask" : EditingMask ? "▣ Mask" : "□ Mask";
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
         public Thickness NameIndent => Layer.Kind == LayerKind.Group ? new(2, 0, 0, 0) : new(Depth * 13 + 16, 0, 0, 0);
@@ -55,14 +57,22 @@ public partial class MainWindow
     private void BuildPanels()
     {
         var layerButtons = new WrapPanel { Margin = new Thickness(5) };
-        layerButtons.Children.Add(Button("New Raster Layer", () => CreateLayer(LayerKind.Raster)));
-        var maskButton = Button("Mask", AddOrSelectMask, "Add a mask. Alt-click for grayscale view.");
+        var rasterButton = LayerIconButton("+", "New Raster Layer", () => CreateLayer(LayerKind.Raster), glyph: false);
+        var groupButton = LayerIconButton("\uE8B7", "New Group", () => CreateLayer(LayerKind.Group));
+        var deleteButton = LayerIconButton("\uE74D", "Delete Layer or Group", DeleteLayer);
+        layerButtons.Children.Add(rasterButton);
+        layerButtons.Children.Add(groupButton);
+        BindLayerDrop(rasterButton, "Copy here", Duplicate);
+        BindLayerDrop(groupButton, "Copy here", Duplicate);
+        BindLayerDrop(deleteButton, "Delete here", id =>
+        {
+            if (Confirm("Delete the dropped layer or group?")) Run("layer.delete", 0, id);
+        }, copy: false);
+        var maskButton = LayerMaskButton();
         maskButton.ContextMenu = new ContextMenu();
         maskButton.ContextMenuOpening += OpenMaskMenu;
         layerButtons.Children.Add(maskButton);
-        layerButtons.Children.Add(Button("Rename", Rename));
-        layerButtons.Children.Add(Button("Duplicate", Duplicate));
-        layerButtons.Children.Add(Button("Delete Layer", DeleteLayer));
+        layerButtons.Children.Add(deleteButton);
         DockPanel.SetDock(properties, System.Windows.Controls.Dock.Top);
         DockPanel.SetDock(layerButtons, System.Windows.Controls.Dock.Bottom);
         layersPanel.Children.Add(properties);
@@ -85,6 +95,7 @@ public partial class MainWindow
             if (RowAt(e.OriginalSource) is null || IsButton(e.OriginalSource)) return;
             if (ActiveLayer() is { Kind: LayerKind.Fill } fill && ColorPickerDialog.Show(this, "Fill layer color", fill.Color) is { } color)
                 Run("layer.fill", color, fill.Id);
+            else if (ActiveLayer() is { Kind: LayerKind.Text } text) EditText(text);
             else if (ActiveLayer()?.Kind != LayerKind.Fill) Rename();
             e.Handled = true;
         };
@@ -124,6 +135,7 @@ public partial class MainWindow
             e.Handled = true;
         };
 
+        BuildLayerMenu();
         history.Margin = new Thickness(4);
         history.SelectionChanged += (_, _) =>
         {
@@ -154,7 +166,7 @@ public partial class MainWindow
         DockPanel.SetDock(toolColors, System.Windows.Controls.Dock.Bottom);
         toolDock.Children.Add(toolColors);
         toolDock.Children.Add(new ScrollViewer { Content = toolsPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        panelContent.Add("Tools", toolDock);
+        ToolPantry.Content = toolDock;
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("History", history);
@@ -268,11 +280,8 @@ public partial class MainWindow
         }
         if (kind == LayerKind.Text)
         {
-            var input = Form("Create text layer", ("Text", text), ("Font family", font), ("Size (pixels)", size.ToString()),
-                ("Color #AARRGGBB", color));
-            if (input is null) return;
-            if (!Guard(() => size = Number(input[2]))) return;
-            (text, font, color) = (input[0], input[1], input[3]);
+            if (TextLayerDialog.Show(EditorOwner, "Create text layer", new TextArgs(text, font, size, color)) is not { } input) return;
+            (text, font, size, color) = (input.Text, input.Font, input.Size, input.Color);
         }
         string? parent = DestinationGroup();
         if (active?.Engine.Current is not { } doc) return;
@@ -286,14 +295,15 @@ public partial class MainWindow
                 origin = new(local.X, local.Y);
             }
         }
-        string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), _ => kind.ToString() };
+        string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), LayerKind.Group => NextLayerName("Group"), _ => kind.ToString() };
         Run("layer.create", new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
             Width: width, Height: height, Text: text, Font: font, Size: size, Color: color), selectId: id);
     }
 
-    private void Duplicate()
+    private void Duplicate() { if (active?.ActiveId is { } source) Duplicate(source); }
+
+    private void Duplicate(string source)
     {
-        if (active?.ActiveId is not { } source) return;
         string id = Format.Id();
         Run("layer.duplicate", id, source, id);
     }
@@ -458,12 +468,43 @@ public partial class MainWindow
             Number(v[2]), Number(v[3]), Number(v[4]))));
     }
 
+    private Window EditorOwner => Window.GetWindow(canvas) ?? this;
+
     private void EditText()
     {
-        if (ActiveLayer() is not { } layer) return;
-        var v = Form("Edit text", ("Text", layer.Text), ("Font family", layer.Font), ("Size (pixels)", layer.Size.ToString()),
-            ("Color #AARRGGBB", layer.Color));
-        if (v is not null) Guard(() => RunLayer("layer.text", new TextArgs(v[0], v[1], Number(v[2]), v[3])));
+        if (ActiveLayer() is { Kind: LayerKind.Text } layer) EditText(layer);
+    }
+
+    private void EditText(Layer layer)
+    {
+        if (active?.Engine.Current is not { } doc || !Editable(doc, layer.Id))
+        {
+            Say("Unlock the text layer to edit it.");
+            return;
+        }
+        if (TextLayerDialog.Show(EditorOwner, "Edit text layer", new TextArgs(layer.Text, layer.Font, layer.Size, layer.Color)) is { } values)
+            Run("layer.text", values, layer.Id, layer.Id);
+    }
+
+    private void EditTextAt(Document doc, PointD point)
+    {
+        Layer? Hit(IEnumerable<Layer> layers)
+        {
+            foreach (var layer in layers.Reverse())
+            {
+                if (!layer.Visible || layer.Opacity == 0) continue;
+                if (layer.Kind == LayerKind.Group && Hit(layer.Children) is { } child) return child;
+                if (renderer.HitsText(doc, layer, point)) return layer;
+            }
+            return null;
+        }
+
+        if (Hit(doc.Layers) is { } text)
+        {
+            SelectLayer(text.Id);
+            EditText(text);
+        }
+        else CreateLayer(LayerKind.Text, new PointD(Math.Floor(point.X), Math.Floor(point.Y)));
     }
 
     private void EditShape()

@@ -28,6 +28,8 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     [JsonIgnore] public Pixels? Pixels { get; init; }
     [JsonIgnore] public AlphaMask? Mask { get; init; }
     [JsonIgnore] public PixelShift[] PixelShifts { get; init; } = [];
+    public bool TransformsEnabled { get; init; } = true;
+    [JsonIgnore] public Transform ActiveTransform => TransformsEnabled ? Transform : new();
     public bool MaskEnabled { get; init; } = true;
     public int RasterX { get; init; }
     public int RasterY { get; init; }
@@ -88,6 +90,7 @@ public interface IRasterBackend
     Pixels DecodePng(byte[] data);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
+    RasterEdit RasterizeLayer(Document document, Layer layer);
     RasterEdit? ResolveRaster(Layer layer);
     RasterEdit EditSelection(Document document, Layer layer, Area selection, PointD? delta);
     AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);

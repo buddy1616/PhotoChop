@@ -30,7 +30,7 @@ internal static class ColorPickerDialog
             HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
         area.Children.Add(indicator);
         root.Children.Add(area);
-        var hue = new Slider { Minimum = 0, Maximum = 360, Margin = new Thickness(0, 4, 0, 4) };
+        var hue = new HueSpectrum { Height = 22, Margin = new Thickness(0, 4, 0, 4) };
         var alpha = new Slider { Minimum = 0, Maximum = 255, TickFrequency = 1, IsSnapToTickEnabled = true };
         root.Children.Add(new TextBlock { Text = "Hue" });
         root.Children.Add(hue);
