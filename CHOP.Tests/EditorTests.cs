@@ -25,7 +25,127 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
-    public void TransformToggleBypassesOnlyUnbakedTransformsAndSurvivesSave()
+    public void ResizeCanvasUsesAnchorWithoutScalingThenImageSizeScalesEditableLayers()
+    {
+        var engine = NewEngine(6, 4);
+        Layer(engine, new("art", "Artwork", LayerKind.Rectangle, Width: 2, Height: 1, Color: "#FFFF0000"));
+        engine.Execute(Command.Of("document.resizeCanvas", new ResizeCanvasArgs(10, 8, 2, 1)));
+        var moved = engine.Current!;
+        Assert.Equal(new Placement(4, 2), moved.Layers[0].Placement);
+        Assert.Equal((6, 4), (engine.History[^2].Document.Width, engine.History[^2].Document.Height));
+        Assert.Equal(0, Composite(engine)[3]);
+        Assert.Equal(255, Composite(engine)[(2 * 10 + 4) * 4 + 3]);
+        engine.Execute(Command.Of("document.resizeImage", new ResizeImageArgs(20, 16, 144)));
+        var sized = engine.Current!;
+        Assert.Equal((20, 16, 144d), (sized.Width, sized.Height, sized.PixelsPerInch));
+        Assert.Equal(LayerKind.Rectangle, sized.Layers[0].Kind);
+        Assert.Equal(2, sized.Layers[0].Width);
+        Assert.Equal(255, Composite(engine)[(4 * 20 + 8) * 4 + 3]);
+        string path = Path.Combine(folder, "sized.chop");
+        ProjectFile.Save(path, sized);
+        Assert.Equal(Composite(engine), renderer.Composite(ProjectFile.Open(path)).Rgba);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(10, engine.Current!.Width);
+    }
+
+    [Fact]
+    public void ResizingDocumentScalesGroupTransformEffectsAfterCompositing()
+    {
+        var engine = NewEngine(12, 8);
+        Layer(engine, new("g", "Group", LayerKind.Group));
+        Layer(engine, new("shape", "Shape", LayerKind.Rectangle, Parent: "g", Width: 1, Height: 1, Color: "#FFFF0000"));
+        engine.Execute(Command.Of("effect.add", new Effect("shift", EffectKind.Transform, Spatial: new(3, 2)), "g"));
+        engine.Execute(Command.Of("document.resizeImage", new ResizeImageArgs(24, 16)));
+        var scaled = Composite(engine);
+        Assert.Equal(255, scaled[(4 * 24 + 6) * 4]);
+        Assert.Equal(0, scaled[(2 * 24 + 3) * 4 + 3]);
+        Assert.Equal(3, engine.Current!.Layers[0].Effects[0].Spatial!.X);
+    }
+
+    [Fact]
+    public void FlipReflectsPixelsAroundTheLayerCenterAndIsUndoable()
+    {
+        var engine = NewEngine(8, 6);
+        var original = new Pixels(2, 2,
+            [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Artwork", renderer.EncodePng(original))));
+        engine.Execute(Command.Of("layer.transform", new Transform(3, 2), "art"));
+        var before = Composite(engine);
+        int At(int x, int y) => (y * 8 + x) * 4;
+        engine.Execute(Command.Of("layer.flip", new FlipArgs(true), "art"));
+        Assert.Equal(new byte[] { 0, 255, 0, 255 }, Composite(engine)[At(3, 2)..(At(3, 2) + 4)]);
+        engine.Execute(Command.Of("layer.flip", new FlipArgs(false), "art"));
+        Assert.Equal(new byte[] { 255, 255, 255, 255 }, Composite(engine)[At(3, 2)..(At(3, 2) + 4)]);
+        Assert.Equal(original.Rgba, engine.Current!.Layers[0].Pixels!.Rgba);
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(before, Composite(engine));
+    }
+
+    [Theory]
+    [InlineData(StrokeAlignment.Inside, 2, 0)]
+    [InlineData(StrokeAlignment.Outside, 0, 2)]
+    [InlineData(StrokeAlignment.Center, 1, 1)]
+    public void StrokeUsesItsAlignmentAndDoesNotFillTheInterior(StrokeAlignment alignment, int inside, int outside)
+    {
+        var engine = NewEngine(12, 10);
+        Layer(engine, new("art", "Art", LayerKind.Raster));
+        engine.Execute(Command.Of("document.selection", new Area(3, 2, 6, 6)));
+        engine.Execute(Command.Of("layer.strokeSelection", new OutlineArgs("#FF0044FF", 2, alignment), "art"));
+        var rgba = Composite(engine);
+        for (int x = 0; x < 6; x++)
+        {
+            bool selected = x >= 3 - outside && x < 3 + inside;
+            Assert.Equal(selected ? 255 : 0, rgba[(4 * 12 + x) * 4 + 3]);
+        }
+        Assert.Equal(0, rgba[(4 * 12 + 6) * 4 + 3]);
+    }
+
+    [Fact]
+    public void FillAndColorRangeCombineSelectPixelsWithoutOverwritingSource()
+    {
+        var engine = NewEngine(7, 4);
+        var original = new Pixels(1, 1, [255, 0, 0, 255]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Artwork", renderer.EncodePng(original))));
+        engine.Execute(Command.Of("document.selection", new Area(4, 2, 2, 1)));
+        engine.Execute(Command.Of("layer.fillPixels", "#FF0000FF", "art"));
+        engine.Execute(Command.Of("selection.colorRange", new ColorSelection("#FFFF0000", 0, Mode: SelectionMode.Add)));
+        Assert.True(engine.Current!.Selected(0, 0));
+        Assert.True(engine.Current.Selected(5, 2));
+        Assert.False(engine.Current.Selected(3, 2));
+        engine.Execute(Command.Of("selection.colorRange", new ColorSelection("#FFFF0000", 0, Mode: SelectionMode.Subtract)));
+        Assert.False(engine.Current.Selected(0, 0));
+        Assert.True(engine.Current.Selected(5, 2));
+        Assert.Equal(original.Rgba, engine.Current.Layers[0].Pixels!.Rgba);
+        string path = Path.Combine(folder, "fill.chop");
+        ProjectFile.Save(path, engine.Current);
+        Assert.Equal(Composite(engine), renderer.Composite(ProjectFile.Open(path)).Rgba);
+    }
+
+    [Fact]
+    public void HistoryNamesTextAndEraserAndMotionBlurIsDirectional()
+    {
+        var engine = NewEngine(15, 15);
+        Layer(engine, new("text", "Text", LayerKind.Text));
+        Assert.Equal("Create text layer", engine.History[^1].Name);
+        Layer(engine, new("art", "Artwork", LayerKind.Raster));
+        var brush = new StrokeArgs([new(7.5, 7.5)], 1, 1, 1, "#FFFFFFFF", false);
+        engine.Execute(Command.Of("layer.paintStroke", brush, "art"));
+        engine.Execute(Command.Of("layer.paintStroke", brush with { Erase = true }, "art"));
+        Assert.Equal("Erase pixels", engine.History[^1].Name);
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("layer.visibility", false, "text"));
+        engine.Execute(Command.Of("effect.add", new Effect("blur", EffectKind.MotionBlur, A: 8), "art"));
+        Assert.Equal("Add Motion Blur", engine.History[^1].Name);
+        var rgba = Composite(engine);
+        Assert.True(rgba[(7 * 15 + 4) * 4 + 3] > 0);
+        Assert.Equal(0, rgba[(4 * 15 + 7) * 4 + 3]);
+        engine.Execute(Command.Of("layer.transformsEnabled", false, "art"));
+        Assert.Equal(0, Composite(engine)[(7 * 15 + 4) * 4 + 3]);
+    }
+
+    [Fact]
+    public void TransformToggleBypassesAllUnbakedEditsIncludingGroupDescendantsAndSurvivesSave()
     {
         var engine = NewEngine(10, 8);
         Layer(engine, new("group", "Group", LayerKind.Group, Transform: new(1, 0)));
@@ -40,7 +160,8 @@ public sealed class EditorTests : IDisposable
         Assert.Equal(0, bypassed[At(4, 1) + 3]);
         Assert.Equal(0, bypassed[At(0, 0) + 3]);
         Assert.Equal(255, bypassed[At(1, 0) + 3]);
-        Assert.Equal(bypassed[At(1, 0)], bypassed[At(1, 0) + 1]);
+        Assert.Equal(255, bypassed[At(1, 0)]);
+        Assert.Equal(0, bypassed[At(1, 0) + 1]);
         string path = Path.Combine(folder, "transforms.chop");
         ProjectFile.Save(path, engine.Current!);
         var restored = ProjectFile.Open(path);
@@ -49,7 +170,12 @@ public sealed class EditorTests : IDisposable
         engine.Execute(Command.Of("layer.transformsEnabled", true, "art"));
         Assert.Equal(transformed, Composite(engine));
         engine.Execute(Command.Of("layer.transformsEnabled", false, "group"));
-        Assert.Equal(255, Composite(engine)[At(3, 1) + 3]);
+        var plainGroup = Composite(engine);
+        Assert.Equal(255, plainGroup[At(0, 0)]);
+        Assert.Equal(0, plainGroup[At(3, 1) + 3]);
+        Assert.True(engine.Current!.Layers[0].Children[0].TransformsEnabled);
+        engine.Execute(Command.Of("layer.transformsEnabled", true, "group"));
+        Assert.Equal(transformed, Composite(engine));
     }
 
     [Fact]

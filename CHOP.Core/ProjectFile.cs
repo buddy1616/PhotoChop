@@ -63,7 +63,7 @@ public static class ProjectFile
                             return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear, patchPath);
                         }).ToArray();
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(3, document, resources, masks, shifts), Format.Json);
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(4, document, resources, masks, shifts), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -90,7 +90,7 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
@@ -117,6 +117,9 @@ public static class ProjectFile
             if (layer is null || !Format.ValidId(layer.Id) || !ids.Add(layer.Id) ||
                 !Enum.IsDefined(layer.Kind) || !Enum.IsDefined(layer.Blend) ||
                 layer.Children is null || layer.Effects is null || layer.Transform is null ||
+                layer.Placement is not { ScaleX: > 0, ScaleY: > 0 } placement ||
+                !double.IsFinite(placement.X) || !double.IsFinite(placement.Y) ||
+                !double.IsFinite(placement.ScaleX) || !double.IsFinite(placement.ScaleY) ||
                 string.IsNullOrWhiteSpace(layer.Name) || layer.Font is null || layer.Text is null ||
                 layer.Opacity is < 0 or > 1 || layer.Size is < 1 or > 512 ||
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
@@ -151,8 +154,8 @@ public static class ProjectFile
                 shifts = moves.Select((move, i) =>
                 {
                     var area = move.Source;
-                    if (area.Width <= 0 || area.Height <= 0 || area.X < left || area.Y < top ||
-                        (long)area.X + area.Width > right || (long)area.Y + area.Height > bottom)
+                    if (area.Width <= 0 || area.Height <= 0 || move.Patch is null && (area.X < left || area.Y < top ||
+                        (long)area.X + area.Width > right || (long)area.Y + area.Height > bottom))
                         throw new InvalidDataException("Invalid pixel offset area.");
                     if ((move.Clear || move.Patch is not null) && (move.Dx != 0 || move.Dy != 0) ||
                         (move.Patch is not null && (move.Clear || move.Map is not null)))

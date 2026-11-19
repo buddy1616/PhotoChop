@@ -20,6 +20,8 @@ internal sealed class EditorCanvas : FrameworkElement
     public PixelSelection? SelectionMask { get; set; }
     public Area? Selection { get; set; }
     public Rect? Marquee { get; set; }
+    internal sealed record PaintOverlay(StrokeArgs Stroke, Area? Clip);
+    public List<PaintOverlay> PendingPaint { get; } = [];
     public IReadOnlyList<PointD>? Stroke { get; set; }
     public string StrokeColor { get; set; } = "#FFFFFFFF";
     public double StrokeSize { get; set; }
@@ -47,27 +49,11 @@ internal sealed class EditorCanvas : FrameworkElement
         dc.DrawRectangle(checker, border, imageArea);
         dc.PushClip(new RectangleGeometry(imageArea));
         if (Frame is { } frame) dc.DrawImage(frame, imageArea);
+        foreach (var pending in PendingPaint)
+            DrawStroke(dc, imageArea, pending.Stroke.Points, pending.Stroke.Size, pending.Stroke.Opacity,
+                pending.Stroke.Color, pending.Stroke.Erase, pending.Clip);
         if (Stroke is { Count: > 0 } points)
-        {
-            var clip = Selection is { } area ? ViewRect(new Rect(area.X, area.Y, area.Width, area.Height)) : imageArea;
-            dc.PushClip(new RectangleGeometry(clip));
-            var color = (Color)ColorConverter.ConvertFromString(StrokeColor)!;
-            var brush = new SolidColorBrush(Erasing ? Color.FromArgb(160, 230, 230, 230) : color) { Opacity = StrokeOpacity };
-            var pen = new Pen(brush, StrokeSize * Zoom) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round };
-            if (points.Count == 1)
-                dc.DrawEllipse(brush, null, ToView(points[0]), pen.Thickness / 2, pen.Thickness / 2);
-            else
-            {
-                var path = new StreamGeometry();
-                using (var ctx = path.Open())
-                {
-                    ctx.BeginFigure(ToView(points[0]), false, false);
-                    ctx.PolyLineTo(points.Skip(1).Select(ToView).ToArray(), true, false);
-                }
-                dc.DrawGeometry(null, pen, path);
-            }
-            dc.Pop();
-        }
+            DrawStroke(dc, imageArea, points, StrokeSize, StrokeOpacity, StrokeColor, Erasing, Selection);
         if (Selection is { } selection)
         {
             if (SelectionMask is { } mask)
@@ -87,6 +73,29 @@ internal sealed class EditorCanvas : FrameworkElement
             else DrawOutline(dc, ViewRect(new Rect(selection.X, selection.Y, selection.Width, selection.Height)));
         }
         if (Marquee is { } marquee) DrawOutline(dc, ViewRect(marquee));
+        dc.Pop();
+    }
+
+    private void DrawStroke(DrawingContext dc, Rect imageArea, IReadOnlyList<PointD> points,
+        double size, double opacity, string ink, bool erasing, Area? selection)
+    {
+        var clip = selection is { } area ? ViewRect(new Rect(area.X, area.Y, area.Width, area.Height)) : imageArea;
+        dc.PushClip(new RectangleGeometry(clip));
+        var color = (Color)ColorConverter.ConvertFromString(ink)!;
+        var brush = new SolidColorBrush(erasing ? Color.FromArgb(160, 230, 230, 230) : color) { Opacity = opacity };
+        var pen = new Pen(brush, size * Zoom) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round };
+        if (points.Count == 1)
+            dc.DrawEllipse(brush, null, ToView(points[0]), pen.Thickness / 2, pen.Thickness / 2);
+        else
+        {
+            var path = new StreamGeometry();
+            using (var ctx = path.Open())
+            {
+                ctx.BeginFigure(ToView(points[0]), false, false);
+                ctx.PolyLineTo(points.Skip(1).Select(ToView).ToArray(), true, false);
+            }
+            dc.DrawGeometry(null, pen, path);
+        }
         dc.Pop();
     }
 

@@ -28,6 +28,11 @@ public sealed record EffectOrder(string Id, int Index);
 public sealed record LogEntry(DateTimeOffset Timestamp, string? DocumentId, Command Command, bool Success, string? Error);
 public sealed record HistoryEntry(string Name, Document Document, Command? Command = null,
     bool Enabled = true, string? Error = null);
+public sealed record ResizeImageArgs(int Width, int Height, double? PixelsPerInch = null);
+public sealed record ResizeCanvasArgs(int Width, int Height, int AnchorX = 1, int AnchorY = 1);
+public enum StrokeAlignment { Inside, Center, Outside }
+public sealed record OutlineArgs(string Color, int Thickness, StrokeAlignment Alignment);
+public sealed record FlipArgs(bool Horizontal);
 public sealed record HistoryChange(int Index, int? Destination = null, bool? Enabled = null);
 
 /// <summary>Executes the same document commands for all clients and retains reversible snapshots.</summary>
@@ -39,7 +44,7 @@ public sealed class CommandEngine(IRasterBackend backend)
     private Document? saved;
     public Document? Current => history.Count == 0 ? null : history[cursor].Document;
     public bool Dirty => Current is { } doc && (saved is null || doc.Width != saved.Width ||
-        doc.Height != saved.Height || !ReferenceEquals(doc.Layers, saved.Layers) ||
+        doc.Height != saved.Height || doc.PixelsPerInch != saved.PixelsPerInch || !ReferenceEquals(doc.Layers, saved.Layers) ||
         !ReferenceEquals(doc.Metadata, saved.Metadata));
     public string? Path { get; private set; }
     public int Cursor => cursor;
@@ -136,10 +141,33 @@ public sealed class CommandEngine(IRasterBackend backend)
         var result = Apply(current, command);
         if (ReferenceEquals(result, current)) return;
         history.RemoveRange(cursor + 1, history.Count - cursor - 1);
-        history.Add(new(command.Name, result, command));
+        history.Add(new(HistoryLabel(command), result, command));
         cursor = history.Count - 1;
         TrimHistory();
     }
+
+    private static string HistoryLabel(Command command) => command.Name switch
+    {
+        "layer.create" => $"Create {command.Read<LayerArgs>().Kind.ToString().ToLowerInvariant()} layer",
+        "layer.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase pixels" : "Brush stroke",
+        "mask.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase mask" : "Paint mask",
+        "layer.text" => "Edit text layer",
+        "effect.add" => $"Add {EffectLabel(command.Read<Effect>().Kind)}",
+        "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
+        "document.resizeImage" => "Image Size",
+        "document.resizeCanvas" => "Canvas Size",
+        _ => command.Name
+    };
+
+    public static string EffectLabel(EffectKind kind) => kind switch
+    {
+        EffectKind.BrightnessContrast => "Brightness / Contrast",
+        EffectKind.HueSaturation => "Hue / Saturation",
+        EffectKind.GaussianBlur => "Gaussian Blur",
+        EffectKind.MotionBlur => "Motion Blur",
+        EffectKind.BlendMode => "Blend mode",
+        _ => kind.ToString()
+    };
 
     private void ChangeHistory(HistoryChange change)
     {
@@ -247,13 +275,25 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return ResizeSelection(doc, command.Read<int>());
             case "selection.colorRange":
                 var query = command.Read<ColorSelection>();
-                return WithSelection(doc, PixelSelection.ColorRange(backend.Composite(doc), query));
+                return WithSelection(doc, PixelSelection.ColorRange(backend.Composite(doc), query, doc));
+            case "document.resizeCanvas":
+                var canvas = command.Read<ResizeCanvasArgs>();
+                Format.Dimensions(canvas.Width, canvas.Height);
+                if (canvas.AnchorX is < 0 or > 2 || canvas.AnchorY is < 0 or > 2)
+                    throw new InvalidDataException("Choose a canvas anchor.");
+                int sx = (int)((long)(canvas.Width - doc.Width) * canvas.AnchorX / 2);
+                int sy = (int)((long)(canvas.Height - doc.Height) * canvas.AnchorY / 2);
+                return Reframe(doc, canvas.Width, canvas.Height, sx, sy, 1, 1);
+            case "document.resizeImage":
+                var size = command.Read<ResizeImageArgs>();
+                Format.Dimensions(size.Width, size.Height);
+                double scaleX = (double)size.Width / doc.Width, scaleY = (double)size.Height / doc.Height;
+                return Reframe(doc, size.Width, size.Height, 0, 0, scaleX, scaleY) with
+                { PixelsPerInch = Range(size.PixelsPerInch ?? doc.PixelsPerInch, 1, 100000) };
             case "document.chop":
             case "document.crop":
                 var chop = Clip(command.Read<Area>(), doc);
-                return doc with { Width = chop.Width, Height = chop.Height, Selection = null, SelectionMask = null,
-                    Layers = layers.Select(layer => layer with { Transform = layer.Transform with
-                    { X = layer.Transform.X - chop.X, Y = layer.Transform.Y - chop.Y } }).ToArray() };
+                return Reframe(doc, chop.Width, chop.Height, -chop.X, -chop.Y, 1, 1) with { Selection = null, SelectionMask = null };
             case "layer.create":
                 var create = command.Read<LayerArgs>();
                 NewId(create.Id);
@@ -329,6 +369,26 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return Edit(layer => layer.Kind is LayerKind.Rectangle or LayerKind.Ellipse ? layer with
                     { Width = shape.Width, Height = shape.Height, Color = shape.Color }
                     : throw new InvalidDataException("Select a shape layer."));
+            case "layer.flip":
+                var flip = command.Read<FlipArgs>();
+                return Edit(layer => FlipLayer(doc, layer, flip.Horizontal));
+            case "layer.fillPixels":
+                var fillInk = Format.Color(command.Read<string>());
+                var fillBounds = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
+                return Edit(layer => ApplyInk(doc, layer, fillBounds, doc.Selection is null ? (_, _) => true : doc.Selected, fillInk));
+            case "layer.strokeSelection":
+                var outline = command.Read<OutlineArgs>();
+                uint strokeInk = Format.Color(outline.Color);
+                int thickness = (int)Range(outline.Thickness, 1, 16384);
+                if (!Enum.IsDefined(outline.Alignment) || doc.Selection is null)
+                    throw new InvalidDataException("A selection and stroke alignment are required.");
+                int outside = outline.Alignment switch { StrokeAlignment.Outside => thickness, StrokeAlignment.Center => thickness / 2, _ => 0 };
+                int inside = thickness - outside;
+                var outer = ResizeSelection(doc, outside);
+                var inner = ResizeSelection(doc, -inside);
+                return outer.Selection is { } outlineBounds
+                    ? Edit(layer => ApplyInk(doc, layer, outlineBounds, (x, y) => outer.Selected(x, y) && !inner.Selected(x, y), strokeInk))
+                    : doc;
             case "layer.clearSelection":
             case "layer.moveSelection":
                 if (doc.Selection is not { } selectedArea) return doc;
@@ -366,7 +426,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                     bool maskOnly = command.Name == "mask.bake";
                     if (maskOnly && layer.Mask is null) return layer;
                     RequireEditableSubtree(layers, [layer]);
-                    var activeBlend = EffectiveBlend(layer);
+                    var activeBlend = layer.TransformsEnabled ? EffectiveBlend(layer) : layer.Blend;
                     var source = layer with
                     {
                         Opacity = 1, Blend = Blend.Normal, Visible = true,
@@ -472,6 +532,52 @@ public sealed class CommandEngine(IRasterBackend backend)
         var list = effects.ToList();
         edit(list);
         return list.ToArray();
+    }
+
+    private static Document Reframe(Document doc, int width, int height, int x, int y, double sx, double sy)
+    {
+        var result = doc with
+        {
+            Width = width, Height = height,
+            Layers = doc.Layers.Select(layer => layer with { Placement = new(
+                layer.Placement.X * sx + x, layer.Placement.Y * sy + y,
+                layer.Placement.ScaleX * sx, layer.Placement.ScaleY * sy) }).ToArray()
+        };
+        if (doc.Selection is null) return result;
+        return SelectPixels(result, (px, py) => doc.Selected((int)Math.Floor((px - x + .5) / sx),
+            (int)Math.Floor((py - y + .5) / sy)));
+    }
+
+    private Layer FlipLayer(Document doc, Layer layer, bool horizontal)
+    {
+        if (!layer.TransformsEnabled) throw new InvalidDataException("Enable adjustments and transforms before flipping this layer.");
+        var pixels = backend.RasterizeLayer(doc, layer);
+        int left = pixels.Pixels.Width, top = pixels.Pixels.Height, right = -1, bottom = -1;
+        for (int y = 0; y < pixels.Pixels.Height; y++)
+        for (int x = 0; x < pixels.Pixels.Width; x++)
+        {
+            if (pixels.Pixels.Rgba[(y * pixels.Pixels.Width + x) * 4 + 3] == 0) continue;
+            left = Math.Min(left, x); right = Math.Max(right, x);
+            top = Math.Min(top, y); bottom = Math.Max(bottom, y);
+        }
+        if (right < left) return layer;
+        var t = layer.Transform;
+        double cx = (pixels.X + (left + right + 1) / 2d - layer.Placement.X) / layer.Placement.ScaleX;
+        double cy = (pixels.Y + (top + bottom + 1) / 2d - layer.Placement.Y) / layer.Placement.ScaleY;
+        var flipped = horizontal
+            ? t with { X = 2 * cx - t.X, Rotation = -t.Rotation, ScaleX = -t.ScaleX }
+            : t with { Y = 2 * cy - t.Y, Rotation = -t.Rotation, ScaleY = -t.ScaleY };
+        CheckTransform(flipped);
+        return layer with { Transform = flipped };
+    }
+
+    private Layer ApplyInk(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, uint color)
+    {
+        if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to fill or stroke pixels.");
+        var edit = backend.PaintArea(doc, layer, bounds, contains, color);
+        return edit.Shift is null ? layer : layer.Pixels is null
+            ? layer with { Pixels = edit.Pixels, RasterX = edit.X, RasterY = edit.Y }
+            : layer with { PixelShifts = [.. layer.PixelShifts, edit.Shift] };
     }
 
     public static Blend EffectiveBlend(Layer layer) =>
@@ -700,8 +806,8 @@ public sealed class CommandEngine(IRasterBackend backend)
     {
         Range(t.X, -1_000_000, 1_000_000);
         Range(t.Y, -1_000_000, 1_000_000);
-        Range(t.ScaleX, 0.001, 1000);
-        Range(t.ScaleY, 0.001, 1000);
+        Range(Math.Abs(t.ScaleX), 0.001, 1000);
+        Range(Math.Abs(t.ScaleY), 0.001, 1000);
         Range(t.Rotation, -360_000, 360_000);
     }
 
@@ -714,6 +820,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case EffectKind.BrightnessContrast: Range(effect.A, -1, 1); Range(effect.B, -1, 1); break;
             case EffectKind.HueSaturation: Range(effect.A, -180, 180); Range(effect.B, -1, 1); break;
             case EffectKind.GaussianBlur: Range(effect.A, 0, 100); break;
+            case EffectKind.MotionBlur: Range(effect.A, 0, 200); Range(effect.B, -180, 180); break;
             case EffectKind.Opacity: Range(effect.A, 0, 1); break;
             case EffectKind.Transform:
                 CheckTransform(effect.Spatial ?? throw new InvalidDataException("A transform effect needs transform parameters."));
