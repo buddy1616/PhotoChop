@@ -40,7 +40,7 @@ public partial class MainWindow
 
     private void ShowColorRange(Session session, Pixels pixels)
     {
-        var dialog = new Window { Owner = EditorOwner, Title = "Color Range", Width = 330, SizeToContent = SizeToContent.Height,
+        var dialog = new Window { Owner = EditorOwner, Title = "Color Range", Topmost = true, Width = 330, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize };
         var root = new StackPanel { Margin = new Thickness(14) };
         dialog.Content = root;

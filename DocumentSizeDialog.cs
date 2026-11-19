@@ -1,7 +1,6 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using Chop.Core;
 
 namespace PhotoChop;
@@ -81,24 +80,11 @@ internal static class DocumentSizeDialog
             height.Value.TextChanged += (_, _) => Sync(height, current.Height, width, current.Width);
         }
 
-        int anchorX = 1, anchorY = 1;
+        var anchor = new AnchorPicker();
         if (canvasOnly)
         {
             panel.Children.Add(new Label { Content = "Anchor", Padding = new Thickness(0, 6, 0, 4) });
-            var compass = new UniformGrid { Rows = 3, Columns = 3, Width = 114, Height = 105, HorizontalAlignment = HorizontalAlignment.Left };
-            string[] icons = ["↖", "↑", "↗", "←", "•", "→", "↙", "↓", "↘"];
-            string[] names = ["Top left", "Top center", "Top right", "Middle left", "Center", "Middle right", "Bottom left", "Bottom center", "Bottom right"];
-            for (int i = 0; i < icons.Length; i++)
-            {
-                int index = i;
-                var anchor = new RadioButton { GroupName = "CanvasAnchor", Content = icons[i], IsChecked = i == 4,
-                    HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
-                    ToolTip = names[i], FontSize = 15 };
-                System.Windows.Automation.AutomationProperties.SetName(anchor, names[i]);
-                anchor.Checked += (_, _) => (anchorX, anchorY) = (index % 3, index / 3);
-                compass.Children.Add(anchor);
-            }
-            panel.Children.Add(compass);
+            panel.Children.Add(anchor);
         }
 
         var information = new TextBlock { Margin = new Thickness(0, 8, 0, 2), TextWrapping = TextWrapping.Wrap };
@@ -116,7 +102,7 @@ internal static class DocumentSizeDialog
             }
             int w = Pixels(width, current.Width), h = Pixels(height, current.Height);
             Format.Dimensions(w, h);
-            return new(w, h, ppi, anchorX, anchorY);
+            return new(w, h, ppi, anchor.X, anchor.Y);
         }
         void Refresh()
         {

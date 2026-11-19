@@ -51,6 +51,7 @@ public sealed record Document(string Id, int Width, int Height)
     public string ColorSpace { get; init; } = "sRGB";
     public Dictionary<string, string> Metadata { get; init; } = [];
     public Layer[] Layers { get; init; } = [];
+    public Guide[] Guides { get; init; } = [];
     [JsonIgnore] public Area? Selection { get; init; }
 
     [JsonIgnore] public PixelSelection? SelectionMask { get; init; }
@@ -95,6 +96,7 @@ public interface IRasterBackend
     RasterEdit PaintArea(Document document, Layer layer, Area bounds, Func<int, int, bool> contains, uint color);
     RasterEdit RasterizeLayer(Document document, Layer layer);
     RasterEdit? ResolveRaster(Layer layer);
+    RasterEdit? TransformPixels(Document document, Layer layer, Area selection, PixelTransform transform);
     RasterEdit EditSelection(Document document, Layer layer, Area selection, PointD? delta);
     AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);
     Pixels Stroke(Document document, Layer layer, StrokeArgs stroke);

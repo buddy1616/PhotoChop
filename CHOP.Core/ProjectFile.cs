@@ -63,7 +63,7 @@ public static class ProjectFile
                             return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear, patchPath);
                         }).ToArray();
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(4, document, resources, masks, shifts), Format.Json);
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(5, document, resources, masks, shifts), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -90,12 +90,16 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
             throw new InvalidDataException("Invalid document metadata.");
         Format.Dimensions(doc.Width, doc.Height);
+        if (doc.Guides is null || doc.Guides.Any(guide => guide is null || !Format.ValidId(guide.Id) ||
+            !Enum.IsDefined(guide.Axis) || guide.Position < 0 || guide.Position > (guide.Axis == GuideAxis.Vertical ? doc.Width : doc.Height)) ||
+            doc.Guides.Select(guide => guide.Id).Distinct().Count() != doc.Guides.Length)
+            throw new InvalidDataException("Invalid guide data.");
         var ids = new HashSet<string>();
         long totalBytes = 0;
         byte[] ReadResource(Resource resource, string expected, int channels)

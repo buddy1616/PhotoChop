@@ -45,7 +45,7 @@ public sealed class CommandEngine(IRasterBackend backend)
     public Document? Current => history.Count == 0 ? null : history[cursor].Document;
     public bool Dirty => Current is { } doc && (saved is null || doc.Width != saved.Width ||
         doc.Height != saved.Height || doc.PixelsPerInch != saved.PixelsPerInch || !ReferenceEquals(doc.Layers, saved.Layers) ||
-        !ReferenceEquals(doc.Metadata, saved.Metadata));
+        !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides));
     public string? Path { get; private set; }
     public int Cursor => cursor;
     public IReadOnlyList<HistoryEntry> History => history;
@@ -154,6 +154,10 @@ public sealed class CommandEngine(IRasterBackend backend)
         "layer.text" => "Edit text layer",
         "effect.add" => $"Add {EffectLabel(command.Read<Effect>().Kind)}",
         "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
+        "layer.scale" => "Scale",
+        "layer.flip" => command.Read<FlipArgs>().Horizontal ? "Flip horizontal" : "Flip vertical",
+        "guide.set" => $"Set {command.Read<Guide>().Axis.ToString().ToLowerInvariant()} guide",
+        "guide.remove" => "Remove guide",
         "document.resizeImage" => "Image Size",
         "document.resizeCanvas" => "Canvas Size",
         _ => command.Name
@@ -294,6 +298,17 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "document.crop":
                 var chop = Clip(command.Read<Area>(), doc);
                 return Reframe(doc, chop.Width, chop.Height, -chop.X, -chop.Y, 1, 1) with { Selection = null, SelectionMask = null };
+            case "guide.set":
+                var guide = command.Read<Guide>();
+                if (!Format.ValidId(guide.Id) || !Enum.IsDefined(guide.Axis) || guide.Position < 0 ||
+                    guide.Position > (guide.Axis == GuideAxis.Vertical ? doc.Width : doc.Height))
+                    throw new InvalidDataException("The guide must be on a canvas pixel boundary.");
+                if (doc.Guides.FirstOrDefault(item => item.Id == guide.Id) == guide) return doc;
+                return doc with { Guides = [.. doc.Guides.Where(item => item.Id != guide.Id), guide] };
+            case "guide.remove":
+                var guideId = command.Read<string>();
+                return doc.Guides.Any(item => item.Id == guideId)
+                    ? doc with { Guides = doc.Guides.Where(item => item.Id != guideId).ToArray() } : doc;
             case "layer.create":
                 var create = command.Read<LayerArgs>();
                 NewId(create.Id);
@@ -369,8 +384,20 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return Edit(layer => layer.Kind is LayerKind.Rectangle or LayerKind.Ellipse ? layer with
                     { Width = shape.Width, Height = shape.Height, Color = shape.Color }
                     : throw new InvalidDataException("Select a shape layer."));
+            case "layer.scale":
+                var scale = command.Read<ScaleArgs>();
+                Range(scale.X, .001, 1000);
+                Range(scale.Y, .001, 1000);
+                if (scale.AnchorX is < 0 or > 2 || scale.AnchorY is < 0 or > 2)
+                    throw new InvalidDataException("Choose a transform anchor.");
+                if (scale.X == 1 && scale.Y == 1) return doc;
+                if (doc.Selection is { } scaleArea)
+                    return TransformSelected(doc, Wanted(), scaleArea, scale.X, scale.Y, scale.AnchorX, scale.AnchorY);
+                return Edit(layer => ScaleLayer(doc, layer, scale));
             case "layer.flip":
                 var flip = command.Read<FlipArgs>();
+                if (doc.Selection is { } flipArea)
+                    return TransformSelected(doc, Wanted(), flipArea, flip.Horizontal ? -1 : 1, flip.Horizontal ? 1 : -1, 1, 1);
                 return Edit(layer => FlipLayer(doc, layer, flip.Horizontal));
             case "layer.fillPixels":
                 var fillInk = Format.Color(command.Read<string>());
@@ -539,6 +566,9 @@ public sealed class CommandEngine(IRasterBackend backend)
         var result = doc with
         {
             Width = width, Height = height,
+            Guides = doc.Guides.Select(guide => guide with { Position = (int)Math.Round(
+                guide.Axis == GuideAxis.Vertical ? guide.Position * sx + x : guide.Position * sy + y) })
+                .Where(guide => guide.Position >= 0 && guide.Position <= (guide.Axis == GuideAxis.Vertical ? width : height)).ToArray(),
             Layers = doc.Layers.Select(layer => layer with { Placement = new(
                 layer.Placement.X * sx + x, layer.Placement.Y * sy + y,
                 layer.Placement.ScaleX * sx, layer.Placement.ScaleY * sy) }).ToArray()
@@ -548,9 +578,44 @@ public sealed class CommandEngine(IRasterBackend backend)
             (int)Math.Floor((py - y + .5) / sy)));
     }
 
-    private Layer FlipLayer(Document doc, Layer layer, bool horizontal)
+    private Document TransformSelected(Document doc, Layer layer, Area area, double sx, double sy, int anchorX, int anchorY)
     {
-        if (!layer.TransformsEnabled) throw new InvalidDataException("Enable adjustments and transforms before flipping this layer.");
+        EnsureEditable(doc.Layers, layer.Id);
+        if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to transform selected pixels.");
+        var transform = new PixelTransform(sx, sy, area.X + area.Width * anchorX / 2d, area.Y + area.Height * anchorY / 2d);
+        var edit = backend.TransformPixels(doc, layer, area, transform);
+        var changed = edit?.Shift is { } patch ? doc with
+        {
+            Layers = Update(doc.Layers, layer.Id, item => item with { PixelShifts = [.. item.PixelShifts, patch] })
+        } : doc;
+        return SelectPixels(changed, (x, y) =>
+        {
+            var previous = transform.Inverse(x + .5, y + .5);
+            return doc.Selected((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y));
+        });
+    }
+
+    private Layer ScaleLayer(Document doc, Layer layer, ScaleArgs scale)
+    {
+        var center = LayerAnchor(doc, layer, scale.AnchorX, scale.AnchorY);
+        var t = layer.Transform;
+        double radians = t.Rotation * Math.PI / 180;
+        double cos = Math.Cos(radians), sin = Math.Sin(radians);
+        double dx = center.X - t.X, dy = center.Y - t.Y;
+        double x = (cos * dx + sin * dy) * scale.X;
+        double y = (-sin * dx + cos * dy) * scale.Y;
+        var scaled = t with
+        {
+            X = center.X - (cos * x - sin * y), Y = center.Y - (sin * x + cos * y),
+            ScaleX = t.ScaleX * scale.X, ScaleY = t.ScaleY * scale.Y
+        };
+        CheckTransform(scaled);
+        return layer with { Transform = scaled };
+    }
+
+    private PointD LayerAnchor(Document doc, Layer layer, int anchorX, int anchorY)
+    {
+        if (!layer.TransformsEnabled) throw new InvalidDataException("Enable the layer’s transforms before transforming it.");
         var pixels = backend.RasterizeLayer(doc, layer);
         int left = pixels.Pixels.Width, top = pixels.Pixels.Height, right = -1, bottom = -1;
         for (int y = 0; y < pixels.Pixels.Height; y++)
@@ -560,10 +625,16 @@ public sealed class CommandEngine(IRasterBackend backend)
             left = Math.Min(left, x); right = Math.Max(right, x);
             top = Math.Min(top, y); bottom = Math.Max(bottom, y);
         }
-        if (right < left) return layer;
+        if (right < left) return new PointD(layer.Transform.X, layer.Transform.Y);
+        return new PointD(
+            (pixels.X + left + (right - left + 1) * anchorX / 2d - layer.Placement.X) / layer.Placement.ScaleX,
+            (pixels.Y + top + (bottom - top + 1) * anchorY / 2d - layer.Placement.Y) / layer.Placement.ScaleY);
+    }
+
+    private Layer FlipLayer(Document doc, Layer layer, bool horizontal)
+    {
+        var (cx, cy) = LayerAnchor(doc, layer, 1, 1);
         var t = layer.Transform;
-        double cx = (pixels.X + (left + right + 1) / 2d - layer.Placement.X) / layer.Placement.ScaleX;
-        double cy = (pixels.Y + (top + bottom + 1) / 2d - layer.Placement.Y) / layer.Placement.ScaleY;
         var flipped = horizontal
             ? t with { X = 2 * cx - t.X, Rotation = -t.Rotation, ScaleX = -t.ScaleX }
             : t with { Y = 2 * cy - t.Y, Rotation = -t.Rotation, ScaleY = -t.ScaleY };

@@ -91,8 +91,15 @@ public partial class MainWindow
         return button;
     }
 
-    private Button LayerMaskButton() => LayerArtButton("Add a mask. Alt-click for grayscale view.", AddOrSelectMask,
-        "F0 M 1,3 C 4,2 6,4 10,5 C 14,4 16,2 19,3 L 18,8 C 16,13 13,13 10,9 C 7,13 4,13 2,8 Z M 3.6,6 C 5,4.6 7,5.2 8.5,6.8 C 7,8.3 5,8.2 3.6,6 Z M 11.5,6.8 C 13,5.2 15,4.6 16.4,6 C 15,8.2 13,8.3 11.5,6.8 Z");
+    private Button LayerMaskButton()
+    {
+        var button = LayerIconButton("Mask", "Add a mask. Alt-click for grayscale view.", AddOrSelectMask, glyph: false);
+        var icon = new System.Windows.Shapes.Path { Width = 21, Height = 16, Stretch = Stretch.Uniform,
+            Data = (Geometry)FindResource("MaskIcon") };
+        icon.SetBinding(System.Windows.Shapes.Shape.FillProperty, new System.Windows.Data.Binding(nameof(Foreground)) { Source = button });
+        button.Content = icon;
+        return button;
+    }
 
     private static Button LayerArtButton(string name, Action action, string geometry)
     {
