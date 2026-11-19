@@ -63,7 +63,7 @@ public static class ProjectFile
                             return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear, patchPath);
                         }).ToArray();
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(5, document, resources, masks, shifts), Format.Json);
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(6, document, resources, masks, shifts), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -90,7 +90,7 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4 or 5)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
@@ -120,7 +120,7 @@ public static class ProjectFile
         {
             if (layer is null || !Format.ValidId(layer.Id) || !ids.Add(layer.Id) ||
                 !Enum.IsDefined(layer.Kind) || !Enum.IsDefined(layer.Blend) ||
-                layer.Children is null || layer.Effects is null || layer.Transform is null ||
+                layer.Children is null || layer.SpatialEdits is null || layer.Effects is null || layer.Transform is null ||
                 layer.Placement is not { ScaleX: > 0, ScaleY: > 0 } placement ||
                 !double.IsFinite(placement.X) || !double.IsFinite(placement.Y) ||
                 !double.IsFinite(placement.ScaleX) || !double.IsFinite(placement.ScaleY) ||
@@ -129,6 +129,11 @@ public static class ProjectFile
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
                 throw new InvalidDataException("Invalid layer metadata.");
             CommandEngine.CheckTransform(layer.Transform);
+            foreach (var spatial in layer.SpatialEdits)
+            {
+                if (spatial is null || !Enum.IsDefined(spatial.Kind)) throw new InvalidDataException("Invalid spatial edit.");
+                spatial.Matrix.Inverse();
+            }
             Format.Color(layer.Color);
             if (layer.Kind is LayerKind.Raster or LayerKind.Rectangle or LayerKind.Ellipse or LayerKind.Fill) Format.Dimensions(layer.Width, layer.Height);
             var effects = new HashSet<string>();

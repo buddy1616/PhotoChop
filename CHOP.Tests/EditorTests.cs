@@ -25,6 +25,144 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void MovingWholeLayerCommitsPlacementIndependentOfTheUnbakedTransformToggle()
+    {
+        var engine = NewEngine(20, 12);
+        Layer(engine, new("art", "Artwork", LayerKind.Rectangle, Width: 3, Height: 2, Color: "#FFFF0000"));
+        engine.Execute(Command.Of("layer.move", new PointD(5, 4), "art"));
+        engine.Execute(Command.Of("layer.transformsEnabled", false, "art"));
+        Assert.Equal(255, Composite(engine)[(4 * 20 + 5) * 4 + 3]);
+        Assert.Equal(new Area(5, 4, 3, 2), renderer.VisibleLayerBounds(engine.Current!, "art"));
+        Assert.Empty(engine.Current!.Layers[0].SpatialEdits);
+    }
+
+    [Fact]
+    public void MovingAFlippedLayerStillFollowsTheMoveDirection()
+    {
+        var engine = NewEngine(12, 6);
+        Layer(engine, new("art", "Artwork", LayerKind.Rectangle, Width: 2, Height: 2, Transform: new(3, 1), Color: "#FFFF0000"));
+        engine.Execute(Command.Of("layer.flip", new FlipArgs(true), "art"));
+        Assert.Equal(new Area(7, 1, 2, 2), renderer.VisibleLayerBounds(engine.Current!, "art"));
+        engine.Execute(Command.Of("layer.move", new PointD(2, 0), "art"));
+        Assert.Equal(new Area(9, 1, 2, 2), renderer.VisibleLayerBounds(engine.Current!, "art"));
+    }
+
+    [Fact]
+    public void WholeLayerFlipUsesCanvasCenterAndReplaysFromThePropertiesStack()
+    {
+        var engine = NewEngine(10, 6);
+        Layer(engine, new("art", "Rectangle", LayerKind.Rectangle, Transform: new(1, 2),
+            Width: 2, Height: 1, Color: "#FFFF0000"));
+        var before = Composite(engine);
+        engine.Execute(Command.Of("layer.flip", new FlipArgs(true), "art"));
+        var layer = engine.Current!.Layers[0];
+        Assert.Equal(LayerKind.Rectangle, layer.Kind);
+        Assert.Equal(new Transform(1, 2), layer.Transform);
+        Assert.Equal(SpatialKind.FlipHorizontal, Assert.Single(layer.SpatialEdits).Kind);
+        Assert.Equal(255, Composite(engine)[(2 * 10 + 7) * 4 + 3]);
+        Assert.Equal(0, Composite(engine)[(2 * 10 + 1) * 4 + 3]);
+        string path = Path.Combine(folder, "flipped.chop");
+        ProjectFile.Save(path, engine.Current);
+        Assert.Equal(Composite(engine), renderer.Composite(ProjectFile.Open(path)).Rgba);
+        engine.Execute(Command.Of("layer.toggleSpatial", 0, "art"));
+        Assert.Equal(before, Composite(engine));
+        engine.Execute(Command.Of("layer.removeSpatial", 0, "art"));
+        Assert.Empty(engine.Current.Layers[0].SpatialEdits);
+    }
+
+    [Fact]
+    public void ProjectiveSkewMapsAllCornersAndKeepsWholeLayerEditable()
+    {
+        var area = new Area(0, 0, 12, 8);
+        PointD[] corners = [new(2, 0), new(12, 0), new(11, 8), new(0, 8)];
+        var matrix = Projective.FromQuad(area, corners);
+        var inverse = matrix.Inverse();
+        PointD[] source = [new(0, 0), new(12, 0), new(12, 8), new(0, 8)];
+        for (int i = 0; i < 4; i++)
+        {
+            var mapped = matrix.Map(source[i].X, source[i].Y);
+            Assert.Equal(corners[i].X, mapped.X, 8);
+            Assert.Equal(corners[i].Y, mapped.Y, 8);
+            Assert.Equal(source[i].X, inverse.Map(mapped.X, mapped.Y).X, 8);
+        }
+        var engine = NewEngine(12, 8);
+        Layer(engine, new("art", "Rectangle", LayerKind.Rectangle, Width: 4, Height: 6, Color: "#FFFF0000"));
+        var before = Composite(engine);
+        engine.Execute(Command.Of("layer.warp", new WarpArgs(SpatialKind.Skew, area, corners), "art"));
+        Assert.NotEqual(before, Composite(engine));
+        Assert.Null(engine.Current!.Layers[0].Pixels);
+        engine.Execute(Command.Of("layer.transformsEnabled", false, "art"));
+        Assert.Equal(before, Composite(engine));
+    }
+
+    [Fact]
+    public void RotateSelectedPixelsLeavesUnselectedPixelsInPlace()
+    {
+        var engine = NewEngine(8, 8);
+        var raster = new Pixels(3, 1, [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Artwork", renderer.EncodePng(raster))));
+        engine.Execute(Command.Of("layer.transform", new Transform(2, 2), "art"));
+        var selected = new Area(2, 2, 2, 1);
+        engine.Execute(Command.Of("document.selection", selected));
+        PointD[] corners = [new(3, 2), new(3, 4), new(2, 4), new(2, 2)];
+        engine.Execute(Command.Of("layer.warp", new WarpArgs(SpatialKind.Rotate, selected, corners), "art"));
+        var rgba = Composite(engine);
+        Assert.Equal(255, rgba[(2 * 8 + 2) * 4]);
+        Assert.Equal(255, rgba[(3 * 8 + 2) * 4 + 1]);
+        Assert.Equal(255, rgba[(2 * 8 + 4) * 4 + 2]);
+        Assert.Equal(0, rgba[(2 * 8 + 3) * 4 + 3]);
+        Assert.Equal(new Area(2, 2, 1, 2), engine.Current!.Selection);
+    }
+
+    [Fact]
+    public void LassoClipsBucketAndMaskerCreatesAndEditsOnlyTheMask()
+    {
+        var engine = NewEngine(8, 6);
+        Layer(engine, new("art", "Raster", LayerKind.Raster));
+        engine.Execute(Command.Of("selection.lasso", new LassoArgs([new(0, 0), new(6, 0), new(0, 6)], SelectionMode.Replace)));
+        Assert.True(engine.Current!.Selected(1, 1));
+        Assert.False(engine.Current.Selected(5, 5));
+        engine.Execute(Command.Of("layer.bucket", new BucketArgs(new(1, 1), "#FFFF0000"), "art"));
+        byte[] filled = Composite(engine);
+        int At(int x, int y) => (y * 8 + x) * 4;
+        Assert.Equal(255, filled[At(1, 1)]);
+        Assert.Equal(0, filled[At(5, 5) + 3]);
+        var original = engine.Current.Layers[0].Pixels;
+        var brush = new StrokeArgs([new(1.5, 1.5)], 2, 1, 1, "#FF000000", false);
+        engine.Execute(Command.Of("mask.maskerStroke", brush, "art"));
+        Assert.Equal(0, Composite(engine)[At(1, 1) + 3]);
+        Assert.Same(original, engine.Current.Layers[0].Pixels);
+        engine.Execute(Command.Of("mask.maskerStroke", brush with { Color = "#FFFFFFFF" }, "art"));
+        Assert.Equal(filled, Composite(engine));
+    }
+
+    [Fact]
+    public void BucketStopsAtNonMatchingPixelsAndDoesNotFillDisconnectedMatches()
+    {
+        var engine = NewEngine(5, 1);
+        var line = new Pixels(5, 1, [0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Artwork", renderer.EncodePng(line))));
+        engine.Execute(Command.Of("layer.bucket", new BucketArgs(new(0, 0), "#FF00FF00"), "art"));
+        Assert.Equal(new byte[] { 0, 255, 0, 255, 0, 255, 0, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0 }, Composite(engine));
+    }
+
+    [Fact]
+    public void LockPreventsGuideMovesAndClearIsUndoable()
+    {
+        var engine = NewEngine(8, 6);
+        engine.Execute(Command.Of("guide.set", new Guide("a", GuideAxis.Horizontal, 2)));
+        engine.Execute(Command.Of("guide.lock", true));
+        Assert.Throws<InvalidDataException>(() => engine.Execute(Command.Of("guide.set", new Guide("a", GuideAxis.Horizontal, 3))));
+        Assert.Throws<InvalidDataException>(() => engine.Execute(Command.Of("guide.remove", "a")));
+        Assert.Equal(2, Assert.Single(engine.Current!.Guides).Position);
+        engine.Execute(Command.Of("guide.clear", 0));
+        Assert.Empty(engine.Current.Guides);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.True(engine.Current.GuidesLocked);
+        Assert.Single(engine.Current.Guides);
+    }
+
+    [Fact]
     public void FlipAffectsOnlySelectedPixelsAndRetainsTheRasterSource()
     {
         var engine = NewEngine(10, 6);
@@ -67,20 +205,23 @@ public sealed class EditorTests : IDisposable
     }
 
     [Fact]
-    public void WholeLayerScaleIsRelativeAndKeepsTheAnchorAtTheArtwork()
+    public void WholeLayerScaleUsesTheCanvasAnchorAndKeepsTheOriginalTransform()
     {
         var engine = NewEngine(40, 30);
         Layer(engine, new("art", "Rectangle", LayerKind.Rectangle, Transform: new(16, 10, 2, 2),
             Width: 4, Height: 4, Color: "#FFFFFFFF"));
         engine.Execute(Command.Of("layer.scale", new ScaleArgs(.5, .5), "art"));
-        Assert.Equal(new Transform(18, 12, 1, 1), engine.Current!.Layers[0].Transform);
+        Assert.Equal(new Transform(16, 10, 2, 2), engine.Current!.Layers[0].Transform);
+        var edit = Assert.Single(engine.Current.Layers[0].SpatialEdits);
+        Assert.Equal(SpatialKind.Scale, edit.Kind);
+        Assert.Equal(new PointD(18, 12.5), edit.Matrix.Map(16, 10));
         var pixels = Composite(engine);
-        Assert.Equal(255, pixels[(12 * 40 + 18) * 4 + 3]);
+        Assert.Equal(255, pixels[(13 * 40 + 18) * 4 + 3]);
         Assert.Equal(0, pixels[(10 * 40 + 16) * 4 + 3]);
 
         engine.Execute(Command.Of("history.undo", 0));
         engine.Execute(Command.Of("layer.scale", new ScaleArgs(.5, .5, 2, 2), "art"));
-        Assert.Equal(new Transform(20, 14, 1, 1), engine.Current.Layers[0].Transform);
+        Assert.Equal(new PointD(28, 20), Assert.Single(engine.Current!.Layers[0].SpatialEdits).Matrix.Map(16, 10));
     }
 
     [Fact]
@@ -344,7 +485,7 @@ public sealed class EditorTests : IDisposable
     }
 
     [Fact]
-    public void RasterMovesAndLaterEditsRetainTheSourceAndRoundTrip()
+    public void RasterMovesCommitPixelsAndLaterEditsRoundTrip()
     {
         var engine = NewEngine(12, 6);
         var source = new Pixels(3, 1, [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
@@ -353,9 +494,8 @@ public sealed class EditorTests : IDisposable
         engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(2, 0, 1, 1), SelectionMode.Add)));
         engine.Execute(Command.Of("layer.moveSelection", new PointD(4, 2), "pixels"));
         var moved = engine.Current!.Layers.Single();
-        Assert.Equal(source.Rgba, moved.Pixels!.Rgba);
-        Assert.Equal(new byte[] { 1, 0, 1 }, Assert.Single(moved.PixelShifts).Bits);
-        Assert.Equal(4, moved.PixelShifts[0].Dx);
+        Assert.NotEqual(source.Rgba, moved.Pixels!.Rgba);
+        Assert.Empty(moved.PixelShifts);
         Assert.True(engine.Current.Selected(4, 2));
         Assert.False(engine.Current.Selected(5, 2));
         int At(int x, int y) => (y * 12 + x) * 4;
@@ -371,8 +511,8 @@ public sealed class EditorTests : IDisposable
         string path = Path.Combine(folder, "offsets.chop");
         ProjectFile.Save(path, engine.Current!);
         var restored = ProjectFile.Open(path);
-        Assert.Equal(3, restored.Layers[0].PixelShifts.Length);
-        Assert.Equal(source.Rgba, restored.Layers[0].Pixels!.Rgba);
+        Assert.All(restored.Layers[0].PixelShifts, shift => Assert.True(shift.Clear || shift.Patch is not null));
+        Assert.NotEqual(source.Rgba, restored.Layers[0].Pixels!.Rgba);
         Assert.Equal(Composite(engine), renderer.Composite(restored).Rgba);
         Assert.Equal(0, Composite(engine)[At(6, 2) + 3]);
     }

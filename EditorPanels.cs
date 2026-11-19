@@ -88,9 +88,11 @@ public partial class MainWindow
         layers.SelectionChanged += (_, e) =>
         {
             if (syncing || active is null) return;
+            CancelTransform();
             active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
             if (active.MaskTarget != active.ActiveId) { active.MaskTarget = null; active.MaskOnly = null; UpdateCanvas(); }
             RefreshProperties();
+            RefreshTools();
             Say();
         };
         layers.MouseDoubleClick += (_, e) =>
@@ -433,6 +435,28 @@ public partial class MainWindow
     {
         if (effectEditor is not { } panel) return;
         panel.Children.Clear();
+        if (layer.SpatialEdits.Length != 0)
+        {
+            panel.Children.Add(new TextBlock { Text = "Transforms", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
+            for (int i = 0; i < layer.SpatialEdits.Length; i++)
+            {
+                var entry = layer.SpatialEdits[i];
+                int index = i;
+                var controls = new WrapPanel();
+                var name = entry.Kind switch
+                {
+                    SpatialKind.FreeTransform => "Free Transform",
+                    SpatialKind.FlipHorizontal => "Flip Horizontal",
+                    SpatialKind.FlipVertical => "Flip Vertical",
+                    _ => entry.Kind.ToString()
+                };
+                var enabled = new CheckBox { Content = name, IsChecked = entry.Enabled, VerticalAlignment = VerticalAlignment.Center };
+                enabled.Click += (_, _) => RunLayer("layer.toggleSpatial", index);
+                controls.Children.Add(enabled);
+                controls.Children.Add(Button("×", () => RunLayer("layer.removeSpatial", index), "Remove transform"));
+                panel.Children.Add(controls);
+            }
+        }
         panel.Children.Add(new TextBlock { Text = "Effects", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
         var effectKinds = new ComboBox { ItemsSource = Enum.GetValues<EffectKind>(), SelectedIndex = 0, Margin = new Thickness(2) };
         var add = Button("Add effect", () => { if (effectKinds.SelectedItem is EffectKind kind) AddEffect(kind); });

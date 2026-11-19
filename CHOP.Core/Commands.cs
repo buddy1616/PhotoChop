@@ -45,7 +45,7 @@ public sealed class CommandEngine(IRasterBackend backend)
     public Document? Current => history.Count == 0 ? null : history[cursor].Document;
     public bool Dirty => Current is { } doc && (saved is null || doc.Width != saved.Width ||
         doc.Height != saved.Height || doc.PixelsPerInch != saved.PixelsPerInch || !ReferenceEquals(doc.Layers, saved.Layers) ||
-        !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides));
+        !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides) || doc.GuidesLocked != saved.GuidesLocked);
     public string? Path { get; private set; }
     public int Cursor => cursor;
     public IReadOnlyList<HistoryEntry> History => history;
@@ -155,6 +155,12 @@ public sealed class CommandEngine(IRasterBackend backend)
         "effect.add" => $"Add {EffectLabel(command.Read<Effect>().Kind)}",
         "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
         "layer.scale" => "Scale",
+        "layer.move" => "Move layer",
+        "layer.moveSelection" => "Move pixels",
+        "layer.warp" => command.Read<WarpArgs>().Kind.ToString(),
+        "layer.bucket" => "Paint Bucket",
+        "selection.lasso" => "Lasso Selection",
+        "mask.maskerStroke" => "Masker Stroke",
         "layer.flip" => command.Read<FlipArgs>().Horizontal ? "Flip horizontal" : "Flip vertical",
         "guide.set" => $"Set {command.Read<Guide>().Axis.ToString().ToLowerInvariant()} guide",
         "guide.remove" => "Remove guide",
@@ -258,6 +264,19 @@ public sealed class CommandEngine(IRasterBackend backend)
             if (parent is not null) EnsureEditable(layers, parent);
         }
 
+        Document ApplySpatial(SpatialKind kind, Projective transform)
+        {
+            var layer = Wanted();
+            EnsureEditable(layers, layer.Id);
+            if (transform == Projective.Identity) return doc;
+            if (doc.Selection is { } area) return TransformSelected(doc, layer, area, transform);
+            var local = backend.ToParentSpace(doc, layer, transform);
+            int next = layer.SpatialEdits.Length;
+            while (layer.SpatialEdits.Any(item => item.Id == $"{layer.Id}-{next}")) next++;
+            return Edit(item => item with { SpatialEdits = [.. item.SpatialEdits, new SpatialEdit(
+                $"{item.Id}-{next}", kind, local)] });
+        }
+
         switch (command.Name)
         {
             case "document.selection":
@@ -272,6 +291,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                     bool hit = Contains(rect.Area, x, y);
                     return rect.Mode == SelectionMode.Add ? hit || doc.Selected(x, y) : !hit && doc.Selected(x, y);
                 });
+            case "selection.lasso":
+                var lasso = command.Read<LassoArgs>();
+                return Lasso(doc, lasso);
             case "selection.translate":
                 var shift = command.Read<PointD>();
                 return TranslateSelection(doc, PixelDelta(shift.X), PixelDelta(shift.Y));
@@ -298,7 +320,10 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "document.crop":
                 var chop = Clip(command.Read<Area>(), doc);
                 return Reframe(doc, chop.Width, chop.Height, -chop.X, -chop.Y, 1, 1) with { Selection = null, SelectionMask = null };
+            case "guide.lock": return doc with { GuidesLocked = command.Read<bool>() };
+            case "guide.clear": return doc.Guides.Length == 0 ? doc : doc with { Guides = [] };
             case "guide.set":
+                if (doc.GuidesLocked) throw new InvalidDataException("Unlock guides before moving or adding them.");
                 var guide = command.Read<Guide>();
                 if (!Format.ValidId(guide.Id) || !Enum.IsDefined(guide.Axis) || guide.Position < 0 ||
                     guide.Position > (guide.Axis == GuideAxis.Vertical ? doc.Width : doc.Height))
@@ -306,6 +331,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (doc.Guides.FirstOrDefault(item => item.Id == guide.Id) == guide) return doc;
                 return doc with { Guides = [.. doc.Guides.Where(item => item.Id != guide.Id), guide] };
             case "guide.remove":
+                if (doc.GuidesLocked) throw new InvalidDataException("Unlock guides before removing them.");
                 var guideId = command.Read<string>();
                 return doc.Guides.Any(item => item.Id == guideId)
                     ? doc with { Guides = doc.Guides.Where(item => item.Id != guideId).ToArray() } : doc;
@@ -360,6 +386,17 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return Edit(layer => layer with { Blend = blend });
             case "layer.transformsEnabled":
                 return Edit(layer => layer with { TransformsEnabled = command.Read<bool>() });
+            case "layer.move":
+                var movement = command.Read<PointD>();
+                Range(movement.X, -1000000, 1000000);
+                Range(movement.Y, -1000000, 1000000);
+                return Edit(layer =>
+                {
+                    var moved = layer.TranslatePlacement(movement);
+                    if (layer.Kind != LayerKind.Raster || layer.PixelShifts.Length == 0 ||
+                        backend.ResolveRaster(layer) is not { } raster) return moved;
+                    return moved with { Pixels = raster.Pixels, RasterX = raster.X, RasterY = raster.Y, PixelShifts = [] };
+                });
             case "layer.transform":
                 var transform = command.Read<Transform>();
                 CheckTransform(transform);
@@ -390,15 +427,37 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Range(scale.Y, .001, 1000);
                 if (scale.AnchorX is < 0 or > 2 || scale.AnchorY is < 0 or > 2)
                     throw new InvalidDataException("Choose a transform anchor.");
-                if (scale.X == 1 && scale.Y == 1) return doc;
-                if (doc.Selection is { } scaleArea)
-                    return TransformSelected(doc, Wanted(), scaleArea, scale.X, scale.Y, scale.AnchorX, scale.AnchorY);
-                return Edit(layer => ScaleLayer(doc, layer, scale));
+                var scaleArea = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
+                return ApplySpatial(SpatialKind.Scale, Projective.Anchored(scale.X, scale.Y,
+                    scaleArea.X + scaleArea.Width * scale.AnchorX / 2d, scaleArea.Y + scaleArea.Height * scale.AnchorY / 2d));
             case "layer.flip":
-                var flip = command.Read<FlipArgs>();
-                if (doc.Selection is { } flipArea)
-                    return TransformSelected(doc, Wanted(), flipArea, flip.Horizontal ? -1 : 1, flip.Horizontal ? 1 : -1, 1, 1);
-                return Edit(layer => FlipLayer(doc, layer, flip.Horizontal));
+                bool horizontal = command.Read<FlipArgs>().Horizontal;
+                var flipArea = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
+                return ApplySpatial(horizontal ? SpatialKind.FlipHorizontal : SpatialKind.FlipVertical,
+                    Projective.Anchored(horizontal ? -1 : 1, horizontal ? 1 : -1,
+                        flipArea.X + flipArea.Width / 2d, flipArea.Y + flipArea.Height / 2d));
+            case "layer.warp":
+                var warp = command.Read<WarpArgs>();
+                if (warp.Kind is not (SpatialKind.FreeTransform or SpatialKind.Rotate or SpatialKind.Skew))
+                    throw new InvalidDataException("Unknown transform.");
+                return ApplySpatial(warp.Kind, Projective.FromQuad(warp.Source, warp.Corners));
+            case "layer.removeSpatial":
+                int removeIndex = command.Read<int>();
+                return Edit(layer => layer with { SpatialEdits = layer.SpatialEdits.Where((_, i) => i != removeIndex).ToArray() });
+            case "layer.toggleSpatial":
+                int toggleIndex = command.Read<int>();
+                return Edit(layer => layer with { SpatialEdits = layer.SpatialEdits.Select((item, i) =>
+                    i == toggleIndex ? item with { Enabled = !item.Enabled } : item).ToArray() });
+            case "layer.bucket":
+                var bucket = command.Read<BucketArgs>();
+                Range(bucket.Tolerance, 0, 255);
+                uint bucketColor = Format.Color(bucket.Color);
+                return Edit(layer =>
+                {
+                    if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer for the paint bucket.");
+                    if (backend.BucketRegion(doc, layer, bucket) is not { } region) return layer;
+                    return ApplyInk(doc, layer, region.Bounds, region.Contains, bucketColor);
+                });
             case "layer.fillPixels":
                 var fillInk = Format.Color(command.Read<string>());
                 var fillBounds = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
@@ -431,7 +490,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (selectedLayer.Pixels is null) return doc;
                 var edited = backend.EditSelection(doc, selectedLayer, selectedArea, delta);
                 if (edited.Shift is not { } pixelEdit) return doc;
-                var updated = Edit(layer => layer with { PixelShifts = [.. layer.PixelShifts, pixelEdit] });
+                var updated = delta is not null
+                    ? Edit(layer => layer with { Pixels = edited.Pixels, RasterX = edited.X, RasterY = edited.Y, PixelShifts = [] })
+                    : Edit(layer => layer with { PixelShifts = [.. layer.PixelShifts, pixelEdit] });
                 return delta is { } displacement
                     ? TranslateSelection(updated, PixelDelta(displacement.X), PixelDelta(displacement.Y)) : updated;
             case "mask.add":
@@ -468,6 +529,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                     };
                 });
             case "mask.paintStroke":
+            case "mask.maskerStroke":
             case "layer.paintStroke":
                 var stroke = command.Read<StrokeArgs>();
                 Range(stroke.Size, 1, 2048);
@@ -477,6 +539,13 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (stroke.Points is not { Length: > 0 and <= 100000 } ||
                     stroke.Points.Any(point => !double.IsFinite(point.X) || !double.IsFinite(point.Y)))
                     throw new InvalidDataException("Invalid stroke points.");
+                if (command.Name == "mask.maskerStroke")
+                    return Edit(layer =>
+                    {
+                        var masked = layer with { Mask = layer.Mask ?? new AlphaMask(doc.Width, doc.Height,
+                            Enumerable.Repeat((byte)255, doc.Width * doc.Height).ToArray()), MaskEnabled = true };
+                        return masked with { Mask = backend.PaintMask(doc, masked, stroke with { Erase = false }) };
+                    });
                 if (command.Name == "mask.paintStroke")
                     return Edit(layer => layer.Mask is not null ? layer with { Mask = backend.PaintMask(doc, layer, stroke) }
                         : throw new InvalidDataException("Add a mask before painting it."));
@@ -506,7 +575,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.ungroup":
                 var ungroup = Wanted();
                 EnsureEditable(layers, ungroup.Id);
-                if (ungroup.Kind != LayerKind.Group || ungroup.Transform != new Transform() ||
+                if (ungroup.Kind != LayerKind.Group || ungroup.Transform != new Transform() || ungroup.SpatialEdits.Length != 0 ||
                     ungroup.Mask is not null || !ungroup.Visible || ungroup.Opacity != 1 || ungroup.Effects.Length != 0 || ungroup.Blend != Blend.Normal)
                     throw new InvalidDataException("Ungroup requires a visible group with default transform, opacity and blend and no effects.");
                 return With(ReplaceItems(layers, ParentOf(layers, ungroup.Id), [ungroup], ungroup.Children));
@@ -563,13 +632,16 @@ public sealed class CommandEngine(IRasterBackend backend)
 
     private static Document Reframe(Document doc, int width, int height, int x, int y, double sx, double sy)
     {
+        var framing = new Projective(sx, 0, x, 0, sy, y);
+        var inverse = framing.Inverse();
         var result = doc with
         {
             Width = width, Height = height,
             Guides = doc.Guides.Select(guide => guide with { Position = (int)Math.Round(
                 guide.Axis == GuideAxis.Vertical ? guide.Position * sx + x : guide.Position * sy + y) })
                 .Where(guide => guide.Position >= 0 && guide.Position <= (guide.Axis == GuideAxis.Vertical ? width : height)).ToArray(),
-            Layers = doc.Layers.Select(layer => layer with { Placement = new(
+            Layers = doc.Layers.Select(layer => layer with { SpatialEdits = layer.SpatialEdits
+                .Select(edit => edit with { Matrix = inverse.Then(edit.Matrix).Then(framing) }).ToArray(), Placement = new(
                 layer.Placement.X * sx + x, layer.Placement.Y * sy + y,
                 layer.Placement.ScaleX * sx, layer.Placement.ScaleY * sy) }).ToArray()
         };
@@ -578,68 +650,53 @@ public sealed class CommandEngine(IRasterBackend backend)
             (int)Math.Floor((py - y + .5) / sy)));
     }
 
-    private Document TransformSelected(Document doc, Layer layer, Area area, double sx, double sy, int anchorX, int anchorY)
+    private Document TransformSelected(Document doc, Layer layer, Area area, Projective transform)
     {
-        EnsureEditable(doc.Layers, layer.Id);
         if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to transform selected pixels.");
-        var transform = new PixelTransform(sx, sy, area.X + area.Width * anchorX / 2d, area.Y + area.Height * anchorY / 2d);
         var edit = backend.TransformPixels(doc, layer, area, transform);
-        var changed = edit?.Shift is { } patch ? doc with
-        {
-            Layers = Update(doc.Layers, layer.Id, item => item with { PixelShifts = [.. item.PixelShifts, patch] })
-        } : doc;
+        var changed = edit?.Shift is { } patch
+            ? doc with { Layers = Update(doc.Layers, layer.Id, item => item with { PixelShifts = [.. item.PixelShifts, patch] }) }
+            : doc;
+        var inverse = transform.Inverse();
         return SelectPixels(changed, (x, y) =>
         {
-            var previous = transform.Inverse(x + .5, y + .5);
-            return doc.Selected((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y));
+            var previous = inverse.Map(x + .5, y + .5);
+            return double.IsFinite(previous.X) && double.IsFinite(previous.Y) &&
+                doc.Selected((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y));
         });
     }
 
-    private Layer ScaleLayer(Document doc, Layer layer, ScaleArgs scale)
+    private static Document Lasso(Document doc, LassoArgs args)
     {
-        var center = LayerAnchor(doc, layer, scale.AnchorX, scale.AnchorY);
-        var t = layer.Transform;
-        double radians = t.Rotation * Math.PI / 180;
-        double cos = Math.Cos(radians), sin = Math.Sin(radians);
-        double dx = center.X - t.X, dy = center.Y - t.Y;
-        double x = (cos * dx + sin * dy) * scale.X;
-        double y = (-sin * dx + cos * dy) * scale.Y;
-        var scaled = t with
+        if (args.Points is not { Length: >= 3 and <= 20000 } || !Enum.IsDefined(args.Mode) ||
+            args.Points.Any(p => !double.IsFinite(p.X) || !double.IsFinite(p.Y)))
+            throw new InvalidDataException("Draw a closed lasso region.");
+        var points = args.Points;
+        var crossings = new List<double>();
+        int row = -1, edge = 0;
+        bool inside = false;
+        return SelectPixels(doc, (x, y) =>
         {
-            X = center.X - (cos * x - sin * y), Y = center.Y - (sin * x + cos * y),
-            ScaleX = t.ScaleX * scale.X, ScaleY = t.ScaleY * scale.Y
-        };
-        CheckTransform(scaled);
-        return layer with { Transform = scaled };
-    }
-
-    private PointD LayerAnchor(Document doc, Layer layer, int anchorX, int anchorY)
-    {
-        if (!layer.TransformsEnabled) throw new InvalidDataException("Enable the layer’s transforms before transforming it.");
-        var pixels = backend.RasterizeLayer(doc, layer);
-        int left = pixels.Pixels.Width, top = pixels.Pixels.Height, right = -1, bottom = -1;
-        for (int y = 0; y < pixels.Pixels.Height; y++)
-        for (int x = 0; x < pixels.Pixels.Width; x++)
-        {
-            if (pixels.Pixels.Rgba[(y * pixels.Pixels.Width + x) * 4 + 3] == 0) continue;
-            left = Math.Min(left, x); right = Math.Max(right, x);
-            top = Math.Min(top, y); bottom = Math.Max(bottom, y);
-        }
-        if (right < left) return new PointD(layer.Transform.X, layer.Transform.Y);
-        return new PointD(
-            (pixels.X + left + (right - left + 1) * anchorX / 2d - layer.Placement.X) / layer.Placement.ScaleX,
-            (pixels.Y + top + (bottom - top + 1) * anchorY / 2d - layer.Placement.Y) / layer.Placement.ScaleY);
-    }
-
-    private Layer FlipLayer(Document doc, Layer layer, bool horizontal)
-    {
-        var (cx, cy) = LayerAnchor(doc, layer, 1, 1);
-        var t = layer.Transform;
-        var flipped = horizontal
-            ? t with { X = 2 * cx - t.X, Rotation = -t.Rotation, ScaleX = -t.ScaleX }
-            : t with { Y = 2 * cy - t.Y, Rotation = -t.Rotation, ScaleY = -t.ScaleY };
-        CheckTransform(flipped);
-        return layer with { Transform = flipped };
+            if (row != y)
+            {
+                row = y; edge = 0; inside = false; crossings.Clear();
+                double py = y + .5;
+                for (int i = 0; i < points.Length; i++)
+                {
+                    var a = points[i]; var b = points[(i + 1) % points.Length];
+                    if ((a.Y > py) == (b.Y > py)) continue;
+                    crossings.Add(a.X + (b.X - a.X) * (py - a.Y) / (b.Y - a.Y));
+                }
+                crossings.Sort();
+            }
+            while (edge < crossings.Count && x + .5 >= crossings[edge]) { inside = !inside; edge++; }
+            return args.Mode switch
+            {
+                SelectionMode.Add => inside || doc.Selected(x, y),
+                SelectionMode.Subtract => !inside && doc.Selected(x, y),
+                _ => inside
+            };
+        });
     }
 
     private Layer ApplyInk(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, uint color)

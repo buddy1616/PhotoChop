@@ -1,13 +1,14 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using Chop.Core;
 
 namespace PhotoChop;
 
 public partial class MainWindow
 {
-    private MenuItem? rulersMenu;
+    private MenuItem? rulersMenu, showGuidesMenu, lockGuidesMenu, clearGuidesMenu;
     private sealed record GuideDrag(Session Session, UIElement Source, Guide Guide, bool Existing, int[] SelectionEdges);
     private GuideDrag? guideDrag;
     private const double SnapRadius = 7;
@@ -19,16 +20,64 @@ public partial class MainWindow
         if (active?.NeedsFit == true) Fit();
     }
 
+    private void BuildGuideMenus(MenuItem view)
+    {
+        var show = new MenuItem { Header = "Show…" };
+        view.Items.Add(show);
+        rulersMenu = Item(show, "Show Rulers", ToggleRulers);
+        rulersMenu.IsCheckable = true;
+        showGuidesMenu = Item(show, "Show Guides", () =>
+        {
+            preferences.ShowGuides = !preferences.ShowGuides;
+            if (!preferences.ShowGuides) CancelGuide();
+            UpdateRulers();
+        });
+        showGuidesMenu.IsCheckable = true;
+        var guides = new MenuItem { Header = "Guides" };
+        view.Items.Add(guides);
+        clearGuidesMenu = Item(guides, "Clear Guides", () => Run("guide.clear", 0));
+        lockGuidesMenu = Item(guides, "Lock Guides", () =>
+        {
+            if (active?.Engine.Current is { } doc) Run("guide.lock", !doc.GuidesLocked);
+        });
+        lockGuidesMenu.IsCheckable = true;
+        Item(guides, "Guides Color…", () =>
+        {
+            if (ColorPickerDialog.Show(EditorOwner, "Guides Color", preferences.GuideColor) is { } color)
+            {
+                preferences.GuideColor = color;
+                UpdateRulers();
+            }
+        });
+        UpdateRulers();
+    }
+
+    private void UpdateGuideMenu()
+    {
+        if (rulersMenu is not null) rulersMenu.IsChecked = preferences.ShowRulers;
+        if (showGuidesMenu is not null) showGuidesMenu.IsChecked = preferences.ShowGuides;
+        if (lockGuidesMenu is not null)
+        {
+            lockGuidesMenu.IsEnabled = active is not null;
+            lockGuidesMenu.IsChecked = active?.Engine.Current?.GuidesLocked == true;
+        }
+        if (clearGuidesMenu is not null) clearGuidesMenu.IsEnabled = active?.Engine.Current?.Guides.Length > 0;
+    }
+
     private void UpdateRulers()
     {
-        if (rulersMenu is not null) rulersMenu.Header = preferences.ShowRulers ? "Hide Rulers" : "Show Rulers";
+        UpdateGuideMenu();
         foreach (var session in sessions) UpdateRulers(session);
     }
 
     private void UpdateRulers(Session session)
     {
-        if (session.Engine.Current is { } doc)
-            session.Viewport.UpdateRulers(preferences.ShowRulers, preferences.RulerUnit, session.Offset, session.Zoom, doc.PixelsPerInch);
+        if (session.Engine.Current is not { } doc) return;
+        session.Viewport.UpdateRulers(preferences.ShowRulers, preferences.RulerUnit, session.Offset, session.Zoom, doc.PixelsPerInch);
+        uint argb = Format.Color(preferences.GuideColor);
+        session.View.SetGuideColor(Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
+        session.View.Guides = preferences.ShowGuides ? doc.Guides : [];
+        session.View.InvalidateVisual();
     }
 
     private void HookRulers(Session session)
@@ -77,7 +126,7 @@ public partial class MainWindow
 
     private void BeginGuide(Session session, UIElement source, Guide guide, bool existing)
     {
-        if (session.Engine.Current is not { } doc) return;
+        if (!preferences.ShowGuides || session.Engine.Current is not { GuidesLocked: false } doc) return;
         CancelGuide();
         var boundaries = GuideSnap.SelectionEdges(doc);
         var edges = guide.Axis == GuideAxis.Vertical ? boundaries.Vertical : boundaries.Horizontal;
@@ -88,9 +137,9 @@ public partial class MainWindow
 
     private static Cursor GuideCursor(GuideAxis axis) => axis == GuideAxis.Horizontal ? Cursors.SizeNS : Cursors.SizeWE;
 
-    private static Guide? HitGuide(Session session, Point position)
+    private Guide? HitGuide(Session session, Point position)
     {
-        if (session.Engine.Current is not { } doc) return null;
+        if (!preferences.ShowGuides || session.Engine.Current is not { GuidesLocked: false } doc) return null;
         var point = session.View.FromView(position);
         if (point.X < 0 || point.Y < 0 || point.X > doc.Width || point.Y > doc.Height) return null;
         double Distance(Guide guide) => Math.Abs((guide.Axis == GuideAxis.Vertical ? point.X : point.Y) - guide.Position) * session.Zoom;
@@ -140,7 +189,7 @@ public partial class MainWindow
 
     private int? SnapBoundary(double value, GuideAxis axis)
     {
-        if (active?.Engine.Current is not { } doc) return null;
+        if (!preferences.ShowGuides || active?.Engine.Current is not { } doc) return null;
         double radius = SnapRadius / canvas.Zoom;
         return doc.Guides.Where(guide => guide.Axis == axis && Math.Abs(guide.Position - value) <= radius)
             .OrderBy(guide => Math.Abs(guide.Position - value)).ThenBy(guide => guide.Position)

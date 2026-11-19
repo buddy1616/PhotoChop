@@ -18,9 +18,24 @@ internal sealed class EditorCanvas : FrameworkElement
     private PixelSelection? outlineSource;
     private Geometry? outline;
     public PixelSelection? SelectionMask { get; set; }
-    private static readonly Pen guidePen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(72, 205, 233)), 1));
-    private static readonly Pen ghostGuidePen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(127, 231, 252)), 1)
+    private Pen guidePen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(72, 205, 233)), 1));
+    private Pen ghostGuidePen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(127, 231, 252)), 1)
         { DashStyle = DashStyles.Dash });
+    private Color? currentGuideColor;
+    public void SetGuideColor(Color color)
+    {
+        if (currentGuideColor == color) return;
+        currentGuideColor = color;
+        var brush = Frozen(new SolidColorBrush(color));
+        guidePen = Frozen(new Pen(brush, 1));
+        ghostGuidePen = Frozen(new Pen(brush, 1) { DashStyle = DashStyles.Dash });
+    }
+
+    public IReadOnlyList<PointD>? LassoPath { get; set; }
+    public PointD[]? TransformBox { get; set; }
+    public PointD? TransformOrigin { get; set; }
+    public bool ShowTransformEdges { get; set; }
+
     public IReadOnlyList<Guide> Guides { get; set; } = [];
     public Guide? GhostGuide { get; set; }
     public string? DraggedGuide { get; set; }
@@ -83,6 +98,29 @@ internal sealed class EditorCanvas : FrameworkElement
         foreach (var guide in Guides)
             if (guide.Id != DraggedGuide) DrawGuide(dc, guide, imageArea, guidePen);
         if (GhostGuide is { } ghost) DrawGuide(dc, ghost, imageArea, ghostGuidePen);
+        if (LassoPath is { Count: > 1 } lasso)
+        {
+            for (int i = 1; i < lasso.Count; i++) dc.DrawLine(selectionLight, ToView(lasso[i - 1]), ToView(lasso[i]));
+            dc.DrawLine(selectionDark, ToView(lasso[^1]), ToView(lasso[0]));
+        }
+        if (TransformBox is { Length: 4 } box)
+        {
+            var controlPoints = box.Select(ToView).ToArray();
+            for (int i = 0; i < 4; i++)
+            {
+                var a = controlPoints[i]; var b = controlPoints[(i + 1) % 4];
+                dc.DrawLine(selectionLight, a, b);
+                dc.DrawRectangle(Brushes.White, border, new Rect(a.X - 4, a.Y - 4, 8, 8));
+                if (ShowTransformEdges) dc.DrawRectangle(Brushes.White, border,
+                    new Rect((a.X + b.X) / 2 - 4, (a.Y + b.Y) / 2 - 4, 8, 8));
+            }
+            if (TransformOrigin is { } origin)
+            {
+                var center = ToView(origin);
+                dc.DrawEllipse(Brushes.Black, selectionLight, center, 6, 6);
+                dc.DrawEllipse(Brushes.White, null, center, 2, 2);
+            }
+        }
     }
 
     private void DrawGuide(DrawingContext dc, Guide guide, Rect bounds, Pen pen)
