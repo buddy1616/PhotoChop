@@ -5,11 +5,12 @@ namespace Chop.Core;
 
 public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill }
 public enum Blend { Normal, Multiply, Screen, Overlay, Add }
-public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode }
+public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur }
 
 public readonly record struct PointD(double X, double Y);
 public readonly record struct Area(int X, int Y, int Width, int Height);
 public sealed record Transform(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1, double Rotation = 0);
+public sealed record Placement(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1);
 public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal);
 
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
@@ -28,6 +29,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     [JsonIgnore] public Pixels? Pixels { get; init; }
     [JsonIgnore] public AlphaMask? Mask { get; init; }
     [JsonIgnore] public PixelShift[] PixelShifts { get; init; } = [];
+    public Placement Placement { get; init; } = new();
     public bool TransformsEnabled { get; init; } = true;
     [JsonIgnore] public Transform ActiveTransform => TransformsEnabled ? Transform : new();
     public bool MaskEnabled { get; init; } = true;
@@ -90,6 +92,7 @@ public interface IRasterBackend
     Pixels DecodePng(byte[] data);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
+    RasterEdit PaintArea(Document document, Layer layer, Area bounds, Func<int, int, bool> contains, uint color);
     RasterEdit RasterizeLayer(Document document, Layer layer);
     RasterEdit? ResolveRaster(Layer layer);
     RasterEdit EditSelection(Document document, Layer layer, Area selection, PointD? delta);

@@ -91,16 +91,18 @@ public partial class MainWindow
         return button;
     }
 
-    private Button LayerMaskButton()
+    private Button LayerMaskButton() => LayerArtButton("Add a mask. Alt-click for grayscale view.", AddOrSelectMask,
+        "F0 M 1,3 C 4,2 6,4 10,5 C 14,4 16,2 19,3 L 18,8 C 16,13 13,13 10,9 C 7,13 4,13 2,8 Z M 3.6,6 C 5,4.6 7,5.2 8.5,6.8 C 7,8.3 5,8.2 3.6,6 Z M 11.5,6.8 C 13,5.2 15,4.6 16.4,6 C 15,8.2 13,8.3 11.5,6.8 Z");
+
+    private static Button LayerArtButton(string name, Action action, string geometry)
     {
-        var button = LayerIconButton("Mask", "Add a mask. Alt-click for grayscale view.", AddOrSelectMask, glyph: false);
-        button.Content = new System.Windows.Shapes.Path
+        var button = LayerIconButton(name, name, action, glyph: false);
+        var icon = new System.Windows.Shapes.Path
         {
-            Width = 18, Height = 14, Stretch = Stretch.Uniform,
-            Data = Geometry.Parse("M 0,1 L 18,1 18,13 0,13 Z M 9,3 A 4,4 0 1 0 9.01,3 Z")
+            Width = 21, Height = 16, Stretch = Stretch.Uniform, Data = Geometry.Parse(geometry)
         };
-        ((System.Windows.Shapes.Path)button.Content).SetBinding(System.Windows.Shapes.Shape.StrokeProperty,
-            new System.Windows.Data.Binding(nameof(Foreground)) { Source = button });
+        icon.SetBinding(System.Windows.Shapes.Shape.FillProperty, new System.Windows.Data.Binding(nameof(Foreground)) { Source = button });
+        button.Content = icon;
         return button;
     }
 

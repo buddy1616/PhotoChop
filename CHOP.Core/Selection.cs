@@ -2,7 +2,7 @@ namespace Chop.Core;
 
 public enum SelectionMode { Replace, Add, Subtract }
 public sealed record RectangleSelection(Area Area, SelectionMode Mode);
-public sealed record ColorSelection(string Color, double Fuzziness, bool Invert = false);
+public sealed record ColorSelection(string Color, double Fuzziness, bool Invert = false, SelectionMode Mode = SelectionMode.Replace);
 
 /// <summary>A binary selection in document pixel coordinates.</summary>
 public sealed record PixelSelection(Area Bounds, byte[] Bits)
@@ -11,7 +11,7 @@ public sealed record PixelSelection(Area Bounds, byte[] Bits)
         x < Bounds.X + Bounds.Width && y < Bounds.Y + Bounds.Height &&
         Bits[(y - Bounds.Y) * Bounds.Width + x - Bounds.X] != 0;
 
-    public static (Area? Bounds, PixelSelection? Mask) ColorRange(Pixels pixels, ColorSelection query)
+    public static (Area? Bounds, PixelSelection? Mask) ColorRange(Pixels pixels, ColorSelection query, Document? current = null)
     {
         uint color = Format.Color(query.Color);
         double cutoff = query.Fuzziness / 200.0;
@@ -21,7 +21,13 @@ public sealed record PixelSelection(Area Bounds, byte[] Bits)
             int i = (y * pixels.Width + x) * 4;
             int r = pixels.Rgba[i] - (byte)(color >> 16), g = pixels.Rgba[i + 1] - (byte)(color >> 8), b = pixels.Rgba[i + 2] - (byte)color;
             bool match = pixels.Rgba[i + 3] > 0 && r * r + g * g + b * b <= cutoff * cutoff * 195075;
-            return query.Invert ? !match : match;
+            if (query.Invert) match = !match;
+            return query.Mode switch
+            {
+                SelectionMode.Add => match || current?.Selected(x, y) == true,
+                SelectionMode.Subtract => !match && current?.Selected(x, y) == true,
+                _ => match
+            };
         });
     }
 

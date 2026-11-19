@@ -56,6 +56,9 @@ public partial class MainWindow
         var amount = new TextBlock { Margin = new Thickness(0, 4, 0, 1) };
         root.Children.Add(amount);
         root.Children.Add(fuzziness);
+        var combine = new ComboBox { ItemsSource = new[] { "Add to selection", "Subtract from selection" },
+            SelectedIndex = 0, Margin = new Thickness(0, 4, 0, 0) };
+        root.Children.Add(combine);
         var invert = new CheckBox { Content = "Invert", Margin = new Thickness(0, 5, 0, 7) };
         root.Children.Add(invert);
         var sampleHint = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 5) };
@@ -64,7 +67,8 @@ public partial class MainWindow
         root.Children.Add(matching);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         string sampled = foreground;
-        ColorSelection Query() => new(choices[(string)list.SelectedItem] ?? sampled, fuzziness.Value, invert.IsChecked == true);
+        ColorSelection Query() => new(choices[(string)list.SelectedItem] ?? sampled, fuzziness.Value, invert.IsChecked == true,
+            combine.SelectedIndex == 1 ? Chop.Core.SelectionMode.Subtract : Chop.Core.SelectionMode.Add);
         var ok = Button("OK", () =>
         {
             var query = Query();
@@ -84,7 +88,7 @@ public partial class MainWindow
         void Update()
         {
             amount.Text = $"Fuzziness  {fuzziness.Value:0}";
-            var (area, mask) = PixelSelection.ColorRange(pixels, Query());
+            var (area, mask) = PixelSelection.ColorRange(pixels, Query(), session.Engine.Current);
             int width = Math.Min(240, pixels.Width), height = Math.Min(240, pixels.Height);
             var preview = new byte[width * height * 4];
             for (int y = 0; y < height; y++)
@@ -127,6 +131,7 @@ public partial class MainWindow
         list.SelectionChanged += (_, _) => Update();
         fuzziness.ValueChanged += (_, _) => Update();
         invert.Click += (_, _) => Update();
+        combine.SelectionChanged += (_, _) => Update();
         colorRangeSession = session;
         Update();
         colorRangeWindow = dialog;

@@ -37,11 +37,26 @@ public partial class MainWindow
             if (gesture is not null) return;
             if (sessions.FirstOrDefault(session => ReferenceEquals(session.View, view)) is { } hovered) Activate(hovered);
             if (active is null) return;
-            ZoomBy(Math.Pow(1.15, e.Delta / 120.0), e.GetPosition(canvas));
+            var modifiers = Keyboard.Modifiers;
+            double scroll = e.Delta / 120.0 * 64;
+            if (modifiers.HasFlag(ModifierKeys.Control))
+            {
+                active.Offset += new Vector(scroll, 0);
+                UpdateView();
+            }
+            else if (modifiers.HasFlag(ModifierKeys.Shift))
+            {
+                active.Offset += new Vector(0, scroll);
+                UpdateView();
+            }
+            else ZoomBy(Math.Pow(1.15, e.Delta / 120.0), e.GetPosition(canvas));
             e.Handled = true;
         };
         view.MouseDown += CanvasDown;
         view.MouseMove += CanvasMove;
+        view.PreviewMouseMove += (_, _) => RefreshMarqueeCursor();
+        view.PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
+        view.PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
         view.MouseUp += CanvasUp;
         view.LostMouseCapture += (_, _) => CancelGesture();
         view.MouseLeave += (_, _) => { if (gesture is null) { lastCursor = null; Say(); } };
@@ -101,8 +116,11 @@ public partial class MainWindow
                     moveOriginal = target.Transform;
                     moveParentInverse = SKMatrix.Identity;
                     var parent = doc.AllLayers().FirstOrDefault(layer => layer.Children.Any(child => child.Id == target.Id));
-                    if (parent is not null && SkiaRenderer.WorldMatrix(doc.Layers, parent.Id, SKMatrix.Identity) is { } world &&
-                        world.TryInvert(out var inverted)) moveParentInverse = inverted;
+                    var parentWorld = parent is null ? SKMatrix.Identity :
+                        SkiaRenderer.WorldMatrix(doc.Layers, parent.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
+                    var moveSpace = SKMatrix.Concat(parentWorld,
+                        SKMatrix.CreateScale((float)target.Placement.ScaleX, (float)target.Placement.ScaleY));
+                    if (moveSpace.TryInvert(out var inverted)) moveParentInverse = inverted;
                     break;
                 case "Brush":
                 case "Eraser":
@@ -198,8 +216,18 @@ public partial class MainWindow
         {
             case "Brush":
             case "Eraser":
-                if (points.Length > 0)
-                    RunLayer(mask ? "mask.paintStroke" : "layer.paintStroke", new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser"));
+                if (points.Length > 0 && active.ActiveId is { } paintTarget)
+                {
+                    var paint = new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser");
+                    var view = canvas;
+                    var overlay = new EditorCanvas.PaintOverlay(paint, active.Engine.Current?.Selection);
+                    view.PendingPaint.Add(overlay);
+                    if (!Run(mask ? "mask.paintStroke" : "layer.paintStroke", paint, paintTarget))
+                    {
+                        view.PendingPaint.Remove(overlay);
+                        view.InvalidateVisual();
+                    }
+                }
                 break;
             case "Move selection":
                 if (moveSelection != default) Run("layer.moveSelection", moveSelection, id);
@@ -353,10 +381,18 @@ public partial class MainWindow
         RefreshTools();
     }
 
+    private void RefreshMarqueeCursor()
+    {
+        if (tool != "Selection") return;
+        foreach (var session in sessions)
+            session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(tool);
+    }
+
     private static Cursor ToolCursor(string name) => name switch
     {
         "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" => ToolCursors.Eraser,
-        "Selection" => Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
+        "Selection" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
+            Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.SelectionAdd : Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
         "Shape" => Cursors.SizeNESW, "Eyedropper" => ToolCursors.Eyedropper,
         "Transform" => Cursors.ScrollAll, _ => Cursors.Arrow
     };

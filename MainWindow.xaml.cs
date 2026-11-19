@@ -80,6 +80,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
+        PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
         Dock.Theme = new AvalonDock.Themes.Vs2013DarkTheme();
         Dock.AllowMixedOrientation = true;
         Dock.LayoutFloatingWindowControlCreated += (_, e) =>
@@ -220,17 +222,27 @@ public partial class MainWindow : Window
         Item(edit, "Undo", () => Run("history.undo", 0), "Ctrl+Z");
         Item(edit, "Redo", () => Run("history.redo", 0), "Ctrl+Y");
         Item(edit, "Configure tools…", ConfigureTools);
-        var transformItem = Item(edit, "Transform layer or group…", EditTransform);
+        var transformItem = new MenuItem { Header = "Transform" };
+        edit.Items.Add(transformItem);
+        Item(transformItem, "Scale…", EditTransform);
+        Item(transformItem, "Flip Horizontal", () => RunLayer("layer.flip", new FlipArgs(true)));
+        Item(transformItem, "Flip Vertical", () => RunLayer("layer.flip", new FlipArgs(false)));
+        var fill = Item(transformItem, "Fill…", FillPixels);
+        var stroke = Item(transformItem, "Stroke…", StrokeSelection);
         var textItem = Item(edit, "Edit text…", EditText);
         var shapeItem = Item(edit, "Edit shape…", EditShape);
         edit.SubmenuOpened += (_, _) =>
         {
             var selected = ActiveLayer();
             transformItem.IsEnabled = selected is not null;
+            fill.IsEnabled = selected?.Kind == LayerKind.Raster;
+            stroke.IsEnabled = fill.IsEnabled && active?.Engine.Current?.Selection is not null;
             textItem.IsEnabled = selected?.Kind == LayerKind.Text;
             shapeItem.IsEnabled = selected?.Kind is LayerKind.Rectangle or LayerKind.Ellipse;
         };
         var image = Menu("Image");
+        Item(image, "Canvas Size…", () => ResizeDocument(canvasOnly: true));
+        Item(image, "Image Size…", () => ResizeDocument(canvasOnly: false));
         Item(image, "Chop tool", () => SetTool("Chop"));
         Item(image, "Chop to selection", () => { if (active?.Engine.Current?.Selection is { } area) Run("document.chop", area); });
         Item(image, "Flatten image…", Flatten);
@@ -262,8 +274,11 @@ public partial class MainWindow : Window
         Item(select, "Deselect", () => Run<Area?>("document.selection", null), "Ctrl+D");
 
         var filter = Menu("Filter");
-        foreach (var kind in new[] { EffectKind.Grayscale, EffectKind.GaussianBlur })
-            Item(filter, EffectName(kind), () => AddEffect(kind));
+        Item(filter, EffectName(EffectKind.Grayscale), () => AddEffect(EffectKind.Grayscale));
+        var blur = new MenuItem { Header = "Blur" };
+        filter.Items.Add(blur);
+        foreach (var kind in new[] { EffectKind.GaussianBlur, EffectKind.MotionBlur })
+            Item(blur, EffectName(kind), () => AddEffect(kind));
         var view = Menu("View");
         Item(view, "Zoom in", () => ZoomBy(1.25), "Ctrl++");
         Item(view, "Zoom out", () => ZoomBy(.8), "Ctrl+-");
@@ -651,12 +666,18 @@ public partial class MainWindow : Window
                     session.Frame = frame.Frame;
                 }
                 session.View.Frame = frame.Frame;
+                if (!isPreview) session.View.PendingPaint.Clear();
                 session.View.InvalidateVisual();
                 RefreshNavigation();
                 if (version == renderVersion) break;
             }
         }
-        catch (Exception error) { Say(error.Message); }
+        catch (Exception error)
+        {
+            canvas.PendingPaint.Clear();
+            canvas.InvalidateVisual();
+            Say(error.Message);
+        }
         finally { rendering = false; }
     }
 
@@ -681,7 +702,7 @@ public partial class MainWindow : Window
 
     private string[]? Form(string title, params (string Label, string Initial)[] fields) => BuildForm(title, fields);
 
-    private string[]? BuildForm(string title, (string Label, string Initial)[] fields, (double Min, double Max)[]? ranges = null, Action<string[]?>? previewChanged = null)
+    private string[]? BuildForm(string title, (string Label, string Initial)[] fields, (double Min, double Max)[]? ranges = null, Action<string[]?>? previewChanged = null, int? hueField = null)
     {
         var dialog = new Window { Owner = effectDialog ?? this, Title = title, Width = 440, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false };
@@ -695,26 +716,41 @@ public partial class MainWindow : Window
             if (ranges is not null)
             {
                 var range = ranges[boxes.Count];
-                var slider = new Slider { Minimum = range.Min, Maximum = range.Max, Value = Number(value),
-                    VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+                bool isHue = hueField == boxes.Count;
                 var row = new DockPanel();
                 box.Width = 88;
                 DockPanel.SetDock(box, System.Windows.Controls.Dock.Right);
                 row.Children.Add(box);
-                row.Children.Add(slider);
                 bool updating = false;
-                slider.ValueChanged += (_, _) =>
+                void Write(double number)
                 {
                     if (updating) return;
                     updating = true;
-                    box.Text = slider.Value.ToString("0.###");
+                    box.Text = number.ToString("0.###");
                     updating = false;
-                };
+                }
+                Action<double> updateControl;
+                if (isHue)
+                {
+                    var hue = new HueSpectrum { Height = 22, Margin = new Thickness(0, 0, 8, 0),
+                        VerticalAlignment = VerticalAlignment.Center, Value = (Number(value) + 360) % 360 };
+                    hue.ValueChanged += (_, _) => Write(hue.Value > 180 ? hue.Value - 360 : hue.Value);
+                    updateControl = number => hue.Value = (number + 360) % 360;
+                    row.Children.Add(hue);
+                }
+                else
+                {
+                    var slider = new Slider { Minimum = range.Min, Maximum = range.Max, Value = Number(value),
+                        VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+                    slider.ValueChanged += (_, _) => Write(slider.Value);
+                    updateControl = number => slider.Value = number;
+                    row.Children.Add(slider);
+                }
                 box.TextChanged += (_, _) =>
                 {
                     if (updating || !double.TryParse(box.Text, out var number) || !double.IsFinite(number)) return;
                     updating = true;
-                    slider.Value = number;
+                    updateControl(number);
                     updating = false;
                 };
                 panel.Children.Add(row);
@@ -724,11 +760,12 @@ public partial class MainWindow : Window
         }
         if (previewChanged is not null)
         {
-            var check = new CheckBox { Content = "Live preview", Margin = new Thickness(0, 8, 0, 6) };
+            var check = new CheckBox { Content = "Live preview", IsChecked = true, Margin = new Thickness(0, 8, 0, 6) };
             void PreviewValues() => previewChanged(check.IsChecked == true ? boxes.Select(box => box.Text).ToArray() : null);
             check.Click += (_, _) => PreviewValues();
             foreach (var box in boxes) box.TextChanged += (_, _) => { if (check.IsChecked == true) PreviewValues(); };
             panel.Children.Add(check);
+            dialog.Loaded += (_, _) => PreviewValues();
             dialog.Closed += (_, _) => previewChanged(null);
         }
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };

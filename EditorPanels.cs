@@ -19,7 +19,7 @@ public partial class MainWindow
         public Visibility MaskVisibility => Layer.Mask is null ? Visibility.Collapsed : Visibility.Visible;
         public string GroupGlyph => Collapsed ? "▸" : "▾";
         public string LockGlyph => Layer.Locked ? "\uE72E" : "\uE785";
-        public string TransformTip => Layer.TransformsEnabled ? "Hide unbaked transforms" : "Show unbaked transforms";
+        public string TransformTip => Layer.TransformsEnabled ? "Bypass unbaked transforms, adjustments, and filters" : "Show unbaked transforms, adjustments, and filters";
         public double TransformIconOpacity => Layer.TransformsEnabled ? 1 : .4;
         public string MaskLabel => !Layer.MaskEnabled ? "⊘ Mask" : EditingMask ? "▣ Mask" : "□ Mask";
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
@@ -58,7 +58,8 @@ public partial class MainWindow
     {
         var layerButtons = new WrapPanel { Margin = new Thickness(5) };
         var rasterButton = LayerIconButton("+", "New Raster Layer", () => CreateLayer(LayerKind.Raster), glyph: false);
-        var groupButton = LayerIconButton("\uE8B7", "New Group", () => CreateLayer(LayerKind.Group));
+        var groupButton = LayerArtButton("New Group", () => CreateLayer(LayerKind.Group),
+            "M 0,2 L 7,2 9,4 19,4 19,6 3,6 0,14 Z M 3.5,7 L 21,7 18,15 0,15 Z");
         var deleteButton = LayerIconButton("\uE74D", "Delete Layer or Group", DeleteLayer);
         layerButtons.Children.Add(rasterButton);
         layerButtons.Children.Add(groupButton);
@@ -71,6 +72,7 @@ public partial class MainWindow
         var maskButton = LayerMaskButton();
         maskButton.ContextMenu = new ContextMenu();
         maskButton.ContextMenuOpening += OpenMaskMenu;
+        BindLayerDrop(maskButton, "Add mask here", id => Run("mask.add", 0, id, id), copy: false);
         layerButtons.Children.Add(maskButton);
         layerButtons.Children.Add(deleteButton);
         DockPanel.SetDock(properties, System.Windows.Controls.Dock.Top);
@@ -278,11 +280,6 @@ public partial class MainWindow
             if (ColorPickerDialog.Show(this, "Fill layer color", foreground) is not { } fill) return;
             color = fill;
         }
-        if (kind == LayerKind.Text)
-        {
-            if (TextLayerDialog.Show(EditorOwner, "Create text layer", new TextArgs(text, font, size, color)) is not { } input) return;
-            (text, font, size, color) = (input.Text, input.Font, input.Size, input.Color);
-        }
         string? parent = DestinationGroup();
         if (active?.Engine.Current is not { } doc) return;
         if (parent is not null)
@@ -296,8 +293,16 @@ public partial class MainWindow
             }
         }
         string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), LayerKind.Group => NextLayerName("Group"), _ => kind.ToString() };
-        Run("layer.create", new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
-            Width: width, Height: height, Text: text, Font: font, Size: size, Color: color), selectId: id);
+        var args = new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
+            Width: width, Height: height, Text: text, Font: font, Size: size, Color: color);
+        if (kind == LayerKind.Text)
+        {
+            var edited = TextLayerDialog.Show(EditorOwner, "Create text layer", new TextArgs(text, font, size, color),
+                input => PreviewText(input, value => Command.Of("layer.create", ApplyText(args, value))));
+            if (edited is null) return;
+            args = ApplyText(args, edited);
+        }
+        Run("layer.create", args, selectId: id);
     }
 
     private void Duplicate() { if (active?.ActiveId is { } source) Duplicate(source); }
@@ -482,8 +487,23 @@ public partial class MainWindow
             Say("Unlock the text layer to edit it.");
             return;
         }
-        if (TextLayerDialog.Show(EditorOwner, "Edit text layer", new TextArgs(layer.Text, layer.Font, layer.Size, layer.Color)) is { } values)
+        if (TextLayerDialog.Show(EditorOwner, "Edit text layer", new TextArgs(layer.Text, layer.Font, layer.Size, layer.Color),
+            input => PreviewText(input, value => Command.Of("layer.text", value, layer.Id))) is { } values)
             Run("layer.text", values, layer.Id, layer.Id);
+    }
+
+    private static LayerArgs ApplyText(LayerArgs layer, TextArgs text) =>
+        layer with { Text = text.Text, Font = text.Font, Size = text.Size, Color = text.Color };
+
+    private void PreviewText(TextArgs? text, Func<TextArgs, Command> command)
+    {
+        preview = null;
+        try
+        {
+            if (text is not null) preview = active?.Engine.Preview(command(text));
+        }
+        catch (InvalidDataException) { }
+        UpdateCanvas();
     }
 
     private void EditTextAt(Document doc, PointD point)
@@ -518,7 +538,7 @@ public partial class MainWindow
     {
         if (ActiveLayer() is null) return;
         var effect = new Effect(Format.Id(), kind,
-            A: kind == EffectKind.GaussianBlur ? 2 : kind == EffectKind.Opacity ? 1 : 0,
+            A: kind == EffectKind.GaussianBlur ? 2 : kind == EffectKind.MotionBlur ? 12 : kind == EffectKind.Opacity ? 1 : 0,
             Spatial: kind == EffectKind.Transform ? new() : null);
         if (EffectForm(effect) is { } configured) RunLayer("effect.add", configured);
     }
@@ -549,6 +569,7 @@ public partial class MainWindow
             EffectKind.BrightnessContrast => [("Brightness (-1 to 1)", effect.A.ToString()), ("Contrast (-1 to 1)", effect.B.ToString())],
             EffectKind.HueSaturation => [("Hue (-180° to 180°)", effect.A.ToString()), ("Saturation adjustment (-1 to 1)", effect.B.ToString())],
             EffectKind.Opacity => [("Opacity multiplier (0 to 1)", effect.A.ToString())],
+            EffectKind.MotionBlur => [("Distance (px)", effect.A.ToString()), ("Angle (degrees)", effect.B.ToString())],
             _ => [("Blur sigma (0–100 px)", effect.A.ToString())]
         };
         (double Min, double Max)[] ranges = effect.Kind switch
@@ -556,6 +577,7 @@ public partial class MainWindow
             EffectKind.BrightnessContrast => [(-1, 1), (-1, 1)],
             EffectKind.HueSaturation => [(-180, 180), (-1, 1)],
             EffectKind.Opacity => [(0, 1)],
+            EffectKind.MotionBlur => [(0, 200), (-180, 180)],
             _ => [(0, 100)]
         };
         var documentEngine = active?.Engine;
@@ -576,22 +598,13 @@ public partial class MainWindow
             catch (InvalidDataException) { }
             UpdateCanvas();
         }
-        var v = BuildForm(EffectName(effect.Kind), fields, ranges, Live);
+        var v = BuildForm(EffectName(effect.Kind), fields, ranges, Live, effect.Kind == EffectKind.HueSaturation ? 0 : null);
         Effect? result = null;
         if (v is not null) Guard(() => result = effect with { A = Number(v[0]), B = v.Length == 2 ? Number(v[1]) : 0 });
         return result;
     }
 
-    private static string EffectName(EffectKind kind) => kind switch
-    {
-        EffectKind.BrightnessContrast => "Brightness / Contrast",
-        EffectKind.HueSaturation => "Hue / Saturation",
-        EffectKind.GaussianBlur => "Gaussian Blur",
-        EffectKind.Transform => "Transform",
-        EffectKind.Opacity => "Opacity",
-        EffectKind.BlendMode => "Blend mode",
-        _ => "Grayscale"
-    };
+    private static string EffectName(EffectKind kind) => CommandEngine.EffectLabel(kind);
 
     private void RefreshLog()
     {
