@@ -20,6 +20,7 @@ public partial class MainWindow
     private Point gestureStart;
     private Point panOrigin;
     private Area? selectionOrigin;
+    private PointD? selectionDragDelta;
     private readonly List<PointD> stroke = [];
 
     private void HookCanvas()
@@ -59,13 +60,24 @@ public partial class MainWindow
                 case "Eyedropper": Sample(point); return;
                 case "Transform": EditTransform(); return;
                 case "Selection":
-                    if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) && doc.Selection is { } selection &&
+                    if (doc.Selection is { } selection &&
                         point.X >= selection.X && point.X < selection.X + selection.Width &&
                         point.Y >= selection.Y && point.Y < selection.Y + selection.Height)
                         selectionOrigin = selection;
                     break;
                 case "Move":
                     if (ActiveLayer() is not { Locked: false } target || !Editable(doc, target.Id)) { Say("Select an unlocked layer to move."); return; }
+                    if (doc.Selection is { } selected)
+                    {
+                        if (target.Kind != LayerKind.Raster || point.X < selected.X || point.X >= selected.X + selected.Width ||
+                            point.Y < selected.Y || point.Y >= selected.Y + selected.Height) return;
+                        selectionOrigin = selected;
+                        moveId = target.Id;
+                        gesture = "Move selection";
+                        canvas.CaptureMouse();
+                        e.Handled = true;
+                        return;
+                    }
                     moveId = target.Id;
                     moveOriginal = target.Transform;
                     moveParentInverse = SKMatrix.Identity;
@@ -75,7 +87,8 @@ public partial class MainWindow
                     break;
                 case "Brush":
                 case "Eraser":
-                    if (ActiveLayer() is not { Kind: LayerKind.Raster, Locked: false } raster || !Editable(doc, raster.Id))
+                    if (ActiveLayer() is not { Locked: false } raster || !Editable(doc, raster.Id) ||
+                        (raster.Kind != LayerKind.Raster && !(active.MaskTarget == raster.Id && raster.Mask is not null)))
                     { Say("Select an unlocked raster layer to paint."); return; }
                     stroke.Add(new(point.X, point.Y));
                     canvas.Stroke = stroke;
@@ -117,6 +130,11 @@ public partial class MainWindow
                 canvas.Marquee = GestureBounds(point);
                 canvas.InvalidateVisual();
                 break;
+            case "Move selection":
+                var selectionDelta = point - gestureStart;
+                selectionDragDelta = new(Math.Round(selectionDelta.X), Math.Round(selectionDelta.Y));
+                UpdateCanvas();
+                break;
             case "Move":
                 var delta = point - gestureStart;
                 var mapped = moveParentInverse.MapVector((float)delta.X, (float)delta.Y);
@@ -146,13 +164,19 @@ public partial class MainWindow
         var moved = movePreview;
         var original = moveOriginal;
         string? id = moveId;
+        var motion = end - gestureStart;
+        var moveSelection = new PointD(Math.Round(motion.X), Math.Round(motion.Y));
+        bool mask = active.MaskTarget is { } maskId && ActiveLayer() is { Mask: not null } layer && layer.Id == maskId;
         CancelGesture();
         switch (completed)
         {
             case "Brush":
             case "Eraser":
                 if (points.Length > 0)
-                    RunLayer("layer.paintStroke", new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser"));
+                    RunLayer(mask ? "mask.paintStroke" : "layer.paintStroke", new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser"));
+                break;
+            case "Move selection":
+                if (moveSelection != default) Run("layer.moveSelection", moveSelection, id);
                 break;
             case "Move":
                 if (moved is not null && moved != original) Run("layer.transform", moved, id);
@@ -200,7 +224,12 @@ public partial class MainWindow
         moveId = null;
         moveOriginal = null;
         movePreview = null;
-        if (preview is not null) { preview = null; UpdateCanvas(); }
+        if (preview is not null || selectionDragDelta is not null)
+        {
+            preview = null;
+            selectionDragDelta = null;
+            UpdateCanvas();
+        }
         stroke.Clear();
         canvas.Stroke = null;
         canvas.Marquee = null;
@@ -263,7 +292,19 @@ public partial class MainWindow
     {
         CancelGesture();
         tool = name;
-        canvas.Cursor = name == "Move" ? Cursors.SizeAll : Cursors.Cross;
+        canvas.Cursor = name switch
+        {
+            "Move" => Cursors.SizeAll,
+            "Brush" => Cursors.Pen,
+            "Eraser" => Cursors.UpArrow,
+            "Selection" => Cursors.Cross,
+            "Crop" => Cursors.SizeNWSE,
+            "Text" => Cursors.IBeam,
+            "Shape" => Cursors.SizeNESW,
+            "Eyedropper" => Cursors.Hand,
+            "Transform" => Cursors.ScrollAll,
+            _ => Cursors.Arrow
+        };
         RefreshTools();
     }
 
@@ -278,11 +319,12 @@ public partial class MainWindow
             toolsPanel.Children.Add(button);
         }
 
+        toolColors.Children.Clear();
+        toolColors.Children.Add(ColorButton("Foreground", foreground, value => foreground = value));
+        toolColors.Children.Add(ColorButton("Background", background, value => background = value));
+        toolColors.Children.Add(Button("⇄  Swap (X)", SwapColors, "Swap foreground and background colors"));
         ToolOptions.Children.Clear();
         OptionLabel(tool);
-        ToolOptions.Children.Add(ColorButton("Foreground", foreground, value => foreground = value));
-        ToolOptions.Children.Add(ColorButton("Background", background, value => background = value));
-        ToolOptions.Children.Add(Button("⇄", () => { (foreground, background) = (background, foreground); RefreshTools(); }, "Swap colors"));
         if (tool is "Brush" or "Eraser")
         {
             SliderOption("Size", 1, 512, brushSize, value => brushSize = value);
@@ -296,6 +338,12 @@ public partial class MainWindow
             ToolOptions.Children.Add(list);
         }
         if (tool == "Transform") ToolOptions.Children.Add(Button("Edit transform…", EditTransform));
+    }
+
+    private void SwapColors()
+    {
+        (foreground, background) = (background, foreground);
+        RefreshTools();
     }
 
     private Button ColorButton(string label, string value, Action<string> apply)
@@ -360,12 +408,15 @@ public partial class MainWindow
             Key.E when shift => ExportPng, Key.W => () => CloseSession(active),
             Key.Z => () => Run("history.undo", 0), Key.Y => () => Run("history.redo", 0),
             Key.D => () => Run<Area?>("document.selection", null),
+            Key.G when !shift => Group,
             Key.OemPlus or Key.Add => () => ZoomBy(1.25), Key.OemMinus or Key.Subtract => () => ZoomBy(.8),
             Key.D0 or Key.NumPad0 => Fit, Key.D1 or Key.NumPad1 => ActualPixels,
             _ => null
         } : null;
         if (action is null && modifiers == ModifierKeys.None)
         {
+            if (e.Key == Key.X) action = SwapColors;
+            if (e.Key == Key.Delete) action = () => RunLayer("layer.clearSelection", 0);
             string? shortcut = e.Key switch
             {
                 Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection",

@@ -11,7 +11,7 @@ public sealed record Command(string Name, string? Target, JsonElement Args)
     public T Read<T>() => Args.Deserialize<T>(Format.Json) ?? throw new InvalidDataException($"Missing arguments for {Name}.");
 }
 
-public sealed record NewArgs(string Id, int Width, int Height, string? Background = null);
+public sealed record NewArgs(string Id, int Width, int Height, string? Background = null, double PixelsPerInch = 72, bool StarterLayers = false);
 public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? Parent = null,
     Transform? Transform = null, string Text = "Text", string Font = "Liberation Sans", double Size = 48,
     string Color = "#FFFFFFFF", int Width = 100, int Height = 100);
@@ -22,7 +22,7 @@ public sealed record TextArgs(string Text, string Font, double Size, string Colo
 public sealed record ShapeArgs(int Width, int Height, string Color);
 public sealed record StrokeArgs(PointD[] Points, double Size, double Hardness, double Opacity, string Color, bool Erase);
 public sealed record ReorderArgs(string? Parent, string? Before);
-public sealed record GroupArgs(string Id, string Name, string[] Layers);
+public sealed record GroupArgs(string Id, string Name, string[] Layers, string? Anchor = null);
 public sealed record MergeArgs(string Id, string Name, string[] Layers);
 public sealed record EffectOrder(string Id, int Index);
 public sealed record LogEntry(DateTimeOffset Timestamp, string? DocumentId, Command Command, bool Success, string? Error);
@@ -68,13 +68,31 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var args = command.Read<NewArgs>();
                 Format.Dimensions(args.Width, args.Height);
                 CheckId(args.Id);
-                var doc = new Document(args.Id, args.Width, args.Height);
+                var doc = new Document(args.Id, args.Width, args.Height) { PixelsPerInch = Range(args.PixelsPerInch, 1, 100000) };
                 if (args.Background is { } color)
                 {
                     Format.Color(color);
-                    doc = doc with { Layers = [new Layer(args.Id + "-background", "Background", LayerKind.Rectangle)
-                    { Width = args.Width, Height = args.Height, Color = color }] };
-                    CheckId(doc.Layers[0].Id);
+                    if (!args.StarterLayers)
+                    {
+                        doc = doc with { Layers = [new Layer(args.Id + "-background", "Background", LayerKind.Rectangle)
+                            { Width = args.Width, Height = args.Height, Color = color }] };
+                        CheckId(doc.Layers[0].Id);
+                    }
+                }
+                if (args.StarterLayers)
+                {
+                    var groupId = args.Id + "-group";
+                    var layerId = args.Id + "-layer";
+                    CheckId(groupId);
+                    CheckId(layerId);
+                    doc = doc with { Layers = [new Layer(groupId, "Group 1", LayerKind.Group)
+                    {
+                        Children = [new Layer(layerId, "Layer 1", LayerKind.Raster)
+                        {
+                            Width = args.Width, Height = args.Height,
+                            Pixels = args.Background is { } fill ? SolidPixels(args.Width, args.Height, Format.Color(fill)) : null
+                        }]
+                    }] };
                 }
                 Reset(doc, null);
                 return;
@@ -95,7 +113,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 saved = current;
                 return;
             case "document.export":
-                File.WriteAllBytes(command.Read<PathArgs>().Path, backend.EncodePng(backend.Composite(current)));
+                File.WriteAllBytes(command.Read<PathArgs>().Path, backend.EncodePng(backend.Composite(current), current.PixelsPerInch));
                 return;
             case "history.undo": cursor = Math.Max(0, cursor - 1); return;
             case "history.redo": cursor = Math.Min(history.Count - 1, cursor + 1); return;
@@ -118,11 +136,15 @@ public sealed class CommandEngine(IRasterBackend backend)
     {
         const long limit = 384L * 1024 * 1024;
         var seen = new HashSet<Pixels>(ReferenceEqualityComparer.Instance);
+        var seenMasks = new HashSet<AlphaMask>(ReferenceEqualityComparer.Instance);
         long size = 0;
         for (int i = history.Count - 1; i >= 0; i--)
         {
             foreach (var layer in history[i].Document.AllLayers())
+            {
                 if (layer.Pixels is { } pixels && seen.Add(pixels)) size += pixels.Rgba.LongLength;
+                if (layer.Mask is { } mask && seenMasks.Add(mask)) size += mask.Alpha.LongLength;
+            }
             if (i == history.Count - 1 || (size <= limit && history.Count - i <= 250)) continue;
             history.RemoveRange(0, i + 1);
             HistoryBase += i + 1;
@@ -241,6 +263,32 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return Edit(layer => layer.Kind is LayerKind.Rectangle or LayerKind.Ellipse ? layer with
                     { Width = shape.Width, Height = shape.Height, Color = shape.Color }
                     : throw new InvalidDataException("Select a shape layer."));
+            case "layer.clearSelection":
+            case "layer.moveSelection":
+                if (doc.Selection is not { } selectedArea) return doc;
+                PointD? delta = command.Name == "layer.moveSelection" ? command.Read<PointD>() : null;
+                if (delta is { } offset)
+                {
+                    Range(offset.X, -16384, 16384);
+                    Range(offset.Y, -16384, 16384);
+                }
+                var selectedLayer = Wanted();
+                EnsureEditable(layers, selectedLayer.Id);
+                if (selectedLayer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to edit pixels.");
+                if (selectedLayer.Pixels is null) return doc;
+                var edited = backend.EditSelection(doc, selectedLayer, selectedArea, delta);
+                var updated = Edit(layer => layer with { Pixels = edited.Pixels, RasterX = edited.X, RasterY = edited.Y });
+                if (delta is not { } displacement) return updated;
+                var translated = selectedArea with { X = selectedArea.X + (int)Math.Round(displacement.X),
+                    Y = selectedArea.Y + (int)Math.Round(displacement.Y) };
+                return updated with { Selection = Intersects(translated, doc) ? Clip(translated, doc) : null };
+            case "mask.add":
+                return Edit(layer => layer.Mask is not null ? layer : layer with
+                {
+                    Mask = new AlphaMask(doc.Width, doc.Height, Enumerable.Repeat((byte)255, doc.Width * doc.Height).ToArray())
+                });
+            case "mask.remove": return Edit(layer => layer with { Mask = null });
+            case "mask.paintStroke":
             case "layer.paintStroke":
                 var stroke = command.Read<StrokeArgs>();
                 Range(stroke.Size, 1, 2048);
@@ -250,6 +298,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (stroke.Points is not { Length: > 0 and <= 100000 } ||
                     stroke.Points.Any(point => !double.IsFinite(point.X) || !double.IsFinite(point.Y)))
                     throw new InvalidDataException("Invalid stroke points.");
+                if (command.Name == "mask.paintStroke")
+                    return Edit(layer => layer.Mask is not null ? layer with { Mask = backend.PaintMask(doc, layer, stroke) }
+                        : throw new InvalidDataException("Add a mask before painting it."));
                 return Edit(layer => layer.Kind == LayerKind.Raster
                     ? layer with { Pixels = backend.Stroke(doc, layer, stroke) }
                     : throw new InvalidDataException("Select a raster layer to paint."));
@@ -263,15 +314,19 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.group":
                 var group = command.Read<GroupArgs>();
                 NewId(group.Id);
-                var items = Siblings(layers, group.Layers, out var parent);
-                foreach (var item in items) EnsureEditable(layers, item.Id);
-                var grouped = new Layer(group.Id, Name(group.Name), LayerKind.Group) { Children = items };
-                return With(ReplaceItems(layers, parent, items, [grouped]));
+                if (group.Anchor is null)
+                {
+                    var items = Siblings(layers, group.Layers, out var parent);
+                    foreach (var item in items) EnsureEditable(layers, item.Id);
+                    var grouped = new Layer(group.Id, Name(group.Name), LayerKind.Group) { Children = items };
+                    return With(ReplaceItems(layers, parent, items, [grouped]));
+                }
+                return With(GroupAtAnchor(doc, group));
             case "layer.ungroup":
                 var ungroup = Wanted();
                 EnsureEditable(layers, ungroup.Id);
                 if (ungroup.Kind != LayerKind.Group || ungroup.Transform != new Transform() ||
-                    !ungroup.Visible || ungroup.Opacity != 1 || ungroup.Effects.Length != 0 || ungroup.Blend != Blend.Normal)
+                    ungroup.Mask is not null || !ungroup.Visible || ungroup.Opacity != 1 || ungroup.Effects.Length != 0 || ungroup.Blend != Blend.Normal)
                     throw new InvalidDataException("Ungroup requires a visible group with default transform, opacity and blend and no effects.");
                 return With(ReplaceItems(layers, ParentOf(layers, ungroup.Id), [ungroup], ungroup.Children));
             case "layer.merge":
@@ -324,6 +379,22 @@ public sealed class CommandEngine(IRasterBackend backend)
         edit(list);
         return list.ToArray();
     }
+
+    private static Pixels SolidPixels(int width, int height, uint argb)
+    {
+        var bytes = new byte[width * height * 4];
+        for (int i = 0; i < bytes.Length; i += 4)
+        {
+            bytes[i] = (byte)(argb >> 16);
+            bytes[i + 1] = (byte)(argb >> 8);
+            bytes[i + 2] = (byte)argb;
+            bytes[i + 3] = (byte)(argb >> 24);
+        }
+        return new(width, height, bytes);
+    }
+
+    private static bool Intersects(Area area, Document doc) => area.X < doc.Width && area.Y < doc.Height &&
+        (long)area.X + area.Width > 0 && (long)area.Y + area.Height > 0;
 
     private static Area Clip(Area area, Document doc)
     {
@@ -382,6 +453,37 @@ public sealed class CommandEngine(IRasterBackend backend)
         var found = items.Where(item => ids.Contains(item.Id)).ToArray();
         if (found.Length != ids.Length) throw new InvalidDataException("Selected layers must be siblings.");
         return found;
+    }
+
+    private static Layer[] GroupAtAnchor(Document doc, GroupArgs group)
+    {
+        var all = doc.AllLayers().ToArray();
+        if (group.Layers is not { Length: > 0 } || group.Layers.Distinct().Count() != group.Layers.Length ||
+            !group.Layers.Contains(group.Anchor) || group.Layers.Any(id => !all.Any(layer => layer.Id == id)))
+            throw new InvalidDataException("Select existing layers to group.");
+
+        var ids = group.Layers.ToHashSet();
+        string RootSelected(string id)
+        {
+            string root = id;
+            for (string? parent = ParentOf(doc.Layers, id); parent is not null; parent = ParentOf(doc.Layers, parent))
+                if (ids.Contains(parent)) root = parent;
+            return root;
+        }
+        var roots = ids.Select(RootSelected).ToHashSet();
+        var items = all.Where(layer => roots.Contains(layer.Id)).ToArray();
+        var anchor = RootSelected(group.Anchor!);
+        foreach (var item in items) EnsureEditable(doc.Layers, item.Id);
+        var grouped = new Layer(group.Id, Name(group.Name), LayerKind.Group) { Children = items };
+
+        Layer[] Replace(Layer[] layers) => layers.SelectMany<Layer, Layer>(layer =>
+        {
+            if (layer.Id == anchor) return [grouped];
+            if (roots.Contains(layer.Id)) return [];
+            return [layer.Kind == LayerKind.Group ? layer with { Children = Replace(layer.Children) } : layer];
+        }).ToArray();
+
+        return Replace(doc.Layers);
     }
 
     private static Layer[] ReplaceItems(Layer[] layers, string? parent, Layer[] remove, Layer[] insert)

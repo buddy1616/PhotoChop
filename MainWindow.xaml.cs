@@ -23,6 +23,8 @@ public partial class MainWindow : Window
         public int LogStart { get; set; }
         public bool Recording { get; set; } = true;
         public string? ActiveId { get; set; }
+        public HashSet<string> Collapsed { get; } = [];
+        public string? MaskTarget { get; set; }
         public double Zoom { get; set; } = 1;
         public Point Offset { get; set; }
         public Pixels? Composite { get; set; }
@@ -48,6 +50,7 @@ public partial class MainWindow : Window
         VerticalContentAlignment = VerticalAlignment.Stretch
     };
     private readonly EditorCanvas canvas = new();
+    private readonly StackPanel toolColors = new() { Margin = new Thickness(6) };
     private readonly StackPanel toolsPanel = new() { Margin = new Thickness(6) };
     private readonly DockPanel layersPanel = new();
     private readonly ListBox layers = new() { SelectionMode = SelectionMode.Extended, AllowDrop = true };
@@ -89,7 +92,7 @@ public partial class MainWindow : Window
             if (active is { NeedsFit: true } && canvas.ActualWidth > 0) Fit();
         };
         HookCanvas();
-        RefreshTools();
+        SetTool("Move");
         Refresh();
     }
 
@@ -149,7 +152,7 @@ public partial class MainWindow : Window
         var center = new LayoutDocumentPane();
         center.Children.Add(workspace);
         var right = new LayoutAnchorablePane { DockWidth = new GridLength(400) };
-        foreach (string title in new[] { "Layers", "History", "Properties", "Command Log" }) right.Children.Add(NewPanel(title));
+        foreach (string title in new[] { "Layers", "History", "Command Log" }) right.Children.Add(NewPanel(title));
         Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { left, center, right } } };
         right.SelectedContentIndex = 0;
     }
@@ -194,18 +197,33 @@ public partial class MainWindow : Window
         Item(edit, "Undo", () => Run("history.undo", 0), "Ctrl+Z");
         Item(edit, "Redo", () => Run("history.redo", 0), "Ctrl+Y");
         Item(edit, "Configure tools…", ConfigureTools);
+        var transformItem = Item(edit, "Transform layer or group…", EditTransform);
+        var textItem = Item(edit, "Edit text…", EditText);
+        var shapeItem = Item(edit, "Edit shape…", EditShape);
+        edit.SubmenuOpened += (_, _) =>
+        {
+            var selected = ActiveLayer();
+            transformItem.IsEnabled = selected is not null;
+            textItem.IsEnabled = selected?.Kind == LayerKind.Text;
+            shapeItem.IsEnabled = selected?.Kind is LayerKind.Rectangle or LayerKind.Ellipse;
+        };
         var image = Menu("Image");
         Item(image, "Crop tool", () => SetTool("Crop"));
         Item(image, "Crop to selection", () => { if (active?.Engine.Current?.Selection is { } area) Run("document.crop", area); });
         Item(image, "Flatten image…", Flatten);
         Item(image, "Default document size…", SetDefaults);
 
+        var adjustments = new MenuItem { Header = "Adjustments" };
+        image.Items.Add(adjustments);
+        foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity })
+            Item(adjustments, EffectName(kind), () => AddEffect(kind));
+
         var layer = Menu("Layer");
         Item(layer, "New raster layer", () => CreateLayer(LayerKind.Raster));
         Item(layer, "Duplicate selected layer", Duplicate);
         Item(layer, "Rename selected layer…", Rename);
         Item(layer, "Delete selected layer", DeleteLayer);
-        Item(layer, "Group selected layers…", Group);
+        Item(layer, "Group selected layers", Group, "Ctrl+G");
         Item(layer, "Ungroup", () => RunLayer("layer.ungroup", 0));
         Item(layer, "Move into group…", MoveToGroup);
         Item(layer, "Merge selected layers…", Merge);
@@ -215,19 +233,20 @@ public partial class MainWindow : Window
         Item(select, "Deselect", () => Run<Area?>("document.selection", null), "Ctrl+D");
 
         var filter = Menu("Filter");
-        foreach (var kind in Enum.GetValues<EffectKind>()) Item(filter, EffectName(kind), () => AddEffect(kind));
+        foreach (var kind in new[] { EffectKind.Grayscale, EffectKind.GaussianBlur })
+            Item(filter, EffectName(kind), () => AddEffect(kind));
         var view = Menu("View");
         Item(view, "Zoom in", () => ZoomBy(1.25), "Ctrl++");
         Item(view, "Zoom out", () => ZoomBy(.8), "Ctrl+-");
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", "Layers", "History", "Properties", "Command Log" })
+        foreach (string title in new[] { "Tools", "Layers", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Reset workspace", ResetLayout);
         var help = Menu("Help");
         Item(help, "Editing controls", () => MessageBox.Show(this,
-            "Use the wheel to zoom. Pan with the middle mouse button or Space + drag.\nDrag layers to reorder. Hold Shift while dropping onto a group to move into it.\nShift-drag inside a selection to move it. Use Ctrl or Shift to select multiple layers or log entries.", "CHOP"));
+            "Use the wheel to zoom. Pan with the middle mouse button or Space + drag.\nDrag layers to reorder. Drop onto the center of a group to move into it.\nDrag inside a selection to move its outline with the Selection tool. Use Ctrl or Shift to select multiple layers or log entries.", "CHOP"));
     }
 
     private MenuItem Menu(string title)
@@ -237,23 +256,23 @@ public partial class MainWindow : Window
         return item;
     }
 
-    private static void Item(MenuItem menu, string title, Action action, string? shortcut = null)
+    private static MenuItem Item(MenuItem menu, string title, Action action, string? shortcut = null)
     {
         var item = new MenuItem { Header = title, InputGestureText = shortcut ?? "" };
         item.Click += (_, _) => action();
         menu.Items.Add(item);
+        return item;
     }
 
     private void NewDocument()
     {
-        var values = Form("New document", ("Width", preferences.Width.ToString()), ("Height", preferences.Height.ToString()),
-            ("Background (blank = transparent)", ""));
-        if (values is null) return;
+        var settings = NewDocumentDialog.Show(this, preferences.Width, preferences.Height, background);
+        if (settings is null) return;
         Guard(() =>
         {
             var session = NewSession();
-            session.Engine.Execute(Command.Of("document.create", new NewArgs(Format.Id(), Int(values[0]), Int(values[1]),
-                string.IsNullOrWhiteSpace(values[2]) ? null : values[2])));
+            session.Engine.Execute(Command.Of("document.create", settings));
+            session.ActiveId = settings.Id + "-layer";
             AddSession(session);
         });
     }
@@ -346,14 +365,29 @@ public partial class MainWindow : Window
 
     private void ImportPng()
     {
-        if (active is null) return;
         var picker = new OpenFileDialog { Filter = "PNG images (*.png)|*.png" };
         if (picker.ShowDialog(this) != true) return;
         Guard(() =>
         {
-            var id = Format.Id();
-            Run("layer.importPng", new ImportArgs(id, Path.GetFileNameWithoutExtension(picker.FileName),
-                File.ReadAllBytes(picker.FileName)), selectId: id);
+            byte[] source = File.ReadAllBytes(picker.FileName);
+            var name = Path.GetFileNameWithoutExtension(picker.FileName);
+            string id = Format.Id();
+            if (active is null)
+            {
+                var image = renderer.DecodePng(source);
+                var session = NewSession();
+                session.Engine.Execute(Command.Of("document.create", new NewArgs(Format.Id(), image.Width, image.Height)));
+                session.Engine.Execute(Command.Of("layer.importPng", new ImportArgs(id, name, source)));
+                session.ActiveId = id;
+                AddSession(session);
+            }
+            else
+            {
+                string? parent = DestinationGroup();
+                if (parent is not null) active.Collapsed.Remove(parent);
+                if (!Run("layer.importPng", new ImportArgs(id, name, source, parent), selectId: id)) return;
+            }
+            Say($"Imported {name}.png");
         });
     }
 
@@ -420,7 +454,7 @@ public partial class MainWindow : Window
         try { action(); return true; }
         catch (Exception error)
         {
-            MessageBox.Show(this, error.Message, "CHOP", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(effectDialog ?? this, error.Message, "CHOP", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
     }
@@ -459,6 +493,8 @@ public partial class MainWindow : Window
         if (preview is null) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
         canvas.Selection = doc.Selection;
+        if (doc.Selection is { } selected && selectionDragDelta is { } delta)
+            canvas.Selection = selected with { X = selected.X + (int)delta.X, Y = selected.Y + (int)delta.Y };
         canvas.Zoom = active.Zoom;
         canvas.Offset = active.Offset;
         canvas.InvalidateVisual();
@@ -470,16 +506,24 @@ public partial class MainWindow : Window
             {
                 int version = renderVersion;
                 var target = preview ?? snapshot;
-                bool isPreview = preview is not null;
+                var shift = selectionDragDelta;
+                string? targetId = moveId;
+                bool isPreview = preview is not null || shift is not null;
                 bool cached = !isPreview && session.Rendered is { } prior &&
                     ReferenceEquals(target.Layers, prior.Layers) && target.Width == prior.Width && target.Height == prior.Height;
                 var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!) : await Task.Run(() =>
                 {
+                    if (shift is { } offset && snapshot.Selection is { } area && targetId is not null &&
+                        snapshot.AllLayers().FirstOrDefault(layer => layer.Id == targetId) is { Pixels: not null } layer)
+                    {
+                        var result = renderer.EditSelection(snapshot, layer, area, offset);
+                        target = target with { Layers = PreviewPixels(target.Layers, targetId, result) };
+                    }
                     var pixels = renderer.Composite(target);
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels));
                 });
                 if (!ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
-                    (isPreview && preview is null)) continue;
+                    (isPreview && preview is null && selectionDragDelta is null)) continue;
                 if (!isPreview)
                 {
                     session.Rendered = snapshot;
@@ -494,6 +538,10 @@ public partial class MainWindow : Window
         catch (Exception error) { Say(error.Message); }
         finally { rendering = false; }
     }
+
+    private static Layer[] PreviewPixels(Layer[] items, string id, RasterEdit edit) => items.Select(layer =>
+        layer.Id == id ? layer with { Pixels = edit.Pixels, RasterX = edit.X, RasterY = edit.Y }
+        : layer.Children.Length == 0 ? layer : layer with { Children = PreviewPixels(layer.Children, id, edit) }).ToArray();
 
     private void Say(string? message = null)
     {
@@ -510,9 +558,11 @@ public partial class MainWindow : Window
         return item;
     }
 
-    private string[]? Form(string title, params (string Label, string Initial)[] fields)
+    private string[]? Form(string title, params (string Label, string Initial)[] fields) => BuildForm(title, fields);
+
+    private string[]? BuildForm(string title, (string Label, string Initial)[] fields, (double Min, double Max)[]? ranges = null)
     {
-        var dialog = new Window { Owner = this, Title = title, Width = 440, SizeToContent = SizeToContent.Height,
+        var dialog = new Window { Owner = effectDialog ?? this, Title = title, Width = 440, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false };
         var panel = new StackPanel { Margin = new Thickness(16) };
         var boxes = new List<TextBox>();
@@ -521,7 +571,34 @@ public partial class MainWindow : Window
             var box = new TextBox { Text = value, Margin = new Thickness(0, 3, 0, 8), Padding = new Thickness(4) };
             var caption = new Label { Content = label, Target = box, Padding = new Thickness(0) };
             panel.Children.Add(caption);
-            panel.Children.Add(box);
+            if (ranges is not null)
+            {
+                var range = ranges[boxes.Count];
+                var slider = new Slider { Minimum = range.Min, Maximum = range.Max, Value = Number(value),
+                    VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+                var row = new DockPanel();
+                box.Width = 88;
+                DockPanel.SetDock(box, System.Windows.Controls.Dock.Right);
+                row.Children.Add(box);
+                row.Children.Add(slider);
+                bool updating = false;
+                slider.ValueChanged += (_, _) =>
+                {
+                    if (updating) return;
+                    updating = true;
+                    box.Text = slider.Value.ToString("0.###");
+                    updating = false;
+                };
+                box.TextChanged += (_, _) =>
+                {
+                    if (updating || !double.TryParse(box.Text, out var number) || !double.IsFinite(number)) return;
+                    updating = true;
+                    slider.Value = number;
+                    updating = false;
+                };
+                panel.Children.Add(row);
+            }
+            else panel.Children.Add(box);
             boxes.Add(box);
         }
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
