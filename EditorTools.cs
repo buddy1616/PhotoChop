@@ -1,0 +1,380 @@
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Media;
+using Chop.Core;
+using Chop.Rendering;
+using SkiaSharp;
+
+namespace PhotoChop;
+
+public partial class MainWindow
+{
+    private string? gesture;
+    private string? moveId;
+    private Chop.Core.Transform? moveOriginal;
+    private Chop.Core.Transform? movePreview;
+    private Document? preview;
+    private SKMatrix moveParentInverse = SKMatrix.Identity;
+    private Point gestureStart;
+    private Point panOrigin;
+    private Area? selectionOrigin;
+    private readonly List<PointD> stroke = [];
+
+    private void HookCanvas()
+    {
+        canvas.MouseWheel += (_, e) =>
+        {
+            if (active is null || gesture is not null) return;
+            ZoomBy(Math.Pow(1.15, e.Delta / 120.0), e.GetPosition(canvas));
+            e.Handled = true;
+        };
+        canvas.MouseDown += CanvasDown;
+        canvas.MouseMove += CanvasMove;
+        canvas.MouseUp += CanvasUp;
+        canvas.LostMouseCapture += (_, _) => CancelGesture();
+        canvas.MouseLeave += (_, _) => { if (gesture is null) { lastCursor = null; Say(); } };
+    }
+
+    private void CanvasDown(object sender, MouseButtonEventArgs e)
+    {
+        if (active?.Engine.Current is not { } doc || gesture is not null) return;
+        var view = e.GetPosition(canvas);
+        var point = canvas.FromView(view);
+        canvas.Focus();
+        if (e.ChangedButton == MouseButton.Middle || (e.ChangedButton == MouseButton.Left && Keyboard.IsKeyDown(Key.Space)))
+        {
+            gesture = "Pan";
+            gestureStart = view;
+            panOrigin = active.Offset;
+        }
+        else if (e.ChangedButton == MouseButton.Left)
+        {
+            if (point.X < 0 || point.Y < 0 || point.X >= doc.Width || point.Y >= doc.Height) return;
+            gestureStart = point;
+            switch (tool)
+            {
+                case "Text": CreateLayer(LayerKind.Text, new(Math.Floor(point.X), Math.Floor(point.Y))); return;
+                case "Eyedropper": Sample(point); return;
+                case "Transform": EditTransform(); return;
+                case "Selection":
+                    if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) && doc.Selection is { } selection &&
+                        point.X >= selection.X && point.X < selection.X + selection.Width &&
+                        point.Y >= selection.Y && point.Y < selection.Y + selection.Height)
+                        selectionOrigin = selection;
+                    break;
+                case "Move":
+                    if (ActiveLayer() is not { Locked: false } target || !Editable(doc, target.Id)) { Say("Select an unlocked layer to move."); return; }
+                    moveId = target.Id;
+                    moveOriginal = target.Transform;
+                    moveParentInverse = SKMatrix.Identity;
+                    var parent = doc.AllLayers().FirstOrDefault(layer => layer.Children.Any(child => child.Id == target.Id));
+                    if (parent is not null && SkiaRenderer.WorldMatrix(doc.Layers, parent.Id, SKMatrix.Identity) is { } world &&
+                        world.TryInvert(out var inverted)) moveParentInverse = inverted;
+                    break;
+                case "Brush":
+                case "Eraser":
+                    if (ActiveLayer() is not { Kind: LayerKind.Raster, Locked: false } raster || !Editable(doc, raster.Id))
+                    { Say("Select an unlocked raster layer to paint."); return; }
+                    stroke.Add(new(point.X, point.Y));
+                    canvas.Stroke = stroke;
+                    canvas.StrokeColor = foreground;
+                    canvas.StrokeSize = brushSize;
+                    canvas.StrokeOpacity = brushOpacity;
+                    canvas.Erasing = tool == "Eraser";
+                    break;
+            }
+            gesture = tool;
+        }
+        else return;
+        canvas.CaptureMouse();
+        canvas.InvalidateVisual();
+        e.Handled = true;
+    }
+
+    private void CanvasMove(object sender, MouseEventArgs e)
+    {
+        if (active?.Engine.Current is not { } doc) return;
+        var view = e.GetPosition(canvas);
+        var point = canvas.FromView(view);
+        lastCursor = point;
+        switch (gesture)
+        {
+            case "Pan":
+                active.Offset = panOrigin + (view - gestureStart);
+                UpdateView();
+                break;
+            case "Brush":
+            case "Eraser":
+                if (stroke.Count < 99999 && (point - new Point(stroke[^1].X, stroke[^1].Y)).Length >= .25)
+                    stroke.Add(new(point.X, point.Y));
+                canvas.InvalidateVisual();
+                break;
+            case "Selection":
+            case "Crop":
+            case "Shape":
+                canvas.Marquee = GestureBounds(point);
+                canvas.InvalidateVisual();
+                break;
+            case "Move":
+                var delta = point - gestureStart;
+                var mapped = moveParentInverse.MapVector((float)delta.X, (float)delta.Y);
+                movePreview = moveOriginal! with { X = Math.Round(moveOriginal!.X + mapped.X, 2),
+                    Y = Math.Round(moveOriginal.Y + mapped.Y, 2) };
+                preview = doc with { Layers = PreviewMove(doc.Layers, moveId!, movePreview) };
+                UpdateCanvas();
+                break;
+        }
+        Say();
+    }
+
+    private static Layer[] PreviewMove(Layer[] items, string id, Chop.Core.Transform transform) => items.Select(layer =>
+        layer.Id == id ? layer with { Transform = transform }
+        : layer.Children.Length == 0 ? layer : layer with { Children = PreviewMove(layer.Children, id, transform) }).ToArray();
+
+    private void CanvasUp(object sender, MouseButtonEventArgs e)
+    {
+        if (gesture is null || active is null ||
+            (gesture == "Pan" ? e.ChangedButton is not (MouseButton.Left or MouseButton.Middle) : e.ChangedButton != MouseButton.Left)) return;
+        string completed = gesture;
+        var end = canvas.FromView(e.GetPosition(canvas));
+        var bounds = GestureBounds(end);
+        int x = (int)Math.Floor(bounds.X), y = (int)Math.Floor(bounds.Y);
+        var area = new Area(x, y, (int)Math.Ceiling(bounds.Right) - x, (int)Math.Ceiling(bounds.Bottom) - y);
+        var points = stroke.ToArray();
+        var moved = movePreview;
+        var original = moveOriginal;
+        string? id = moveId;
+        CancelGesture();
+        switch (completed)
+        {
+            case "Brush":
+            case "Eraser":
+                if (points.Length > 0)
+                    RunLayer("layer.paintStroke", new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser"));
+                break;
+            case "Move":
+                if (moved is not null && moved != original) Run("layer.transform", moved, id);
+                break;
+            case "Selection":
+                if (bounds.Width < 1 || bounds.Height < 1) Run<Area?>("document.selection", null);
+                else Run("document.selection", area);
+                break;
+            case "Crop":
+                if (bounds.Width >= 1 && bounds.Height >= 1) { Run("document.crop", area); Fit(); }
+                break;
+            case "Shape":
+                if (bounds.Width >= 1 && bounds.Height >= 1)
+                    CreateLayer(shapeKind, new(x, y), area.Width, area.Height);
+                break;
+        }
+        e.Handled = true;
+    }
+
+    private Rect GestureBounds(Point current)
+    {
+        if (selectionOrigin is not { } selection || active?.Engine.Current is not { } doc)
+            return new Rect(gestureStart, current);
+        var delta = current - gestureStart;
+        int x = (int)Math.Clamp(Math.Round(selection.X + delta.X), 0, doc.Width - selection.Width);
+        int y = (int)Math.Clamp(Math.Round(selection.Y + delta.Y), 0, doc.Height - selection.Height);
+        return new Rect(x, y, selection.Width, selection.Height);
+    }
+
+    private static bool Editable(Document document, string id)
+    {
+        var all = document.AllLayers().ToArray();
+        for (string? target = id; target is not null;)
+        {
+            if (all.FirstOrDefault(layer => layer.Id == target) is not { Locked: false }) return false;
+            target = all.FirstOrDefault(layer => layer.Children.Any(child => child.Id == target))?.Id;
+        }
+        return true;
+    }
+
+    private void CancelGesture()
+    {
+        gesture = null;
+        selectionOrigin = null;
+        moveId = null;
+        moveOriginal = null;
+        movePreview = null;
+        if (preview is not null) { preview = null; UpdateCanvas(); }
+        stroke.Clear();
+        canvas.Stroke = null;
+        canvas.Marquee = null;
+        if (canvas.IsMouseCaptured) canvas.ReleaseMouseCapture();
+        canvas.InvalidateVisual();
+    }
+
+    private void Sample(Point point)
+    {
+        if (active?.Composite is not { } pixels || active.Rendered != active.Engine.Current) return;
+        int x = (int)Math.Floor(point.X), y = (int)Math.Floor(point.Y);
+        if (x < 0 || x >= pixels.Width || y < 0 || y >= pixels.Height) return;
+        int i = (y * pixels.Width + x) * 4;
+        var bytes = pixels.Rgba;
+        foreground = $"#{bytes[i + 3]:X2}{bytes[i]:X2}{bytes[i + 1]:X2}{bytes[i + 2]:X2}";
+        RefreshTools();
+    }
+
+    private void ZoomBy(double factor, Point? anchor = null)
+    {
+        if (active is null) return;
+        var pivot = anchor ?? new Point(canvas.ActualWidth / 2, canvas.ActualHeight / 2);
+        var pixel = canvas.FromView(pivot);
+        active.Zoom = Math.Clamp(active.Zoom * factor, .01, 64);
+        active.Offset = new(pivot.X - pixel.X * active.Zoom, pivot.Y - pixel.Y * active.Zoom);
+        UpdateView();
+    }
+
+    private void Fit()
+    {
+        if (active?.Engine.Current is not { } doc || canvas.ActualWidth < 1 || canvas.ActualHeight < 1) return;
+        active.NeedsFit = false;
+        active.Zoom = Math.Clamp(Math.Min((canvas.ActualWidth - 36) / doc.Width, (canvas.ActualHeight - 36) / doc.Height), .01, 64);
+        Center(doc);
+    }
+
+    private void ActualPixels()
+    {
+        if (active?.Engine.Current is not { } doc) return;
+        active.Zoom = 1 / VisualTreeHelper.GetDpi(canvas).DpiScaleX;
+        Center(doc);
+    }
+
+    private void Center(Document doc)
+    {
+        active!.Offset = new((canvas.ActualWidth - doc.Width * active.Zoom) / 2, (canvas.ActualHeight - doc.Height * active.Zoom) / 2);
+        UpdateView();
+    }
+
+    private void UpdateView()
+    {
+        if (active is null) return;
+        canvas.Zoom = active.Zoom;
+        canvas.Offset = active.Offset;
+        canvas.InvalidateVisual();
+        Say();
+    }
+
+    private void SetTool(string name)
+    {
+        CancelGesture();
+        tool = name;
+        canvas.Cursor = name == "Move" ? Cursors.SizeAll : Cursors.Cross;
+        RefreshTools();
+    }
+
+    private void RefreshTools()
+    {
+        toolsPanel.Children.Clear();
+        foreach (var name in preferences.Tools ?? ToolNames)
+        {
+            var button = Button(name, () => SetTool(name));
+            button.HorizontalContentAlignment = HorizontalAlignment.Left;
+            if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
+            toolsPanel.Children.Add(button);
+        }
+
+        ToolOptions.Children.Clear();
+        OptionLabel(tool);
+        ToolOptions.Children.Add(ColorButton("Foreground", foreground, value => foreground = value));
+        ToolOptions.Children.Add(ColorButton("Background", background, value => background = value));
+        ToolOptions.Children.Add(Button("⇄", () => { (foreground, background) = (background, foreground); RefreshTools(); }, "Swap colors"));
+        if (tool is "Brush" or "Eraser")
+        {
+            SliderOption("Size", 1, 512, brushSize, value => brushSize = value);
+            SliderOption("Hardness", 0, 1, hardness, value => hardness = value);
+            SliderOption("Opacity", 0, 1, brushOpacity, value => brushOpacity = value);
+        }
+        if (tool == "Shape")
+        {
+            var list = new ComboBox { ItemsSource = new[] { LayerKind.Rectangle, LayerKind.Ellipse }, SelectedItem = shapeKind };
+            list.SelectionChanged += (_, _) => { if (list.SelectedItem is LayerKind kind) shapeKind = kind; };
+            ToolOptions.Children.Add(list);
+        }
+        if (tool == "Transform") ToolOptions.Children.Add(Button("Edit transform…", EditTransform));
+    }
+
+    private Button ColorButton(string label, string value, Action<string> apply)
+    {
+        var button = Button(label, () =>
+        {
+            var result = Form(label + " color", ("Color #AARRGGBB", value));
+            if (result is null) return;
+            Guard(() => { Format.Color(result[0]); apply(result[0]); RefreshTools(); });
+        });
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        row.Children.Add(new System.Windows.Shapes.Rectangle
+        {
+            Width = 14, Height = 14, Margin = new Thickness(0, 0, 5, 0), Stroke = Brushes.Gray,
+            Fill = new SolidColorBrush((Color)ColorConverter.ConvertFromString(value)!)
+        });
+        row.Children.Add(new TextBlock { Text = label });
+        button.Content = row;
+        return button;
+    }
+
+    private void OptionLabel(string text) => ToolOptions.Children.Add(new TextBlock
+        { Text = text, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 4, 0) });
+
+    private void SliderOption(string name, double min, double max, double initial, Action<double> changed)
+    {
+        OptionLabel(name);
+        var slider = new Slider { Minimum = min, Maximum = max, Value = initial, Width = 86, VerticalAlignment = VerticalAlignment.Center };
+        var value = new TextBlock { Text = initial.ToString("0.##"), MinWidth = 30, VerticalAlignment = VerticalAlignment.Center };
+        slider.ValueChanged += (_, _) => { changed(slider.Value); value.Text = slider.Value.ToString("0.##"); };
+        ToolOptions.Children.Add(slider);
+        ToolOptions.Children.Add(value);
+    }
+
+    private void ConfigureTools()
+    {
+        var dialog = new Window { Owner = this, Title = "Configure tools", Width = 300, SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
+        var panel = new StackPanel { Margin = new Thickness(12) };
+        foreach (var name in ToolNames)
+            panel.Children.Add(new CheckBox { Content = name, IsChecked = (preferences.Tools ?? ToolNames).Contains(name), Margin = new Thickness(3) });
+        var ok = Button("Apply", () => dialog.DialogResult = true);
+        ok.IsDefault = true;
+        panel.Children.Add(ok);
+        dialog.Content = panel;
+        if (dialog.ShowDialog() != true) return;
+        preferences.Tools = panel.Children.OfType<CheckBox>().Where(box => box.IsChecked == true)
+            .Select(box => (string)box.Content).ToArray();
+        RefreshTools();
+    }
+
+    private void OnKey(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && gesture is not null) { CancelGesture(); e.Handled = true; return; }
+        if (e.OriginalSource is TextBoxBase or PasswordBox) return;
+        var modifiers = Keyboard.Modifiers;
+        bool control = modifiers == ModifierKeys.Control || modifiers == (ModifierKeys.Control | ModifierKeys.Shift);
+        bool shift = modifiers.HasFlag(ModifierKeys.Shift);
+        Action? action = control ? e.Key switch
+        {
+            Key.N => NewDocument, Key.O => OpenDocument, Key.S => () => Save(active, shift),
+            Key.E when shift => ExportPng, Key.W => () => CloseSession(active),
+            Key.Z => () => Run("history.undo", 0), Key.Y => () => Run("history.redo", 0),
+            Key.D => () => Run<Area?>("document.selection", null),
+            Key.OemPlus or Key.Add => () => ZoomBy(1.25), Key.OemMinus or Key.Subtract => () => ZoomBy(.8),
+            Key.D0 or Key.NumPad0 => Fit, Key.D1 or Key.NumPad1 => ActualPixels,
+            _ => null
+        } : null;
+        if (action is null && modifiers == ModifierKeys.None)
+        {
+            string? shortcut = e.Key switch
+            {
+                Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection",
+                Key.I => "Eyedropper", Key.T => "Text", _ => null
+            };
+            if (shortcut is not null) action = () => SetTool(shortcut);
+        }
+        if (action is null) return;
+        action();
+        e.Handled = true;
+    }
+}
