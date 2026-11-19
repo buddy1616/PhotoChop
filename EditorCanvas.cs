@@ -18,6 +18,12 @@ internal sealed class EditorCanvas : FrameworkElement
     private PixelSelection? outlineSource;
     private Geometry? outline;
     public PixelSelection? SelectionMask { get; set; }
+    private static readonly Pen guidePen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(72, 205, 233)), 1));
+    private static readonly Pen ghostGuidePen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(127, 231, 252)), 1)
+        { DashStyle = DashStyles.Dash });
+    public IReadOnlyList<Guide> Guides { get; set; } = [];
+    public Guide? GhostGuide { get; set; }
+    public string? DraggedGuide { get; set; }
     public Area? Selection { get; set; }
     public Rect? Marquee { get; set; }
     internal sealed record PaintOverlay(StrokeArgs Stroke, Area? Clip);
@@ -74,6 +80,23 @@ internal sealed class EditorCanvas : FrameworkElement
         }
         if (Marquee is { } marquee) DrawOutline(dc, ViewRect(marquee));
         dc.Pop();
+        foreach (var guide in Guides)
+            if (guide.Id != DraggedGuide) DrawGuide(dc, guide, imageArea, guidePen);
+        if (GhostGuide is { } ghost) DrawGuide(dc, ghost, imageArea, ghostGuidePen);
+    }
+
+    private void DrawGuide(DrawingContext dc, Guide guide, Rect bounds, Pen pen)
+    {
+        if (guide.Axis == GuideAxis.Vertical)
+        {
+            double x = Offset.X + guide.Position * Zoom;
+            dc.DrawLine(pen, new Point(x, bounds.Top), new Point(x, bounds.Bottom));
+        }
+        else
+        {
+            double y = Offset.Y + guide.Position * Zoom;
+            dc.DrawLine(pen, new Point(bounds.Left, y), new Point(bounds.Right, y));
+        }
     }
 
     private void DrawStroke(DrawingContext dc, Rect imageArea, IReadOnlyList<PointD> points,

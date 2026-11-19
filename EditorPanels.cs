@@ -21,7 +21,8 @@ public partial class MainWindow
         public string LockGlyph => Layer.Locked ? "\uE72E" : "\uE785";
         public string TransformTip => Layer.TransformsEnabled ? "Bypass unbaked transforms, adjustments, and filters" : "Show unbaked transforms, adjustments, and filters";
         public double TransformIconOpacity => Layer.TransformsEnabled ? 1 : .4;
-        public string MaskLabel => !Layer.MaskEnabled ? "⊘ Mask" : EditingMask ? "▣ Mask" : "□ Mask";
+        public double MaskIconOpacity => Layer.MaskEnabled ? 1 : .4;
+        public Brush? MaskBorder => EditingMask ? Brushes.DeepSkyBlue : null;
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
         public Thickness NameIndent => Layer.Kind == LayerKind.Group ? new(2, 0, 0, 0) : new(Depth * 13 + 16, 0, 0, 0);
     }
@@ -467,10 +468,9 @@ public partial class MainWindow
         if (ActiveLayer() is not { } layer) return;
         var transform = layer.Transform;
         var v = Form("Layer transform", ("X (pixels)", transform.X.ToString()), ("Y (pixels)", transform.Y.ToString()),
-            ("Scale X (1 = 100%)", transform.ScaleX.ToString()), ("Scale Y (1 = 100%)", transform.ScaleY.ToString()),
             ("Rotation (degrees)", transform.Rotation.ToString()));
         if (v is not null) Guard(() => RunLayer("layer.transform", new Chop.Core.Transform(Number(v[0]), Number(v[1]),
-            Number(v[2]), Number(v[3]), Number(v[4]))));
+            transform.ScaleX, transform.ScaleY, Number(v[2]))));
     }
 
     private Window EditorOwner => Window.GetWindow(canvas) ?? this;

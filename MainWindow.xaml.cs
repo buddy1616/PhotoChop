@@ -44,6 +44,8 @@ public partial class MainWindow : Window
         public int Width { get; set; } = 1920;
         public int Height { get; set; } = 1080;
         public List<string> Recent { get; set; } = [];
+        public bool ShowRulers { get; set; } = true;
+        public RulerUnit RulerUnit { get; set; }
         public string[]? Tools { get; set; }
     }
 
@@ -224,7 +226,7 @@ public partial class MainWindow : Window
         Item(edit, "Configure tools…", ConfigureTools);
         var transformItem = new MenuItem { Header = "Transform" };
         edit.Items.Add(transformItem);
-        Item(transformItem, "Scale…", EditTransform);
+        Item(transformItem, "Scale…", ScaleLayer);
         Item(transformItem, "Flip Horizontal", () => RunLayer("layer.flip", new FlipArgs(true)));
         Item(transformItem, "Flip Vertical", () => RunLayer("layer.flip", new FlipArgs(false)));
         var fill = Item(transformItem, "Fill…", FillPixels);
@@ -263,7 +265,7 @@ public partial class MainWindow : Window
         Item(layer, "Ungroup", () => RunLayer("layer.ungroup", 0));
         Item(layer, "Move into group…", MoveToGroup);
         Item(layer, "Merge selected layers…", Merge);
-        Item(layer, "Transform…", EditTransform);
+        Item(layer, "Position and Rotation…", EditTransform);
         var select = Menu("Select");
         Item(select, "Rectangular selection", () => SetTool("Selection"), "M");
         var modify = new MenuItem { Header = "Modify" };
@@ -280,6 +282,8 @@ public partial class MainWindow : Window
         foreach (var kind in new[] { EffectKind.GaussianBlur, EffectKind.MotionBlur })
             Item(blur, EffectName(kind), () => AddEffect(kind));
         var view = Menu("View");
+        rulersMenu = Item(view, "Hide Rulers", ToggleRulers);
+        UpdateRulers();
         Item(view, "Zoom in", () => ZoomBy(1.25), "Ctrl++");
         Item(view, "Zoom out", () => ZoomBy(.8), "Ctrl+-");
         Item(view, "Fit canvas", Fit, "Ctrl+0");
@@ -400,6 +404,7 @@ public partial class MainWindow : Window
             if (Window.GetWindow(session.View) != this) OnKey(session.View, e);
         };
         HookCanvas(session.View);
+        HookRulers(session);
         session.View.Cursor = ToolCursor(tool);
         pane.Children.Add(session.Tab);
         if (workspace?.Parent is { } parent) parent.RemoveChild(workspace);
@@ -623,6 +628,7 @@ public partial class MainWindow : Window
         canvas.ImageHeight = doc.Height;
         if (preview is null) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
+        canvas.Guides = doc.Guides;
         canvas.Selection = doc.Selection;
         canvas.SelectionMask = doc.SelectionMask;
         if (doc.Selection is { } selected && selectionDragDelta is { } delta)

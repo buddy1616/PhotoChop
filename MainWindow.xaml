@@ -6,6 +6,7 @@
         Background="#191B20" Foreground="#E5E8EE"
         PreviewKeyDown="OnKey" Loaded="OnLoaded" Closing="OnClosing">
     <Window.Resources>
+        <Geometry x:Key="MaskIcon">F0 M 1,3 C 4,2 6,4 10,5 C 14,4 16,2 19,3 L 18,8 C 16,13 13,13 10,9 C 7,13 4,13 2,8 Z M 3.6,6 C 5,4.6 7,5.2 8.5,6.8 C 7,8.3 5,8.2 3.6,6 Z M 11.5,6.8 C 13,5.2 15,4.6 16.4,6 C 15,8.2 13,8.3 11.5,6.8 Z</Geometry>
         <DataTemplate x:Key="LayerRowTemplate">
             <DockPanel Margin="0,1">
                 <Button DockPanel.Dock="Left" Click="ToggleRowVisibility" ToolTip="Toggle visibility" Padding="4,1" Margin="0,0,3,0">
@@ -24,8 +25,11 @@
                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
                 </Button>
                 <Button DockPanel.Dock="Right" Click="ToggleRowMask" ContextMenuOpening="OpenMaskMenu" ToolTip="Select mask for painting. Alt-click to view only the mask." Padding="4,1"
-                        Content="{Binding MaskLabel}" Visibility="{Binding MaskVisibility}">
+                        Opacity="{Binding MaskIconOpacity}" BorderBrush="{Binding MaskBorder}" Visibility="{Binding MaskVisibility}"
+                        AutomationProperties.Name="Layer mask">
                     <Button.ContextMenu><ContextMenu /></Button.ContextMenu>
+                    <Path Width="17" Height="13" Stretch="Uniform" Data="{StaticResource MaskIcon}"
+                          Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
                 </Button>
                 <Button DockPanel.Dock="Left" Click="ToggleRowGroup" ToolTip="Expand or collapse group" Padding="3,1" Margin="{Binding Indent}"
                         Content="{Binding GroupGlyph}" Visibility="{Binding GroupVisibility}" />

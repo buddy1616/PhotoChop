@@ -34,7 +34,7 @@ public partial class MainWindow
     {
         view.MouseWheel += (_, e) =>
         {
-            if (gesture is not null) return;
+            if (gesture is not null || guideDrag is not null) return;
             if (sessions.FirstOrDefault(session => ReferenceEquals(session.View, view)) is { } hovered) Activate(hovered);
             if (active is null) return;
             var modifiers = Keyboard.Modifiers;
@@ -64,13 +64,20 @@ public partial class MainWindow
 
     private void CanvasDown(object sender, MouseButtonEventArgs e)
     {
-        if (active?.Engine.Current is not { } doc || gesture is not null) return;
+        if (active?.Engine.Current is not { } doc || gesture is not null || guideDrag is not null) return;
         var view = e.GetPosition(canvas);
         var point = canvas.FromView(view);
         canvas.Focus();
         if (e.ChangedButton == MouseButton.Left && !Keyboard.IsKeyDown(Key.Space) &&
             sampleColorRange?.Invoke(active, point) == true)
         {
+            e.Handled = true;
+            return;
+        }
+        if (tool == "Move" && e.ChangedButton == MouseButton.Left && !Keyboard.IsKeyDown(Key.Space) && HitGuide(active, view) is { } guide)
+        {
+            BeginGuide(active, canvas, guide, existing: true);
+            TrackGuide(view);
             e.Handled = true;
             return;
         }
@@ -88,7 +95,7 @@ public partial class MainWindow
             {
                 case "Text": EditTextAt(doc, new PointD(point.X, point.Y)); return;
                 case "Eyedropper": Sample(point); return;
-                case "Transform": EditTransform(); return;
+                case "Transform": ScaleLayer(); return;
                 case "Selection":
                     selectionMode = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? Chop.Core.SelectionMode.Subtract
                         : Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? Chop.Core.SelectionMode.Add : Chop.Core.SelectionMode.Replace;
@@ -97,6 +104,7 @@ public partial class MainWindow
                         point.X >= selection.X && point.X < selection.X + selection.Width &&
                         point.Y >= selection.Y && point.Y < selection.Y + selection.Height)
                         selectionOrigin = selection;
+                    else if (marqueeStyle != MarqueeStyle.FixedSize) gestureStart = SnapMarqueePoint(point);
                     break;
                 case "Move":
                     if (ActiveLayer() is not { Locked: false } target || !Editable(doc, target.Id)) { Say("Select an unlocked layer to move."); return; }
@@ -147,6 +155,16 @@ public partial class MainWindow
     {
         if (active?.Engine.Current is not { } doc) return;
         var view = e.GetPosition(canvas);
+        if (guideDrag?.Source == canvas)
+        {
+            TrackGuide(view);
+            e.Handled = true;
+            return;
+        }
+        if (tool == "Move" && gesture is null && sender is EditorCanvas hoveredView &&
+            sessions.FirstOrDefault(session => ReferenceEquals(session.View, hoveredView)) is { } hoveredSession &&
+            !IsSamplingCanvas(hoveredSession))
+            hoveredView.Cursor = HitGuide(hoveredSession, e.GetPosition(hoveredView)) is { } hovered ? GuideCursor(hovered.Axis) : ToolCursor(tool);
         var point = canvas.FromView(view);
         lastCursor = point;
         switch (gesture)
@@ -195,6 +213,12 @@ public partial class MainWindow
 
     private void CanvasUp(object sender, MouseButtonEventArgs e)
     {
+        if (guideDrag?.Source == canvas && e.ChangedButton == MouseButton.Left)
+        {
+            FinishGuide(e.GetPosition(canvas));
+            e.Handled = true;
+            return;
+        }
         if (gesture is null || active is null ||
             (gesture == "Pan" ? e.ChangedButton is not (MouseButton.Left or MouseButton.Middle) : e.ChangedButton != MouseButton.Left)) return;
         string completed = gesture;
@@ -259,22 +283,25 @@ public partial class MainWindow
         {
             if (gesture != "Selection") return new Rect(gestureStart, current);
             if (marqueeStyle == MarqueeStyle.FixedSize)
-                return new Rect(Math.Floor(current.X - fixedWidth / 2), Math.Floor(current.Y - fixedHeight / 2), fixedWidth, fixedHeight);
+                return SnapMarqueeEdges(new Rect(Math.Floor(current.X - fixedWidth / 2), Math.Floor(current.Y - fixedHeight / 2), fixedWidth, fixedHeight));
             if (marqueeStyle == MarqueeStyle.FixedRatio)
             {
                 var motion = current - gestureStart;
-                double scale = Math.Min(Math.Max(Math.Abs(motion.X) / marqueeWidth, Math.Abs(motion.Y) / marqueeHeight),
-                    32768 / Math.Max(marqueeWidth, marqueeHeight));
-                var end = new Point(gestureStart.X + (motion.X < 0 ? -1 : 1) * marqueeWidth * scale,
-                    gestureStart.Y + (motion.Y < 0 ? -1 : 1) * marqueeHeight * scale);
+                var direction = new Vector(motion.X < 0 ? -1 : 1, motion.Y < 0 ? -1 : 1);
+                double limit = 32768 / Math.Max(marqueeWidth, marqueeHeight);
+                double scale = Math.Min(Math.Max(Math.Abs(motion.X) / marqueeWidth, Math.Abs(motion.Y) / marqueeHeight), limit);
+                scale = Math.Min(SnapRatioScale(gestureStart, direction, marqueeWidth, marqueeHeight, scale), limit);
+                var end = gestureStart + new Vector(direction.X * marqueeWidth * scale, direction.Y * marqueeHeight * scale);
                 return new Rect(gestureStart, end);
             }
-            return new Rect(gestureStart, current);
+            return new Rect(gestureStart, SnapMarqueePoint(current));
         }
         var delta = current - gestureStart;
         int x = (int)Math.Clamp(Math.Round(selection.X + delta.X), 0, doc.Width - selection.Width);
         int y = (int)Math.Clamp(Math.Round(selection.Y + delta.Y), 0, doc.Height - selection.Height);
-        return new Rect(x, y, selection.Width, selection.Height);
+        var snapped = SnapMarqueeEdges(new Rect(x, y, selection.Width, selection.Height));
+        return new Rect(Math.Clamp(snapped.X, 0, doc.Width - selection.Width),
+            Math.Clamp(snapped.Y, 0, doc.Height - selection.Height), selection.Width, selection.Height);
     }
 
     private static bool Editable(Document document, string id)
@@ -290,6 +317,7 @@ public partial class MainWindow
 
     private void CancelGesture()
     {
+        if (guideDrag is not null) CancelGuide();
         gesture = null;
         if (selectionOrigin is not null && active?.Engine.Current is { } document)
         {
@@ -366,10 +394,13 @@ public partial class MainWindow
         Say();
     }
 
-    private static void UpdateScrollBars(Session session)
+    private void UpdateScrollBars(Session session)
     {
         if (session.Engine.Current is { } doc)
+        {
             session.Viewport.UpdateBars(session.Offset, session.Zoom, doc.Width, doc.Height);
+            UpdateRulers(session);
+        }
     }
 
     private void SetTool(string name)
@@ -427,7 +458,11 @@ public partial class MainWindow
             list.SelectionChanged += (_, _) => { if (list.SelectedItem is LayerKind kind) shapeKind = kind; };
             ToolOptions.Children.Add(list);
         }
-        if (tool == "Transform") ToolOptions.Children.Add(Button("Edit transform…", EditTransform));
+        if (tool == "Transform")
+        {
+            ToolOptions.Children.Add(Button("Scale…", ScaleLayer));
+            ToolOptions.Children.Add(Button("Position and Rotation…", EditTransform));
+        }
     }
 
     private void AddMarqueeOptions()
@@ -523,7 +558,7 @@ public partial class MainWindow
 
     private void OnKey(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape && gesture is not null) { CancelGesture(); e.Handled = true; return; }
+        if (e.Key == Key.Escape && (gesture is not null || guideDrag is not null)) { CancelGesture(); e.Handled = true; return; }
         if (e.OriginalSource is TextBoxBase or PasswordBox) return;
         var modifiers = Keyboard.Modifiers;
         bool control = modifiers == ModifierKeys.Control || modifiers == (ModifierKeys.Control | ModifierKeys.Shift);

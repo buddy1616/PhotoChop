@@ -25,6 +25,102 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void FlipAffectsOnlySelectedPixelsAndRetainsTheRasterSource()
+    {
+        var engine = NewEngine(10, 6);
+        var original = new Pixels(4, 1,
+            [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Artwork", renderer.EncodePng(original))));
+        engine.Execute(Command.Of("layer.transform", new Transform(2, 2), "art"));
+        engine.Execute(Command.Of("document.selection", new Area(3, 2, 2, 1)));
+        engine.Execute(Command.Of("layer.flip", new FlipArgs(true), "art"));
+        var after = Composite(engine);
+        int At(int x) => (2 * 10 + x) * 4;
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, after[At(2)..At(3)]);
+        Assert.Equal(new byte[] { 0, 0, 255, 255 }, after[At(3)..At(4)]);
+        Assert.Equal(new byte[] { 0, 255, 0, 255 }, after[At(4)..At(5)]);
+        Assert.Equal(new byte[] { 255, 255, 255, 255 }, after[At(5)..At(6)]);
+        Assert.Equal(original.Rgba, engine.Current!.Layers[0].Pixels!.Rgba);
+        Assert.Equal(new Transform(2, 2), engine.Current.Layers[0].Transform);
+        string path = Path.Combine(folder, "selected-flip.chop");
+        ProjectFile.Save(path, engine.Current);
+        Assert.Equal(after, renderer.Composite(ProjectFile.Open(path)).Rgba);
+    }
+
+    [Fact]
+    public void SelectedScaleUsesAnchorAndUpdatesTheOutlineWithoutMovingOtherPixels()
+    {
+        var engine = NewEngine(10, 8);
+        var rgba = Enumerable.Repeat((byte)255, 8 * 4 * 4).ToArray();
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Artwork", renderer.EncodePng(new Pixels(8, 4, rgba)))));
+        engine.Execute(Command.Of("document.selection", new Area(2, 0, 4, 4)));
+        engine.Execute(Command.Of("layer.scale", new ScaleArgs(.5, .5, AnchorX: 2, AnchorY: 2), "art"));
+        var after = Composite(engine);
+        byte Alpha(int x, int y) => after[(y * 10 + x) * 4 + 3];
+        Assert.Equal(new Area(4, 2, 2, 2), engine.Current!.Selection);
+        Assert.Equal(0, Alpha(2, 0));
+        Assert.Equal(0, Alpha(4, 1));
+        Assert.Equal(255, Alpha(4, 2));
+        Assert.Equal(255, Alpha(0, 0));
+        Assert.Equal(255, Alpha(7, 3));
+        Assert.Equal(rgba, engine.Current.Layers[0].Pixels!.Rgba);
+    }
+
+    [Fact]
+    public void WholeLayerScaleIsRelativeAndKeepsTheAnchorAtTheArtwork()
+    {
+        var engine = NewEngine(40, 30);
+        Layer(engine, new("art", "Rectangle", LayerKind.Rectangle, Transform: new(16, 10, 2, 2),
+            Width: 4, Height: 4, Color: "#FFFFFFFF"));
+        engine.Execute(Command.Of("layer.scale", new ScaleArgs(.5, .5), "art"));
+        Assert.Equal(new Transform(18, 12, 1, 1), engine.Current!.Layers[0].Transform);
+        var pixels = Composite(engine);
+        Assert.Equal(255, pixels[(12 * 40 + 18) * 4 + 3]);
+        Assert.Equal(0, pixels[(10 * 40 + 16) * 4 + 3]);
+
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("layer.scale", new ScaleArgs(.5, .5, 2, 2), "art"));
+        Assert.Equal(new Transform(20, 14, 1, 1), engine.Current.Layers[0].Transform);
+    }
+
+    [Fact]
+    public void GuidesUsePixelBoundariesAndFollowAnchorResizeAndHistory()
+    {
+        var engine = NewEngine(10, 8);
+        engine.Execute(Command.Of("guide.set", new Guide("vertical", GuideAxis.Vertical, 3)));
+        engine.Execute(Command.Of("guide.set", new Guide("horizontal", GuideAxis.Horizontal, 4)));
+        engine.Execute(Command.Of("guide.set", new Guide("vertical", GuideAxis.Vertical, 6)));
+        Assert.Equal(2, engine.Current!.Guides.Length);
+        Assert.True(engine.Dirty);
+        Assert.Throws<InvalidDataException>(() => engine.Execute(Command.Of("guide.set", new Guide("bad", GuideAxis.Horizontal, 9))));
+        engine.Execute(Command.Of("document.resizeCanvas", new ResizeCanvasArgs(14, 12, AnchorX: 2, AnchorY: 1)));
+        Assert.Equal(10, engine.Current.Guides.Single(guide => guide.Id == "vertical").Position);
+        Assert.Equal(6, engine.Current.Guides.Single(guide => guide.Id == "horizontal").Position);
+
+        string path = Path.Combine(folder, "guides.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        Assert.False(engine.Dirty);
+        Assert.Equal(engine.Current.Guides, ProjectFile.Open(path).Guides);
+        engine.Execute(Command.Of("guide.remove", "horizontal"));
+        Assert.True(engine.Dirty);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.False(engine.Dirty);
+        Assert.Equal(10, GuideSnap.Nearest(9.75, [6, 10], .5));
+        Assert.Equal(9.75, GuideSnap.Nearest(9.75, [6, 10], .2));
+    }
+
+    [Fact]
+    public void GuideSnappingUsesInternalEdgesOfNonRectangularSelections()
+    {
+        var doc = new Document("doc", 8, 8) { Selection = new Area(2, 2, 3, 2),
+            SelectionMask = new PixelSelection(new Area(2, 2, 3, 2), [1, 0, 1, 1, 0, 1]) };
+        var edges = GuideSnap.SelectionEdges(doc);
+        Assert.Equal(new[] { 2, 3, 4, 5 }, edges.Vertical);
+        Assert.Equal(new[] { 2, 4 }, edges.Horizontal);
+        Assert.Equal(3, GuideSnap.Nearest(3.1, edges.Vertical, .25));
+    }
+
+    [Fact]
     public void ResizeCanvasUsesAnchorWithoutScalingThenImageSizeScalesEditableLayers()
     {
         var engine = NewEngine(6, 4);
@@ -145,7 +241,7 @@ public sealed class EditorTests : IDisposable
     }
 
     [Fact]
-    public void TransformToggleBypassesAllUnbakedEditsIncludingGroupDescendantsAndSurvivesSave()
+    public void GroupBypassPreservesDescendantEffectsAndTransforms()
     {
         var engine = NewEngine(10, 8);
         Layer(engine, new("group", "Group", LayerKind.Group, Transform: new(1, 0)));
@@ -171,8 +267,9 @@ public sealed class EditorTests : IDisposable
         Assert.Equal(transformed, Composite(engine));
         engine.Execute(Command.Of("layer.transformsEnabled", false, "group"));
         var plainGroup = Composite(engine);
-        Assert.Equal(255, plainGroup[At(0, 0)]);
-        Assert.Equal(0, plainGroup[At(3, 1) + 3]);
+        Assert.Equal(0, plainGroup[At(0, 0) + 3]);
+        Assert.Equal(255, plainGroup[At(3, 1) + 3]);
+        Assert.Equal(plainGroup[At(3, 1)], plainGroup[At(3, 1) + 1]);
         Assert.True(engine.Current!.Layers[0].Children[0].TransformsEnabled);
         engine.Execute(Command.Of("layer.transformsEnabled", true, "group"));
         Assert.Equal(transformed, Composite(engine));
