@@ -25,6 +25,157 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void FloatingMovesNeverPickUpOrErasePixelsAtIntermediateLandings()
+    {
+        var engine = NewEngine(7, 2);
+        var pixels = new Pixels(3, 1, [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Image", renderer.EncodePng(pixels))));
+        engine.Execute(Command.Of("document.selection", new Area(0, 0, 1, 1)));
+        engine.Execute(Command.Of("layer.moveSelection", new PointD(1, 0), "art"));
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, Composite(engine)[4..8]);
+        engine.Execute(Command.Of("layer.moveSelection", new PointD(2, 0), "art"));
+        Assert.Equal(new byte[] { 0, 255, 0, 255 }, Composite(engine)[4..8]);
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, Composite(engine)[12..16]);
+        Assert.Equal(pixels.Rgba, engine.Current!.Layers[0].Pixels!.Rgba);
+        var visible = Composite(engine);
+        engine.Execute(Command.Of<Area?>("document.selection", null));
+        Assert.Null(engine.Current.Floating);
+        Assert.Equal(visible, Composite(engine));
+        Assert.NotEqual(pixels.Rgba, engine.Current.Layers[0].Pixels!.Rgba);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.NotNull(engine.Current.Floating);
+        Assert.Equal(visible, Composite(engine));
+    }
+
+    [Fact]
+    public void SavingFloatingPixelsPreservesTheLiveMoveAndCommitsTheSavedAppearance()
+    {
+        var engine = NewEngine(5, 2);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Image",
+            renderer.EncodePng(new Pixels(1, 1, [255, 0, 0, 255])))));
+        engine.Execute(Command.Of("document.selection", new Area(0, 0, 1, 1)));
+        engine.Execute(Command.Of("layer.moveSelection", new PointD(2, 0), "art"));
+        var visible = Composite(engine);
+        var path = Path.Combine(folder, "float.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        Assert.NotNull(engine.Current!.Floating);
+        Assert.False(engine.Dirty);
+        Assert.Equal(visible, renderer.Composite(ProjectFile.Open(path)).Rgba);
+        engine.Execute(Command.Of<Area?>("document.selection", null));
+        Assert.False(engine.Dirty);
+        Assert.Equal(visible, Composite(engine));
+    }
+
+    [Fact]
+    public void ClipboardCopiesExactSelectionAndPastesInsideATransformedGroup()
+    {
+        var engine = NewEngine(10, 8);
+        Layer(engine, new("vector", "Artwork", LayerKind.Rectangle, Width: 4, Height: 4, Color: "#FF1177FF"));
+        engine.Execute(Command.Of("selection.lasso", new LassoArgs([new(0, 0), new(4, 0), new(0, 4)], SelectionMode.Replace)));
+        var selected = renderer.CopyPixels(engine.Current!, "vector")!;
+        Assert.Equal(255, selected.Pixels.Rgba[3]);
+        Assert.Equal(0, selected.Pixels.Rgba[^1]);
+        Layer(engine, new("g", "Group", LayerKind.Group, Transform: new(2, 2, 2, 2)));
+        engine.Execute(Command.Of("layer.pastePixels", new PastePixelsArgs("paste", "Pasted", renderer.EncodePng(selected.Pixels), "g", 5, 4)));
+        Assert.Equal(new Area(5, 4, selected.Pixels.Width, selected.Pixels.Height), renderer.VisibleLayerBounds(engine.Current!, "paste"));
+    }
+
+    [Fact]
+    public void EffectLayerAdjustsOnlyLowerSiblingsAndRespectsItsMask()
+    {
+        var engine = NewEngine(8, 4);
+        Layer(engine, new("outside", "Outside", LayerKind.Rectangle, Width: 8, Height: 4, Color: "#FF00FF00"));
+        Layer(engine, new("g", "Group", LayerKind.Group));
+        Layer(engine, new("below", "Below", LayerKind.Rectangle, Parent: "g", Width: 4, Height: 4, Color: "#FFFF0000"));
+        Layer(engine, new("effect", "Effect", LayerKind.Effect, Parent: "g"));
+        engine.Execute(Command.Of("effect.add", new Effect("gray", EffectKind.Grayscale), "effect"));
+        var mask = Enumerable.Repeat((byte)255, 8 * 4).ToArray();
+        mask[1] = 0;
+        engine.Execute(Command.Of("mask.paste", new AlphaMask(8, 4, mask), "effect"));
+        Layer(engine, new("above", "Above", LayerKind.Rectangle, Parent: "g", Width: 1, Height: 1,
+            Transform: new(2, 0), Color: "#FF0000FF"));
+        var result = Composite(engine);
+        Assert.Equal(result[0], result[1]);
+        Assert.InRange(result[0], 53, 55);
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, result[4..8]);
+        Assert.Equal(new byte[] { 0, 0, 255, 255 }, result[8..12]);
+        Assert.Equal(new byte[] { 0, 255, 0, 255 }, result[24..28]);
+        Assert.Throws<InvalidDataException>(() => engine.Execute(Command.Of("layer.flip", new FlipArgs(true), "effect")));
+        string path = Path.Combine(folder, "effect.chop");
+        ProjectFile.Save(path, engine.Current!);
+        Assert.Equal(result, renderer.Composite(ProjectFile.Open(path)).Rgba);
+    }
+
+    [Fact]
+    public void ImageOrientationRotatesGuidesAndLayersResetsAndBakesPixels()
+    {
+        var engine = NewEngine(7, 4);
+        Layer(engine, new("art", "Art", LayerKind.Rectangle, Width: 2, Height: 1, Color: "#FFFF0000", Transform: new(1, 0)));
+        engine.Execute(Command.Of("guide.set", new Guide("v", GuideAxis.Vertical, 2)));
+        var before = Composite(engine);
+        engine.Execute(Command.Of("document.orient", OrientationAction.Clockwise));
+        Assert.Equal((4, 7), (engine.Current!.Width, engine.Current.Height));
+        Assert.Equal(LayerKind.Rectangle, engine.Current.Layers[0].Kind);
+        Assert.Equal(new Area(3, 1, 1, 2), renderer.VisibleLayerBounds(engine.Current, "art"));
+        Assert.Equal(new Guide("v", GuideAxis.Horizontal, 2), Assert.Single(engine.Current.Guides));
+        engine.Execute(Command.Of("document.orient", OrientationAction.Reset));
+        Assert.Equal((7, 4), (engine.Current.Width, engine.Current.Height));
+        Assert.Equal(before, Composite(engine));
+        engine.Execute(Command.Of("document.orient", OrientationAction.FlipHorizontal));
+        var flipped = Composite(engine);
+        engine.Execute(Command.Of("document.orient", OrientationAction.Bake));
+        Assert.Null(engine.Current.ImageOrientation);
+        Assert.Equal(LayerKind.Raster, engine.Current.Layers[0].Kind);
+        Assert.Equal(flipped, Composite(engine));
+        engine.Execute(Command.Of("document.orient", OrientationAction.Reset));
+        Assert.Equal(flipped, Composite(engine));
+    }
+
+    [Fact]
+    public void StylesAndTransformsAreIncludedInBakeLayer()
+    {
+        var engine = NewEngine(25, 18);
+        Layer(engine, new("art", "Art", LayerKind.Rectangle, Width: 4, Height: 4, Color: "#FFFF0000", Transform: new(6, 5)));
+        engine.Execute(Command.Of("effect.add", new Effect("stroke", EffectKind.Stroke, A: 1, Ink: "#FF00FF00"), "art"));
+        engine.Execute(Command.Of("effect.add", new Effect("shadow", EffectKind.DropShadow, A: 0, B: 5, Size: 0,
+            Ink: "#FF0000FF"), "art"));
+        engine.Execute(Command.Of("layer.flip", new FlipArgs(true), "art"));
+        var before = Composite(engine);
+        Assert.Contains((byte)255, before.Where((_, i) => i % 4 == 1));
+        Assert.Contains((byte)255, before.Where((_, i) => i % 4 == 2));
+        engine.Execute(Command.Of("layer.bake", 0, "art"));
+        Assert.Equal(before, Composite(engine));
+        Assert.Empty(engine.Current!.Layers[0].Effects);
+        Assert.Equal(new Transform(), engine.Current.Layers[0].Transform);
+    }
+
+    [Fact]
+    public void WandSamplesRenderedVectorArtwork()
+    {
+        var engine = NewEngine(6, 6);
+        Layer(engine, new("shape", "Shape", LayerKind.Rectangle, Width: 2, Height: 2, Transform: new(2, 2)));
+        engine.Execute(Command.Of("selection.wand", new WandArgs(new PointD(2, 2)), "shape"));
+        Assert.Equal(new Area(2, 2, 2, 2), engine.Current!.Selection);
+    }
+
+    [Fact]
+    public void WandSelectsOnlyConnectedMatchingPixelsAndBitCrushSamplesBlocks()
+    {
+        var engine = NewEngine(5, 1);
+        var pixels = new Pixels(5, 1, [255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Pixels", renderer.EncodePng(pixels))));
+        engine.Execute(Command.Of("selection.wand", new WandArgs(new PointD(0, 0)), "art"));
+        Assert.True(engine.Current!.Selected(1, 0));
+        Assert.False(engine.Current.Selected(3, 0));
+        engine.Execute(Command.Of("document.selection", new Area(2, 0, 2, 1)));
+        engine.Execute(Command.Of("layer.crushSelection", 2, "art"));
+        Assert.Equal(new byte[] { 0, 0, 255, 255 }, Composite(engine)[12..16]);
+        Assert.Equal(new byte[] { 0, 255, 0, 255 }, Composite(engine)[16..20]);
+        engine.Execute(Command.Of("layer.fillPixels", "#FFFFFF00", "art"));
+        Assert.Equal(new byte[] { 255, 255, 0, 255 }, Composite(engine)[..4]);
+    }
+
+    [Fact]
     public void RepeatedLayerTransformsComposeIntoTheSamePropertyAndSaveWithoutAStack()
     {
         var engine = NewEngine(20, 10);
@@ -425,7 +576,7 @@ public sealed class EditorTests : IDisposable
         var original = new Pixels(1, 1, [255, 0, 0, 255]);
         engine.Execute(Command.Of("layer.importPng", new ImportArgs("art", "Artwork", renderer.EncodePng(original))));
         engine.Execute(Command.Of("document.selection", new Area(4, 2, 2, 1)));
-        engine.Execute(Command.Of("layer.fillPixels", "#FF0000FF", "art"));
+        engine.Execute(Command.Of("layer.strokeSelection", new OutlineArgs("#FF0000FF", 1, StrokeAlignment.Inside), "art"));
         engine.Execute(Command.Of("selection.colorRange", new ColorSelection("#FFFF0000", 0, Mode: SelectionMode.Add)));
         Assert.True(engine.Current!.Selected(0, 0));
         Assert.True(engine.Current.Selected(5, 2));
@@ -574,8 +725,9 @@ public sealed class EditorTests : IDisposable
         engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(2, 0, 1, 1), SelectionMode.Add)));
         engine.Execute(Command.Of("layer.moveSelection", new PointD(4, 2), "pixels"));
         var moved = engine.Current!.Layers.Single();
-        Assert.NotEqual(source.Rgba, moved.Pixels!.Rgba);
+        Assert.Equal(source.Rgba, moved.Pixels!.Rgba);
         Assert.Empty(moved.PixelShifts);
+        Assert.NotNull(engine.Current.Floating);
         Assert.True(engine.Current.Selected(4, 2));
         Assert.False(engine.Current.Selected(5, 2));
         int At(int x, int y) => (y * 12 + x) * 4;

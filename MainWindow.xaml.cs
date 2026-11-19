@@ -44,6 +44,12 @@ public partial class MainWindow : Window
         public int Width { get; set; } = 1920;
         public int Height { get; set; } = 1080;
         public List<string> Recent { get; set; } = [];
+        public string ArtworkForeground { get; set; } = "#FF50A7FF";
+        public string ArtworkBackground { get; set; } = "#FFFFFFFF";
+        public string MaskForeground { get; set; } = "#FF000000";
+        public string MaskBackground { get; set; } = "#FFFFFFFF";
+        public bool CenterHorizontal { get; set; }
+        public bool CenterVertical { get; set; }
         public bool ShowRulers { get; set; } = true;
         public bool ShowGuides { get; set; } = true;
         public string GuideColor { get; set; } = "#FF48CDE9";
@@ -77,23 +83,21 @@ public partial class MainWindow : Window
     private int renderVersion;
     private Session? active;
     private string tool = "Move";
-    private string artworkForeground = "#FF50A7FF", artworkBackground = "#FFFFFFFF";
-    private string maskForeground = "#FF000000", maskBackground = "#FFFFFFFF";
     private bool UsesMaskPalette => tool == "Masker" || active?.MaskTarget is { } id && ActiveLayer()?.Id == id;
     private string foreground
     {
-        get => UsesMaskPalette ? maskForeground : artworkForeground;
-        set { if (UsesMaskPalette) maskForeground = value; else artworkForeground = value; }
+        get => UsesMaskPalette ? preferences.MaskForeground : preferences.ArtworkForeground;
+        set { if (UsesMaskPalette) preferences.MaskForeground = value; else preferences.ArtworkForeground = value; }
     }
     private string background
     {
-        get => UsesMaskPalette ? maskBackground : artworkBackground;
-        set { if (UsesMaskPalette) maskBackground = value; else artworkBackground = value; }
+        get => UsesMaskPalette ? preferences.MaskBackground : preferences.ArtworkBackground;
+        set { if (UsesMaskPalette) preferences.MaskBackground = value; else preferences.ArtworkBackground = value; }
     }
     private double brushSize = 24, hardness = .8, brushOpacity = 1;
     private LayerKind shapeKind = LayerKind.Rectangle;
     private Point? lastCursor;
-    private static readonly string[] ToolNames = ["Selection", "Lasso", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Bucket", "Chop"];
+    private static readonly string[] ToolNames = ["Selection", "Lasso", "Magic Wand", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Bucket", "Chop"];
 
     public MainWindow()
     {
@@ -111,9 +115,10 @@ public partial class MainWindow : Window
             }
         };
         preferences = LoadPreferences();
-        if (preferences is { ToolCatalogVersion: 0, Tools: { } configured })
-            preferences.Tools = configured.Concat(new[] { "Masker", "Bucket", "Lasso" }).Distinct().ToArray();
-        preferences.ToolCatalogVersion = 1;
+        if (preferences is { ToolCatalogVersion: < 2, Tools: { } configured })
+            preferences.Tools = configured.Concat(preferences.ToolCatalogVersion == 0
+                ? new[] { "Masker", "Bucket", "Lasso", "Magic Wand" } : new[] { "Magic Wand" }).Distinct().ToArray();
+        preferences.ToolCatalogVersion = 2;
         BuildMenus();
         BuildPanels();
         ResetLayout();
@@ -171,7 +176,14 @@ public partial class MainWindow : Window
         {
             Directory.CreateDirectory(settingsFolder);
             new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v4.xml"));
-            File.WriteAllText(Path.Combine(settingsFolder, "settings.json"), JsonSerializer.Serialize(preferences, Format.Json));
+            var settings = Path.Combine(settingsFolder, "settings.json");
+            var temporary = Path.Combine(settingsFolder, $".settings-{Guid.NewGuid():N}.tmp");
+            try
+            {
+                File.WriteAllText(temporary, JsonSerializer.Serialize(preferences, Format.Json));
+                File.Move(temporary, settings, overwrite: true);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
         catch (Exception error) { MessageBox.Show(this, error.Message, "CHOP settings"); }
     }
@@ -252,6 +264,8 @@ public partial class MainWindow : Window
         var edit = Menu("Edit");
         Item(edit, "Undo", () => Run("history.undo", 0), "Ctrl+Z");
         Item(edit, "Redo", () => Run("history.redo", 0), "Ctrl+Y");
+        Item(edit, "Copy Pixels", CopyPixels, "Ctrl+C");
+        Item(edit, "Paste Pixels", PastePixels, "Ctrl+V");
         Item(edit, "Configure tools…", ConfigureTools);
         var transformItem = new MenuItem { Header = "Transform" };
         edit.Items.Add(transformItem);
@@ -261,22 +275,35 @@ public partial class MainWindow : Window
         Item(transformItem, "Scale…", ScaleLayer);
         Item(transformItem, "Flip Horizontal", () => RunLayer("layer.flip", new FlipArgs(true)));
         Item(transformItem, "Flip Vertical", () => RunLayer("layer.flip", new FlipArgs(false)));
-        var fill = Item(transformItem, "Fill…", FillPixels);
-        var stroke = Item(transformItem, "Stroke…", StrokeSelection);
+        var fill = Item(edit, "Fill…", FillPixels);
+        var stroke = Item(edit, "Stroke…", StrokeSelection);
         var textItem = Item(edit, "Edit text…", EditText);
         var shapeItem = Item(edit, "Edit shape…", EditShape);
         edit.SubmenuOpened += (_, _) =>
         {
             var selected = ActiveLayer();
-            transformItem.IsEnabled = selected is not null;
+            transformItem.IsEnabled = selected is not null && selected.Kind != LayerKind.Effect;
             fill.IsEnabled = selected?.Kind == LayerKind.Raster;
-            stroke.IsEnabled = fill.IsEnabled && active?.Engine.Current?.Selection is not null;
+            stroke.IsEnabled = fill.IsEnabled;
             textItem.IsEnabled = selected?.Kind == LayerKind.Text;
             shapeItem.IsEnabled = selected?.Kind is LayerKind.Rectangle or LayerKind.Ellipse;
         };
         var image = Menu("Image");
         Item(image, "Canvas Size…", () => ResizeDocument(canvasOnly: true));
         Item(image, "Image Size…", () => ResizeDocument(canvasOnly: false));
+        var orientation = new MenuItem { Header = "Image Rotation" };
+        image.Items.Add(orientation);
+        foreach (var (label, action) in new[]
+        {
+            ("Flip Horizontal", OrientationAction.FlipHorizontal), ("Flip Vertical", OrientationAction.FlipVertical),
+            ("90° Clockwise", OrientationAction.Clockwise), ("90° Counterclockwise", OrientationAction.Counterclockwise),
+            ("180°", OrientationAction.HalfTurn), ("Reset Rotation / Flip", OrientationAction.Reset), ("Bake Rotation / Flip…", OrientationAction.Bake)
+        })
+            Item(orientation, label, () =>
+            {
+                if (action == OrientationAction.Bake && !Confirm("Bake the image orientation into raster pixels?")) return;
+                if (Run("document.orient", action)) Fit();
+            });
         Item(image, "Chop tool", () => SetTool("Chop"));
         Item(image, "Chop to selection", () => { if (active?.Engine.Current?.Selection is { } area) Run("document.chop", area); });
         Item(image, "Flatten image…", Flatten);
@@ -292,6 +319,7 @@ public partial class MainWindow : Window
         layer.Items.Add(newLayer);
         Item(newLayer, "Raster Layer", () => CreateLayer(LayerKind.Raster));
         Item(newLayer, "Fill Layer…", () => CreateLayer(LayerKind.Fill));
+        Item(newLayer, "Effect Layer", () => CreateLayer(LayerKind.Effect));
         Item(layer, "Duplicate selected layer", Duplicate);
         Item(layer, "Rename selected layer…", Rename);
         Item(layer, "Delete selected layer", DeleteLayer);
@@ -310,6 +338,7 @@ public partial class MainWindow : Window
         Item(select, "Deselect", () => Run<Area?>("document.selection", null), "Ctrl+D");
 
         var filter = Menu("Filter");
+        Item(filter, "Bit Crush…", BitCrush);
         Item(filter, EffectName(EffectKind.Grayscale), () => AddEffect(EffectKind.Grayscale));
         var blur = new MenuItem { Header = "Blur" };
         filter.Items.Add(blur);
@@ -376,22 +405,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var bitmap = Clipboard.GetImage();
-            if (bitmap is null && Clipboard.GetDataObject() is { } data && data.GetDataPresent("PNG"))
-            {
-                var png = data.GetData("PNG");
-                using Stream? stream = png switch
-                {
-                    byte[] bytes => new MemoryStream(bytes, writable: false),
-                    Stream input => input,
-                    _ => null
-                };
-                if (stream is { CanSeek: true }) stream.Position = 0;
-                if (stream is not null)
-                    bitmap = System.Windows.Media.Imaging.BitmapDecoder.Create(stream,
-                        System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat,
-                        System.Windows.Media.Imaging.BitmapCacheOption.OnLoad).Frames.FirstOrDefault();
-            }
+            var bitmap = ClipboardBitmap(Clipboard.GetDataObject());
             return bitmap is null ? null : (bitmap.PixelWidth, bitmap.PixelHeight);
         }
         catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or IOException or FormatException or NotSupportedException)
@@ -716,14 +730,13 @@ public partial class MainWindow : Window
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
                 bool cached = !isPreview && maskLayer is null && session.Rendered is { } prior &&
-                    ReferenceEquals(target.Layers, prior.Layers) && target.Width == prior.Width && target.Height == prior.Height;
+                    ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height;
                 var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!) : await Task.Run(() =>
                 {
                     if (shift is { } offset && snapshot.Selection is { } area && targetId is not null &&
                         snapshot.AllLayers().FirstOrDefault(layer => layer.Id == targetId) is { Pixels: not null } layer)
                     {
-                        var moved = renderer.MoveSelection(snapshot, layer, area, (int)offset.X, (int)offset.Y);
-                        if (moved is not null) target = target with { Layers = PreviewPixels(target.Layers, targetId, moved) };
+                        target = session.Engine.Preview(snapshot, Command.Of("layer.moveSelection", offset, targetId));
                     }
                     var pixels = maskLayer is null ? renderer.Composite(target) : renderer.MaskView(target, maskLayer);
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels));
@@ -751,10 +764,6 @@ public partial class MainWindow : Window
         }
         finally { rendering = false; }
     }
-
-    private static Layer[] PreviewPixels(Layer[] items, string id, Layer edit) => items.Select(layer =>
-        layer.Id == id ? edit
-        : layer.Children.Length == 0 ? layer : layer with { Children = PreviewPixels(layer.Children, id, edit) }).ToArray();
 
     private void Say(string? message = null)
     {

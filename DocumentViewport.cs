@@ -59,13 +59,13 @@ internal sealed class DocumentViewport : Grid
         finally { updating = false; }
     }
 
-    public void UpdateRulers(bool visible, RulerUnit unit, Point offset, double zoom, double ppi)
+    public void UpdateRulers(bool visible, RulerUnit unit, Point offset, double zoom, double ppi, double originX, double originY)
     {
         foreach (var ruler in Rulers)
         {
             ruler.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
             ruler.Unit = unit;
-            ruler.Offset = ruler.Axis == GuideAxis.Horizontal ? offset.X : offset.Y;
+            ruler.Offset = ruler.Axis == GuideAxis.Horizontal ? offset.X + originX * zoom : offset.Y + originY * zoom;
             ruler.Zoom = zoom;
             ruler.PixelsPerInch = ppi;
             ruler.InvalidateVisual();

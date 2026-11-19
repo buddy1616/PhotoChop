@@ -37,7 +37,7 @@ public partial class MainWindow
     private void BeginTransform(SpatialKind kind)
     {
         if (active?.Engine.Current is not { } doc || ActiveLayer() is not { } layer) return;
-        if (!Editable(doc, layer.Id) || (doc.Selection is not null && layer.Kind != LayerKind.Raster))
+        if (layer.Kind == LayerKind.Effect || !Editable(doc, layer.Id) || (doc.Selection is not null && layer.Kind != LayerKind.Raster))
         {
             Say("Select an unlocked raster layer to transform selected pixels.");
             return;
@@ -135,7 +135,7 @@ public partial class MainWindow
             {
                 var corner = state.Corners[i];
                 double distance = Distance(corner);
-                if (distance is < 13 or > 38) continue;
+                if (distance is < 21 or > 47) continue;
                 var fromCorner = p - corner;
                 if (Vector.Multiply(fromCorner, state.Corners[(i + 1) % 4] - corner) < 0 &&
                     Vector.Multiply(fromCorner, state.Corners[(i + 3) % 4] - corner) < 0) return 8;

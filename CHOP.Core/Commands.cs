@@ -42,16 +42,18 @@ public sealed class CommandEngine(IRasterBackend backend)
     private int cursor;
     public int HistoryBase { get; private set; }
     private Document? saved;
+    private Document? savedFloating;
     public Document? Current => history.Count == 0 ? null : history[cursor].Document;
-    public bool Dirty => Current is { } doc && (saved is null || doc.Width != saved.Width ||
+    public bool Dirty => Current is { } doc && !ReferenceEquals(doc, savedFloating) && (saved is null || doc.Width != saved.Width ||
         doc.Height != saved.Height || doc.PixelsPerInch != saved.PixelsPerInch || !ReferenceEquals(doc.Layers, saved.Layers) ||
-        !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides) || doc.GuidesLocked != saved.GuidesLocked);
+        !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides) || doc.GuidesLocked != saved.GuidesLocked || doc.Floating != saved.Floating || doc.ImageOrientation != saved.ImageOrientation);
     public string? Path { get; private set; }
     public int Cursor => cursor;
     public IReadOnlyList<HistoryEntry> History => history;
     public event Action<LogEntry>? Executed;
 
     /// <summary>Evaluate a command against the current document without committing it.</summary>
+    public Document Preview(Document snapshot, Command command) => Apply(snapshot, command);
     public Document Preview(Command command) => Apply(Current ?? throw new InvalidOperationException("Open a document first."), command);
 
 
@@ -119,9 +121,11 @@ public sealed class CommandEngine(IRasterBackend backend)
         {
             case "document.save":
                 var path = command.Read<PathArgs>().Path;
-                ProjectFile.Save(path, current);
+                var committed = backend.ResolveFloating(current);
+                ProjectFile.Save(path, committed);
                 Path = path;
-                saved = current;
+                saved = committed;
+                savedFloating = current.Floating is null ? null : current;
                 return;
             case "document.export":
                 File.WriteAllBytes(command.Read<PathArgs>().Path, backend.EncodePng(backend.Composite(current), current.PixelsPerInch));
@@ -156,7 +160,9 @@ public sealed class CommandEngine(IRasterBackend backend)
         "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
         "layer.scale" => "Scale",
         "layer.move" => "Move layer",
-        "layer.moveSelection" => "Move pixels",
+        "layer.moveSelection" => "Move floating pixels",
+        "selection.wand" => "Magic Wand",
+        "document.orient" => $"Image {command.Read<OrientationAction>()}",
         "layer.warp" => command.Read<WarpArgs>().Kind.ToString(),
         "layer.bucket" => "Paint Bucket",
         "selection.lasso" => "Lasso Selection",
@@ -169,12 +175,71 @@ public sealed class CommandEngine(IRasterBackend backend)
         _ => command.Name
     };
 
+    private Document OrientImage(Document doc, OrientationAction action)
+    {
+        if (!Enum.IsDefined(action)) throw new InvalidDataException("Invalid image orientation.");
+        var current = doc.ImageOrientation ?? Projective.Identity;
+        if (action == OrientationAction.Bake)
+        {
+            if (current == Projective.Identity) return doc;
+            var baked = doc.Layers.Select(layer =>
+            {
+                if (layer.Kind == LayerKind.Effect)
+                    return layer with { ImagePlacement = null, Mask = layer.Mask is null ? null : backend.ReprojectMask(doc, layer) };
+                var raster = backend.RasterizeLayer(doc, layer with { Opacity = 1, Visible = true, Blend = Blend.Normal,
+                    Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() });
+                return new Layer(layer.Id, layer.Name, LayerKind.Raster) { Pixels = raster.Pixels,
+                    RasterX = raster.X, RasterY = raster.Y, Visible = layer.Visible, Locked = layer.Locked,
+                    Opacity = layer.Opacity, Blend = layer.TransformsEnabled ? EffectiveBlend(layer) : layer.Blend };
+            }).ToArray();
+            return doc with { ImageOrientation = null, Layers = baked };
+        }
+        var unit = action switch
+        {
+            OrientationAction.FlipHorizontal => new Projective(-1, 0, 1, 0, 1, 0),
+            OrientationAction.FlipVertical => new Projective(1, 0, 0, 0, -1, 1),
+            OrientationAction.Clockwise => new Projective(0, -1, 1, 1, 0, 0),
+            OrientationAction.Counterclockwise => new Projective(0, 1, 0, -1, 0, 1),
+            OrientationAction.HalfTurn => new Projective(-1, 0, 1, 0, -1, 1),
+            _ => current.Inverse()
+        };
+        if (unit == Projective.Identity) return doc;
+        int width = unit.A == 0 ? doc.Height : doc.Width, height = unit.A == 0 ? doc.Width : doc.Height;
+        var orientation = current.Then(unit);
+        var matrix = Projective.Anchored(1d / doc.Width, 1d / doc.Height, 0, 0)
+            .Then(unit).Then(Projective.Anchored(width, height, 0, 0));
+        var inverse = matrix.Inverse();
+        var result = doc with { Width = width, Height = height,
+            ImageOrientation = orientation == Projective.Identity ? null : orientation,
+            Layers = doc.Layers.Select(layer =>
+            {
+                var placement = (layer.ImagePlacement ?? Projective.Identity).Then(matrix);
+                return layer with { ImagePlacement = placement == Projective.Identity ? null : placement };
+            }).ToArray(),
+            Guides = doc.Guides.Select(guide =>
+            {
+                var point = matrix.Map(guide.Axis == GuideAxis.Vertical ? guide.Position : 0,
+                    guide.Axis == GuideAxis.Horizontal ? guide.Position : 0);
+                bool vertical = (guide.Axis == GuideAxis.Vertical) != (unit.A == 0);
+                return guide with { Axis = vertical ? GuideAxis.Vertical : GuideAxis.Horizontal,
+                    Position = (int)Math.Round(vertical ? point.X : point.Y) };
+            }).ToArray()
+        };
+        return doc.Selection is null ? result : SelectPixels(result, (x, y) =>
+        {
+            var p = inverse.Map(x + .5, y + .5);
+            return doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y));
+        });
+    }
+
     public static string EffectLabel(EffectKind kind) => kind switch
     {
         EffectKind.BrightnessContrast => "Brightness / Contrast",
         EffectKind.HueSaturation => "Hue / Saturation",
         EffectKind.GaussianBlur => "Gaussian Blur",
         EffectKind.MotionBlur => "Motion Blur",
+        EffectKind.DropShadow => "Drop Shadow",
+        EffectKind.BitCrush => "Bit Crush",
         EffectKind.BlendMode => "Blend mode",
         _ => kind.ToString()
     };
@@ -240,10 +305,12 @@ public sealed class CommandEngine(IRasterBackend backend)
         HistoryBase = 0;
         Path = path;
         saved = path is null ? null : document;
+        savedFloating = null;
     }
 
     private Document Apply(Document doc, Command command)
     {
+        if (doc.Floating is not null && command.Name != "layer.moveSelection" && !command.Name.StartsWith("guide.", StringComparison.Ordinal)) doc = backend.ResolveFloating(doc);
         var layers = doc.Layers;
         Layer Wanted() => doc.AllLayers().FirstOrDefault(layer => layer.Id == command.Target)
             ?? throw new InvalidDataException("The target layer does not exist.");
@@ -268,6 +335,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         {
             var layer = Wanted();
             EnsureEditable(layers, layer.Id);
+            if (layer.Kind == LayerKind.Effect) throw new InvalidDataException("Effect layers do not have transforms.");
             if (transform == Projective.Identity) return doc;
             if (doc.Selection is { } area) return TransformSelected(doc, layer, area, transform);
             var local = backend.ToParentSpace(doc, layer, transform);
@@ -278,6 +346,7 @@ public sealed class CommandEngine(IRasterBackend backend)
 
         switch (command.Name)
         {
+            case "selection.commitFloating": return doc;
             case "document.selection":
                 var selection = command.Args.Deserialize<Area?>(Format.Json);
                 return doc with { Selection = selection is { } area ? Clip(area, doc) : null, SelectionMask = null };
@@ -290,6 +359,17 @@ public sealed class CommandEngine(IRasterBackend backend)
                     bool hit = Contains(rect.Area, x, y);
                     return rect.Mode == SelectionMode.Add ? hit || doc.Selected(x, y) : !hit && doc.Selected(x, y);
                 });
+            case "selection.wand":
+                var wand = command.Read<WandArgs>();
+                Range(wand.Tolerance, 0, 255);
+                if (!Enum.IsDefined(wand.Mode)) throw new InvalidDataException("Invalid selection mode.");
+                var region = backend.BucketRegion(doc, Wanted(), new BucketArgs(wand.Point, "#FF000000", wand.Tolerance), false);
+                return SelectPixels(doc, (x, y) => wand.Mode switch
+                {
+                    SelectionMode.Add => doc.Selected(x, y) || region?.Contains(x, y) == true,
+                    SelectionMode.Subtract => doc.Selected(x, y) && region?.Contains(x, y) != true,
+                    _ => region?.Contains(x, y) == true
+                });
             case "selection.lasso":
                 var lasso = command.Read<LassoArgs>();
                 return Lasso(doc, lasso);
@@ -301,6 +381,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "selection.colorRange":
                 var query = command.Read<ColorSelection>();
                 return WithSelection(doc, PixelSelection.ColorRange(backend.Composite(doc), query, doc));
+            case "document.orient": return OrientImage(doc, command.Read<OrientationAction>());
             case "document.resizeCanvas":
                 var canvas = command.Read<ResizeCanvasArgs>();
                 Format.Dimensions(canvas.Width, canvas.Height);
@@ -357,6 +438,22 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var png = import.Png ?? File.ReadAllBytes(import.Path!);
                 return With(Insert(layers, import.Parent, null, new(import.Id, Name(import.Name), LayerKind.Raster)
                     { Pixels = backend.DecodePng(png) }));
+            case "layer.pastePixels":
+                var paste = command.Read<PastePixelsArgs>();
+                NewId(paste.Id);
+                CheckParent(paste.Parent);
+                var pastedPixels = backend.DecodePng(paste.Png);
+                var pasteLayer = new Layer(paste.Id, Name(paste.Name), LayerKind.Raster)
+                    { Pixels = pastedPixels, Width = pastedPixels.Width, Height = pastedPixels.Height };
+                var pastedDoc = With(Insert(layers, paste.Parent, null, pasteLayer));
+                var location = backend.ToParentSpace(pastedDoc, pasteLayer, new Projective(1, 0, paste.X, 0, 1, paste.Y));
+                if (paste.Parent is not null)
+                {
+                    // Clipboard coordinates are in the document grid, including inside transformed groups.
+                    var parentMatrix = backend.ParentCoordinates(pastedDoc, pasteLayer);
+                    location = new Projective(1, 0, paste.X, 0, 1, paste.Y).Then(parentMatrix.Inverse());
+                }
+                return pastedDoc.ReplaceLayer(pasteLayer.Id, pasteLayer with { RasterGrid = location });
             case "layer.delete":
                 var deleted = Wanted();
                 RequireEditableSubtree(layers, [deleted]);
@@ -386,6 +483,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.transformsEnabled":
                 return Edit(layer => layer with { TransformsEnabled = command.Read<bool>() });
             case "layer.move":
+                if (Wanted().Kind == LayerKind.Effect) throw new InvalidDataException("Effect layers do not have transforms.");
                 var movement = command.Read<PointD>();
                 Range(movement.X, -1000000, 1000000);
                 Range(movement.Y, -1000000, 1000000);
@@ -399,7 +497,8 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.transform":
                 var transform = command.Read<Transform>();
                 CheckTransform(transform);
-                return Edit(layer => layer with { Transform = transform });
+                return Edit(layer => layer.Kind == LayerKind.Effect
+                    ? throw new InvalidDataException("Effect layers do not have transforms.") : layer with { Transform = transform });
             case "layer.text":
                 var text = command.Read<TextArgs>();
                 Format.Color(text.Color);
@@ -455,14 +554,21 @@ public sealed class CommandEngine(IRasterBackend backend)
                 });
             case "layer.fillPixels":
                 var fillInk = Format.Color(command.Read<string>());
-                var fillBounds = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
-                return Edit(layer => ApplyInk(doc, layer, fillBounds, doc.Selection is null ? (_, _) => true : doc.Selected, fillInk));
+                var fillBounds = new Area(0, 0, doc.Width, doc.Height);
+                return Edit(layer => ApplyInk(doc, layer, fillBounds, (_, _) => true, fillInk));
+            case "layer.crushSelection":
+                int block = (int)Range(command.Read<int>(), 1, 512);
+                return Edit(layer => doc.Selection is not null && layer.Kind == LayerKind.Raster
+                    ? backend.CrushSelection(doc, layer, block)
+                    : throw new InvalidDataException("Select pixels on a raster layer."));
             case "layer.strokeSelection":
                 var outline = command.Read<OutlineArgs>();
                 uint strokeInk = Format.Color(outline.Color);
                 int thickness = (int)Range(outline.Thickness, 1, 16384);
-                if (!Enum.IsDefined(outline.Alignment) || doc.Selection is null)
-                    throw new InvalidDataException("A selection and stroke alignment are required.");
+                if (!Enum.IsDefined(outline.Alignment)) throw new InvalidDataException("Invalid stroke alignment.");
+                if (doc.Selection is null)
+                    return Edit(layer => layer.Kind == LayerKind.Raster ? backend.BakeStroke(layer, outline)
+                        : throw new InvalidDataException("Select a raster layer to stroke pixels."));
                 int outside = outline.Alignment switch { StrokeAlignment.Outside => thickness, StrokeAlignment.Center => thickness / 2, _ => 0 };
                 int inside = thickness - outside;
                 var outer = ResizeSelection(doc, outside);
@@ -472,27 +578,30 @@ public sealed class CommandEngine(IRasterBackend backend)
                     : doc;
             case "layer.clearSelection":
             case "layer.moveSelection":
-                if (doc.Selection is not { } selectedArea) return doc;
-                PointD? delta = command.Name == "layer.moveSelection" ? command.Read<PointD>() : null;
-                if (delta is { } offset)
+                bool movingSelection = command.Name == "layer.moveSelection";
+                if (!movingSelection && doc.Selection is null) return doc;
+                if (movingSelection)
                 {
-                    Range(offset.X, -16384, 16384);
-                    Range(offset.Y, -16384, 16384);
+                    var displacement = command.Read<PointD>();
+                    int dx = PixelDelta(displacement.X), dy = PixelDelta(displacement.Y);
+                    if (dx == 0 && dy == 0) return doc;
+                    var floating = doc.Floating;
+                    if (floating is null)
+                    {
+                        if (doc.Selection is not { } floatingArea) return doc;
+                        var target = Wanted();
+                        EnsureEditable(layers, target.Id);
+                        if (target.Kind != LayerKind.Raster || target.Pixels is null) return doc;
+                        floating = new FloatingPixels(target.Id, floatingArea, doc.SelectionMask, 0, 0);
+                    }
+                    else if (floating.LayerId != command.Target) throw new InvalidDataException("Commit the floating pixels before moving another layer.");
+                    var floatingSource = doc with { Selection = floating.Source, SelectionMask = floating.Mask };
+                    return TranslateSelection(floatingSource, checked(floating.X + dx), checked(floating.Y + dy)) with
+                    { Floating = floating with { X = checked(floating.X + dx), Y = checked(floating.Y + dy) } };
                 }
                 var selectedLayer = Wanted();
                 EnsureEditable(layers, selectedLayer.Id);
-                if (selectedLayer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to edit pixels.");
-                if (selectedLayer.Pixels is null) return doc;
-                if (delta is { } selectionMove)
-                {
-                    var dx = PixelDelta(selectionMove.X);
-                    var dy = PixelDelta(selectionMove.Y);
-                    if (dx == 0 && dy == 0) return doc;
-                    var moved = backend.MoveSelection(doc, selectedLayer, selectedArea, dx, dy);
-                    if (moved is null) return doc;
-                    var movedDoc = Edit(layer => moved);
-                    return TranslateSelection(movedDoc, dx, dy);
-                }
+                if (selectedLayer.Kind != LayerKind.Raster || selectedLayer.Pixels is null) return doc;
                 var edited = backend.ClearSelection(doc, selectedLayer);
                 if (edited.Shift is not { } pixelEdit) return doc;
                 return Edit(layer => layer with { PixelShifts = [.. layer.PixelShifts, pixelEdit] });
@@ -512,6 +621,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "mask.bake":
                 return Edit(layer =>
                 {
+                    if (layer.Kind == LayerKind.Effect) throw new InvalidDataException("Bake the containing group to apply this effect layer.");
                     bool maskOnly = command.Name == "mask.bake";
                     if (maskOnly && layer.Mask is null) return layer;
                     RequireEditableSubtree(layers, [layer]);
@@ -599,11 +709,15 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "effect.add":
                 var effect = command.Read<Effect>();
                 CheckEffect(effect);
+                if (Wanted().Kind == LayerKind.Effect && effect.Kind == EffectKind.Transform)
+                    throw new InvalidDataException("Effect layers do not have transforms.");
                 return Edit(layer => layer.Effects.Any(item => item.Id == effect.Id)
                     ? throw new InvalidDataException("Effect ID already exists.") : layer with { Effects = [.. layer.Effects, effect] });
             case "effect.update":
                 var update = command.Read<Effect>();
                 CheckEffect(update);
+                if (Wanted().Kind == LayerKind.Effect && update.Kind == EffectKind.Transform)
+                    throw new InvalidDataException("Effect layers do not have transforms.");
                 return Edit(layer => layer with { Effects = UpdateEffects(layer.Effects, update.Id, list =>
                     list[list.FindIndex(item => item.Id == update.Id)] = update) });
             case "effect.remove":
@@ -642,7 +756,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 guide.Axis == GuideAxis.Vertical ? guide.Position * sx + x : guide.Position * sy + y) })
                 .Where(guide => guide.Position >= 0 && guide.Position <= (guide.Axis == GuideAxis.Vertical ? width : height)).ToArray(),
             Layers = doc.Layers.Select(layer => layer with
-            { Transform = layer.Transform.Warp is { } warp ? layer.Transform with { Warp = inverse.Then(warp).Then(framing) } : layer.Transform,
+            { ImagePlacement = layer.ImagePlacement is { } image ? inverse.Then(image).Then(framing) : null,
+              Transform = layer.Transform.Warp is { } warp ? layer.Transform with { Warp = inverse.Then(warp).Then(framing) } : layer.Transform,
                 Placement = new(
                 layer.Placement.X * sx + x, layer.Placement.Y * sy + y,
                 layer.Placement.ScaleX * sx, layer.Placement.ScaleY * sy) }).ToArray()
@@ -952,6 +1067,16 @@ public sealed class CommandEngine(IRasterBackend backend)
             case EffectKind.HueSaturation: Range(effect.A, -180, 180); Range(effect.B, -1, 1); break;
             case EffectKind.GaussianBlur: Range(effect.A, 0, 100); break;
             case EffectKind.MotionBlur: Range(effect.A, 0, 200); Range(effect.B, -180, 180); break;
+            case EffectKind.BitCrush: Range(effect.A, 1, 512); break;
+            case EffectKind.Stroke:
+                Range(effect.A, 1, 512);
+                if (!Enum.IsDefined(effect.Alignment)) throw new InvalidDataException("Invalid stroke alignment.");
+                Format.Color(effect.Ink);
+                break;
+            case EffectKind.DropShadow:
+                Range(effect.A, 0, 360); Range(effect.B, 0, 512); Range(effect.Size, 0, 100);
+                Range(effect.Spread, 0, 100); Range(effect.Opacity, 0, 1); Format.Color(effect.Ink);
+                break;
             case EffectKind.Opacity: Range(effect.A, 0, 1); break;
             case EffectKind.Transform:
                 CheckTransform(effect.Spatial ?? throw new InvalidDataException("A transform effect needs transform parameters."));

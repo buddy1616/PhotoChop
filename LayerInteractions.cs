@@ -58,7 +58,7 @@ public partial class MainWindow
             {
                 if (Confirm($"Bake this {kind.ToLowerInvariant()} into a single raster layer? This applies its visible transforms, effects, and mask."))
                     Run("layer.bake", 0, layer.Id, layer.Id);
-            }).IsEnabled = Editable(active!.Engine.Current!, layer.Id);
+            }).IsEnabled = layer.Kind != LayerKind.Effect && Editable(active!.Engine.Current!, layer.Id);
             Item(menu, "Delete", () => Run("layer.delete", 0, layer.Id));
         };
         menu.Closed += (_, _) => target = null;

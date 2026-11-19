@@ -28,6 +28,18 @@ public partial class MainWindow
         rulersMenu.IsCheckable = true;
         showGuidesMenu = Item(show, "Show Guides", ToggleGuides, "Ctrl+;");
         showGuidesMenu.IsCheckable = true;
+        var rulers = new MenuItem { Header = "Rulers" };
+        view.Items.Add(rulers);
+        var horizontal = Item(rulers, "Center Horizontal", () =>
+        { preferences.CenterHorizontal = !preferences.CenterHorizontal; UpdateRulers(); });
+        var vertical = Item(rulers, "Center Vertical", () =>
+        { preferences.CenterVertical = !preferences.CenterVertical; UpdateRulers(); });
+        horizontal.IsCheckable = vertical.IsCheckable = true;
+        rulers.SubmenuOpened += (_, _) =>
+        {
+            horizontal.IsChecked = preferences.CenterHorizontal;
+            vertical.IsChecked = preferences.CenterVertical;
+        };
         var guides = new MenuItem { Header = "Guides" };
         view.Items.Add(guides);
         clearGuidesMenu = Item(guides, "Clear Guides", () => Run("guide.clear", 0));
@@ -75,7 +87,8 @@ public partial class MainWindow
     private void UpdateRulers(Session session)
     {
         if (session.Engine.Current is not { } doc) return;
-        session.Viewport.UpdateRulers(preferences.ShowRulers, preferences.RulerUnit, session.Offset, session.Zoom, doc.PixelsPerInch);
+        session.Viewport.UpdateRulers(preferences.ShowRulers, preferences.RulerUnit, session.Offset, session.Zoom, doc.PixelsPerInch,
+            preferences.CenterHorizontal ? doc.Width / 2d : 0, preferences.CenterVertical ? doc.Height / 2d : 0);
         uint argb = Format.Color(preferences.GuideColor);
         session.View.SetGuideColor(Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
         session.View.Guides = preferences.ShowGuides ? doc.Guides : [];

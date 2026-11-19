@@ -53,6 +53,14 @@ public partial class MainWindow
         if (dialog.ShowDialog() == true && result is not null) Run("layer.scale", result, layer.Id);
     }
 
+    private void BitCrush()
+    {
+        if (ActiveLayer() is null) return;
+        if (active?.Engine.Current?.Selection is null) { AddEffect(EffectKind.BitCrush); return; }
+        var values = Form("Bit Crush Selection", ("Pixel size", "8"));
+        if (values is not null) Guard(() => RunLayer("layer.crushSelection", Int(values[0])));
+    }
+
     private void FillPixels()
     {
         if (ActiveLayer()?.Kind == LayerKind.Raster && ColorPickerDialog.Show(EditorOwner, "Fill color", foreground) is { } ink)
@@ -61,7 +69,7 @@ public partial class MainWindow
 
     private void StrokeSelection()
     {
-        if (ActiveLayer()?.Kind != LayerKind.Raster || active?.Engine.Current?.Selection is null) return;
+        if (ActiveLayer()?.Kind != LayerKind.Raster || active?.Engine.Current is null) return;
         var dialog = new Window { Title = "Stroke Selection", Owner = EditorOwner, Width = 320, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize };
         var panel = new StackPanel { Margin = new Thickness(14) };
