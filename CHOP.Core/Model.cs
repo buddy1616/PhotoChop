@@ -29,6 +29,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     [JsonIgnore] public Pixels? Pixels { get; init; }
     [JsonIgnore] public AlphaMask? Mask { get; init; }
     [JsonIgnore] public PixelShift[] PixelShifts { get; init; } = [];
+    public SpatialEdit[] SpatialEdits { get; init; } = [];
     public Placement Placement { get; init; } = new();
     public bool TransformsEnabled { get; init; } = true;
     [JsonIgnore] public Transform ActiveTransform => TransformsEnabled ? Transform : new();
@@ -43,6 +44,20 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public int Height { get; init; } = 100;
     public Effect[] Effects { get; init; } = [];
     public Layer[] Children { get; init; } = [];
+
+    public Layer TranslatePlacement(PointD delta)
+    {
+        double x = delta.X * Placement.ScaleX, y = delta.Y * Placement.ScaleY;
+        var translation = new Projective(1, 0, x, 0, 1, y);
+        var inverse = new Projective(1, 0, -x, 0, 1, -y);
+        return this with
+        {
+            Placement = Placement with { X = Placement.X + x, Y = Placement.Y + y },
+            SpatialEdits = SpatialEdits.Length == 0 ? SpatialEdits : SpatialEdits.Select(edit =>
+                edit with { Matrix = inverse.Then(edit.Matrix).Then(translation) }).ToArray()
+        };
+    }
+
 }
 
 public sealed record Document(string Id, int Width, int Height)
@@ -51,6 +66,7 @@ public sealed record Document(string Id, int Width, int Height)
     public string ColorSpace { get; init; } = "sRGB";
     public Dictionary<string, string> Metadata { get; init; } = [];
     public Layer[] Layers { get; init; } = [];
+    public bool GuidesLocked { get; init; }
     public Guide[] Guides { get; init; } = [];
     [JsonIgnore] public Area? Selection { get; init; }
 
@@ -96,7 +112,9 @@ public interface IRasterBackend
     RasterEdit PaintArea(Document document, Layer layer, Area bounds, Func<int, int, bool> contains, uint color);
     RasterEdit RasterizeLayer(Document document, Layer layer);
     RasterEdit? ResolveRaster(Layer layer);
-    RasterEdit? TransformPixels(Document document, Layer layer, Area selection, PixelTransform transform);
+    Projective ToParentSpace(Document document, Layer layer, Projective transform);
+    RasterEdit? TransformPixels(Document document, Layer layer, Area selection, Projective transform);
+    PixelSelection? BucketRegion(Document document, Layer layer, BucketArgs options);
     RasterEdit EditSelection(Document document, Layer layer, Area selection, PointD? delta);
     AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);
     Pixels Stroke(Document document, Layer layer, StrokeArgs stroke);

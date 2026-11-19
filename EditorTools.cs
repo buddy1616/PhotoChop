@@ -29,6 +29,8 @@ public partial class MainWindow
     private Chop.Core.SelectionMode selectionMode;
     private PointD? selectionDragDelta;
     private readonly List<PointD> stroke = [];
+    private readonly List<PointD> lassoPoints = [];
+    private int bucketTolerance;
 
     private void HookCanvas(EditorCanvas view)
     {
@@ -58,7 +60,11 @@ public partial class MainWindow
         view.PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
         view.PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
         view.MouseUp += CanvasUp;
-        view.LostMouseCapture += (_, _) => CancelGesture();
+        view.LostMouseCapture += (_, _) =>
+        {
+            if (interactiveTransform is { } transform) transform.Start = null;
+            CancelGesture();
+        };
         view.MouseLeave += (_, _) => { if (gesture is null) { lastCursor = null; Say(); } };
     }
 
@@ -70,6 +76,11 @@ public partial class MainWindow
         canvas.Focus();
         if (e.ChangedButton == MouseButton.Left && !Keyboard.IsKeyDown(Key.Space) &&
             sampleColorRange?.Invoke(active, point) == true)
+        {
+            e.Handled = true;
+            return;
+        }
+        if (!Keyboard.IsKeyDown(Key.Space) && TransformMouseDown(point, e.ChangedButton))
         {
             e.Handled = true;
             return;
@@ -96,6 +107,15 @@ public partial class MainWindow
                 case "Text": EditTextAt(doc, new PointD(point.X, point.Y)); return;
                 case "Eyedropper": Sample(point); return;
                 case "Transform": ScaleLayer(); return;
+                case "Bucket":
+                    RunLayer("layer.bucket", new BucketArgs(new PointD(point.X, point.Y), foreground, bucketTolerance));
+                    return;
+                case "Lasso":
+                    selectionMode = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? Chop.Core.SelectionMode.Subtract :
+                        Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? Chop.Core.SelectionMode.Add : Chop.Core.SelectionMode.Replace;
+                    lassoPoints.Add(new PointD(point.X, point.Y));
+                    canvas.LassoPath = lassoPoints;
+                    break;
                 case "Selection":
                     selectionMode = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? Chop.Core.SelectionMode.Subtract
                         : Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? Chop.Core.SelectionMode.Add : Chop.Core.SelectionMode.Replace;
@@ -120,7 +140,6 @@ public partial class MainWindow
                         return;
                     }
                     moveId = target.Id;
-                    if (!target.TransformsEnabled) { Say("Enable transforms before moving this layer."); return; }
                     moveOriginal = target.Transform;
                     moveParentInverse = SKMatrix.Identity;
                     var parent = doc.AllLayers().FirstOrDefault(layer => layer.Children.Any(child => child.Id == target.Id));
@@ -131,9 +150,10 @@ public partial class MainWindow
                     if (moveSpace.TryInvert(out var inverted)) moveParentInverse = inverted;
                     break;
                 case "Brush":
+                case "Masker":
                 case "Eraser":
                     if (ActiveLayer() is not { Locked: false } raster || !Editable(doc, raster.Id) ||
-                        (raster.Kind != LayerKind.Raster && !(active.MaskTarget == raster.Id && raster.Mask is not null)))
+                        (tool != "Masker" && raster.Kind != LayerKind.Raster && !(active.MaskTarget == raster.Id && raster.Mask is not null)))
                     { Say("Select an unlocked raster layer to paint."); return; }
                     stroke.Add(new(point.X, point.Y));
                     canvas.Stroke = stroke;
@@ -166,6 +186,7 @@ public partial class MainWindow
             !IsSamplingCanvas(hoveredSession))
             hoveredView.Cursor = HitGuide(hoveredSession, e.GetPosition(hoveredView)) is { } hovered ? GuideCursor(hovered.Axis) : ToolCursor(tool);
         var point = canvas.FromView(view);
+        if (gesture != "Pan" && TransformMouseMove(point)) { e.Handled = true; return; }
         lastCursor = point;
         switch (gesture)
         {
@@ -173,6 +194,12 @@ public partial class MainWindow
                 active.Offset = panOrigin + (view - gestureStart);
                 UpdateView();
                 break;
+            case "Lasso":
+                if (lassoPoints.Count < 19999 && (point - new Point(lassoPoints[^1].X, lassoPoints[^1].Y)).Length * canvas.Zoom >= 2)
+                    lassoPoints.Add(new PointD(point.X, point.Y));
+                canvas.InvalidateVisual();
+                break;
+            case "Masker":
             case "Brush":
             case "Eraser":
                 if (stroke.Count < 99999 && (point - new Point(stroke[^1].X, stroke[^1].Y)).Length >= .25)
@@ -208,11 +235,16 @@ public partial class MainWindow
     }
 
     private static Layer[] PreviewMove(Layer[] items, string id, Chop.Core.Transform transform) => items.Select(layer =>
-        layer.Id == id ? layer with { Transform = transform }
+        layer.Id == id ? layer.TranslatePlacement(new PointD(transform.X - layer.Transform.X, transform.Y - layer.Transform.Y))
         : layer.Children.Length == 0 ? layer : layer with { Children = PreviewMove(layer.Children, id, transform) }).ToArray();
 
     private void CanvasUp(object sender, MouseButtonEventArgs e)
     {
+        if (TransformMouseUp(canvas.FromView(e.GetPosition(canvas)), e.ChangedButton))
+        {
+            e.Handled = true;
+            return;
+        }
         if (guideDrag?.Source == canvas && e.ChangedButton == MouseButton.Left)
         {
             FinishGuide(e.GetPosition(canvas));
@@ -227,6 +259,7 @@ public partial class MainWindow
         int x = (int)Math.Floor(bounds.X), y = (int)Math.Floor(bounds.Y);
         var area = new Area(x, y, (int)Math.Ceiling(bounds.Right) - x, (int)Math.Ceiling(bounds.Bottom) - y);
         var points = stroke.ToArray();
+        var lasso = completed == "Lasso" ? lassoPoints.Append(new PointD(end.X, end.Y)).ToArray() : [];
         var moved = movePreview;
         var original = moveOriginal;
         string? id = moveId;
@@ -238,6 +271,10 @@ public partial class MainWindow
         CancelGesture();
         switch (completed)
         {
+            case "Lasso":
+                if (lasso.Length >= 3) Run("selection.lasso", new LassoArgs(lasso, mode));
+                break;
+            case "Masker":
             case "Brush":
             case "Eraser":
                 if (points.Length > 0 && active.ActiveId is { } paintTarget)
@@ -246,7 +283,7 @@ public partial class MainWindow
                     var view = canvas;
                     var overlay = new EditorCanvas.PaintOverlay(paint, active.Engine.Current?.Selection);
                     view.PendingPaint.Add(overlay);
-                    if (!Run(mask ? "mask.paintStroke" : "layer.paintStroke", paint, paintTarget))
+                    if (!Run(completed == "Masker" ? "mask.maskerStroke" : mask ? "mask.paintStroke" : "layer.paintStroke", paint, paintTarget))
                     {
                         view.PendingPaint.Remove(overlay);
                         view.InvalidateVisual();
@@ -257,7 +294,8 @@ public partial class MainWindow
                 if (moveSelection != default) Run("layer.moveSelection", moveSelection, id);
                 break;
             case "Move":
-                if (moved is not null && moved != original) Run("layer.transform", moved, id);
+                if (moved is not null && original is not null && moved != original)
+                    Run("layer.move", new PointD(moved.X - original.X, moved.Y - original.Y), id);
                 break;
             case "Selection":
                 if (originalSelection is { } previous)
@@ -335,6 +373,8 @@ public partial class MainWindow
             UpdateCanvas();
         }
         stroke.Clear();
+        lassoPoints.Clear();
+        canvas.LassoPath = null;
         canvas.Stroke = null;
         canvas.Marquee = null;
         if (canvas.IsMouseCaptured) canvas.ReleaseMouseCapture();
@@ -405,6 +445,7 @@ public partial class MainWindow
 
     private void SetTool(string name)
     {
+        CancelTransform();
         CancelGesture();
         tool = name;
         foreach (var session in sessions)
@@ -414,15 +455,16 @@ public partial class MainWindow
 
     private void RefreshMarqueeCursor()
     {
-        if (tool != "Selection") return;
+        if (tool is not ("Selection" or "Lasso") || interactiveTransform is not null) return;
         foreach (var session in sessions)
             session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(tool);
     }
 
     private static Cursor ToolCursor(string name) => name switch
     {
-        "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" => ToolCursors.Eraser,
-        "Selection" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
+        "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" or "Masker" => ToolCursors.Eraser,
+        "Bucket" => Cursors.Cross,
+        "Selection" or "Lasso" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.SelectionAdd : Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
         "Shape" => Cursors.SizeNESW, "Eyedropper" => ToolCursors.Eyedropper,
         "Transform" => Cursors.ScrollAll, _ => Cursors.Arrow
@@ -431,8 +473,14 @@ public partial class MainWindow
     private void RefreshTools()
     {
         toolsPanel.Children.Clear();
-        foreach (var name in preferences.Tools ?? ToolNames)
+        string[] destructive = ["Move", "Brush", "Eraser", "Bucket", "Chop"];
+        var configured = preferences.Tools ?? ToolNames;
+        var nonDestructive = ToolNames.Where(name => configured.Contains(name) && !destructive.Contains(name)).ToArray();
+        var destructiveTools = destructive.Where(configured.Contains).ToArray();
+        foreach (var name in nonDestructive.Concat(destructiveTools))
         {
+            if (nonDestructive.Length > 0 && name == destructiveTools.FirstOrDefault())
+                toolsPanel.Children.Add(new Separator { Margin = new Thickness(2, 6, 2, 6) });
             var button = Button(name, () => SetTool(name));
             button.HorizontalContentAlignment = HorizontalAlignment.Left;
             if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
@@ -444,8 +492,10 @@ public partial class MainWindow
         toolColors.Children.Add(ColorButton("Background", background, value => background = value));
         toolColors.Children.Add(Button("⇄  Swap (X)", SwapColors, "Swap foreground and background colors"));
         ToolOptions.Children.Clear();
+        if (interactiveTransform is { } transform) { TransformOptions(transform); return; }
         OptionLabel(tool);
-        if (tool is "Brush" or "Eraser")
+        if (tool == "Bucket") SliderOption("Tolerance", 0, 255, bucketTolerance, value => bucketTolerance = (int)value);
+        if (tool is "Brush" or "Eraser" or "Masker")
         {
             SliderOption("Size", 1, 512, brushSize, value => brushSize = value);
             SliderOption("Hardness", 0, 1, hardness, value => hardness = value);
@@ -460,6 +510,7 @@ public partial class MainWindow
         }
         if (tool == "Transform")
         {
+            ToolOptions.Children.Add(Button("Free Transform", () => BeginTransform(SpatialKind.FreeTransform)));
             ToolOptions.Children.Add(Button("Scale…", ScaleLayer));
             ToolOptions.Children.Add(Button("Position and Rotation…", EditTransform));
         }
@@ -558,6 +609,12 @@ public partial class MainWindow
 
     private void OnKey(object sender, KeyEventArgs e)
     {
+        if (interactiveTransform is not null && e.Key is Key.Escape or Key.Enter)
+        {
+            if (e.Key == Key.Enter) ApplyTransform(); else CancelTransform();
+            e.Handled = true;
+            return;
+        }
         if (e.Key == Key.Escape && (gesture is not null || guideDrag is not null)) { CancelGesture(); e.Handled = true; return; }
         if (e.OriginalSource is TextBoxBase or PasswordBox) return;
         var modifiers = Keyboard.Modifiers;
@@ -571,6 +628,7 @@ public partial class MainWindow
             Key.D => () => Run<Area?>("document.selection", null),
             Key.G when !shift => Group,
             Key.OemPlus or Key.Add => () => ZoomBy(1.25), Key.OemMinus or Key.Subtract => () => ZoomBy(.8),
+            Key.T => () => BeginTransform(SpatialKind.FreeTransform),
             Key.D0 or Key.NumPad0 => Fit, Key.D1 or Key.NumPad1 => ActualPixels,
             _ => null
         } : null;
@@ -580,7 +638,7 @@ public partial class MainWindow
             if (e.Key == Key.Delete) action = () => RunLayer("layer.clearSelection", 0);
             string? shortcut = e.Key switch
             {
-                Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection",
+                Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection", Key.L => "Lasso",
                 Key.I => "Eyedropper", Key.T => "Text", _ => null
             };
             if (shortcut is not null) action = () => SetTool(shortcut);

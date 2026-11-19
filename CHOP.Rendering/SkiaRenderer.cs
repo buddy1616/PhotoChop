@@ -106,6 +106,42 @@ public sealed class SkiaRenderer : IRasterBackend
         };
         if (blender is not null) paint.Blender = blender;
 
+        var spatial = SpatialMatrix(layer);
+        if (spatial != SKMatrix.Identity)
+        {
+            if (!parent.TryInvert(out var parentInverse)) return;
+            var projection = SKMatrix.Concat(parent, SKMatrix.Concat(spatial, parentInverse));
+            if (!projection.TryInvert(out var inverse)) return;
+            var neutral = layer with { SpatialEdits = [], Opacity = 1, Blend = Blend.Normal,
+                Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() };
+            var sourceBounds = SKRect.Create(region.X, region.Y, region.Width, region.Height);
+            if (layer.Kind != LayerKind.Group && PrepareLayer(layer, effects) is { } source)
+            {
+                sourceBounds = world.MapRect(SKRect.Create(source.X, source.Y, source.Pixels.Width, source.Pixels.Height));
+            }
+            var visible = inverse.MapRect(SKRect.Create(region.X, region.Y, region.Width, region.Height));
+            var regionToDraw = visible;
+            if (projection.Persp0 == 0 && projection.Persp1 == 0)
+            {
+                regionToDraw.Intersect(sourceBounds);
+                if (regionToDraw.IsEmpty) return;
+            }
+            else regionToDraw = sourceBounds;
+            var local = EnclosingPixels(regionToDraw);
+            using var output = Surface(local.Width, local.Height);
+            using var drawing = new SKCanvas(output);
+            drawing.Clear(SKColors.Transparent);
+            drawing.Translate(-local.X, -local.Y);
+            Draw(drawing, neutral, local, parent);
+            drawing.Flush();
+            using var image = SKImage.FromBitmap(output);
+            canvas.Save();
+            canvas.Concat(projection);
+            canvas.DrawImage(image, local.X, local.Y, new SKSamplingOptions(SKFilterMode.Linear), paint);
+            canvas.Restore();
+            return;
+        }
+
         if (layer.Kind == LayerKind.Group && TryDrawPlacedGroup(canvas, layer, region, parent, paint)) return;
 
         if (layer.Kind == LayerKind.Group)
@@ -207,7 +243,7 @@ public sealed class SkiaRenderer : IRasterBackend
 
     public RasterEdit RasterizeLayer(Document document, Layer layer)
     {
-        if (layer.Kind == LayerKind.Group)
+        if (layer.Kind == LayerKind.Group || SpatialMatrix(layer) != SKMatrix.Identity)
         {
             var parent = NativeParentMatrix(document.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
             if (!parent.TryInvert(out var inverse)) throw new InvalidDataException("The parent group transform cannot be inverted.");
@@ -249,6 +285,32 @@ public sealed class SkiaRenderer : IRasterBackend
                 return found;
         }
         return null;
+    }
+
+    public Area? VisibleLayerBounds(Document doc, string id)
+    {
+        Layer[] Find(IEnumerable<Layer> layers)
+        {
+            foreach (var layer in layers)
+            {
+                if (layer.Id == id) return [layer];
+                if (layer.Kind == LayerKind.Group && Find(layer.Children) is { Length: > 0 } child)
+                    return [layer with { Children = child }];
+            }
+            return [];
+        }
+        var layers = Find(doc.Layers);
+        if (layers.Length == 0) return null;
+        var pixels = Composite(doc with { Layers = layers });
+        int left = pixels.Width, right = -1, top = pixels.Height, bottom = -1;
+        for (int y = 0; y < pixels.Height; y++)
+        for (int x = 0; x < pixels.Width; x++)
+        {
+            if (pixels.Rgba[(y * pixels.Width + x) * 4 + 3] == 0) continue;
+            left = Math.Min(left, x); right = Math.Max(right, x);
+            top = Math.Min(top, y); bottom = Math.Max(bottom, y);
+        }
+        return right < left ? null : new Area(left, top, right - left + 1, bottom - top + 1);
     }
 
     public bool HitsText(Document doc, Layer layer, PointD point)
@@ -602,17 +664,79 @@ public sealed class SkiaRenderer : IRasterBackend
         return ApplyShift(raster, edit) with { Shift = edit };
     }
 
-    public RasterEdit? TransformPixels(Document doc, Layer layer, Area selection, PixelTransform transform)
+    public PixelSelection? BucketRegion(Document doc, Layer layer, BucketArgs options)
+    {
+        if (!double.IsFinite(options.Point.X) || !double.IsFinite(options.Point.Y) ||
+            options.Point.X < 0 || options.Point.Y < 0 || options.Point.X >= doc.Width || options.Point.Y >= doc.Height) return null;
+        int x = (int)options.Point.X, y = (int)options.Point.Y, width = doc.Width, height = doc.Height;
+        if (doc.Selection is not null && !doc.Selected(x, y)) return null;
+        var raster = ResolveRaster(layer);
+        var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
+        if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
+        uint ColorAt(int px, int py)
+        {
+            if (raster is null) return 0;
+            var local = inverse.MapPoint(px + .5f, py + .5f);
+            var lx = (int)Math.Floor(local.X) - raster.X;
+            var ly = (int)Math.Floor(local.Y) - raster.Y;
+            if (lx < 0 || ly < 0 || lx >= raster.Pixels.Width || ly >= raster.Pixels.Height) return 0;
+            int index = (ly * raster.Pixels.Width + lx) * 4;
+            return raster.Pixels.Rgba[index + 3] == 0 ? 0 : BinaryPrimitives.ReadUInt32LittleEndian(raster.Pixels.Rgba.AsSpan(index));
+        }
+        var seed = ColorAt(x, y);
+        var states = new byte[width * height];
+        var pending = new Queue<int>();
+        void Add(int px, int py)
+        {
+            if (px < 0 || py < 0 || px >= width || py >= height) return;
+            int i = py * width + px;
+            if (states[i] != 0) return;
+            states[i] = 2;
+            if (doc.Selection is not null && !doc.Selected(px, py)) return;
+            uint color = ColorAt(px, py);
+            for (int shift = 0; shift < 32; shift += 8)
+                if (Math.Abs((byte)(color >> shift) - (byte)(seed >> shift)) > options.Tolerance) return;
+            states[i] = 1;
+            pending.Enqueue(i);
+        }
+        Add(x, y);
+        while (pending.TryDequeue(out var i))
+        {
+            int px = i % width, py = i / width;
+            Add(px - 1, py); Add(px + 1, py); Add(px, py - 1); Add(px, py + 1);
+        }
+        var (bounds, mask) = PixelSelection.Create(width, height, (px, py) => states[py * width + px] == 1);
+        return mask ?? (bounds is { } area ? new PixelSelection(area, Enumerable.Repeat((byte)1, area.Width * area.Height).ToArray()) : null);
+    }
+
+    public Projective ToParentSpace(Document doc, Layer layer, Projective transform)
+    {
+        var parent = doc.AllLayers().FirstOrDefault(item => item.Children.Any(child => child.Id == layer.Id));
+        if (parent is null) return transform;
+        var matrix = WorldMatrix(doc.Layers, parent.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
+        var projective = FromSkia(matrix);
+        return projective.Then(transform).Then(projective.Inverse());
+    }
+
+    private static SKMatrix ToSkia(Projective m) =>
+        new((float)m.A, (float)m.B, (float)m.C, (float)m.D, (float)m.E, (float)m.F, (float)m.G, (float)m.H, (float)m.I);
+
+    private static Projective FromSkia(SKMatrix m) =>
+        new(m.ScaleX, m.SkewX, m.TransX, m.SkewY, m.ScaleY, m.TransY, m.Persp0, m.Persp1, m.Persp2);
+
+    private static SKMatrix SpatialMatrix(Layer layer) => layer.TransformsEnabled
+        ? ToSkia(layer.SpatialEdits.Where(edit => edit.Enabled).Aggregate(Projective.Identity, (matrix, edit) => matrix.Then(edit.Matrix)))
+        : SKMatrix.Identity;
+
+    public RasterEdit? TransformPixels(Document doc, Layer layer, Area selection, Projective transform)
     {
         if (ResolveRaster(layer) is not { } raster) return null;
         var source = raster.Pixels;
         var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
-        var first = transform.Map(selection.X, selection.Y);
-        var last = transform.Map(selection.X + selection.Width, selection.Y + selection.Height);
         var before = SKRect.Create(selection.X, selection.Y, selection.Width, selection.Height);
-        var after = new SKRect((float)Math.Min(first.X, last.X), (float)Math.Min(first.Y, last.Y),
-            (float)Math.Max(first.X, last.X), (float)Math.Max(first.Y, last.Y));
+        var after = ToSkia(transform).MapRect(before);
+        var reverse = transform.Inverse();
         var localBefore = inverse.MapRect(before);
         localBefore.Intersect(SKRect.Create(raster.X, raster.Y, source.Width, source.Height));
         var localAfter = inverse.MapRect(after);
@@ -635,7 +759,8 @@ public sealed class SkiaRenderer : IRasterBackend
             if (!cut && original >= 0) source.Rgba.AsSpan(original, 4).CopyTo(bytes.AsSpan(index, 4));
             if (cut && original >= 0 && source.Rgba[original + 3] != 0) changed = true;
 
-            var from = transform.Inverse(point.X, point.Y);
+            var from = reverse.Map(point.X, point.Y);
+            if (!double.IsFinite(from.X) || !double.IsFinite(from.Y)) continue;
             if (!doc.Selected((int)Math.Floor(from.X), (int)Math.Floor(from.Y))) continue;
             var previous = inverse.MapPoint((float)from.X, (float)from.Y);
             int sample = SourceIndex((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y));
@@ -806,6 +931,10 @@ public sealed class SkiaRenderer : IRasterBackend
         foreach (var layer in layers)
         {
             bool skip = !layer.TransformsEnabled;
+            var layerOutput = outerEffects;
+            if (parent.TryInvert(out var spatialParentInverse))
+                layerOutput = SKMatrix.Concat(outerEffects,
+                    SKMatrix.Concat(parent, SKMatrix.Concat(SpatialMatrix(layer), spatialParentInverse)));
             bool placedGroup = layer.Kind == LayerKind.Group && layer.Placement != new Placement() && parent.TryInvert(out _);
             var native = SKMatrix.Concat(parent, placedGroup ? Matrix(skip ? new Transform() : layer.Transform) : LayerMatrix(layer, skip));
             var effects = SKMatrix.Identity;
@@ -815,15 +944,15 @@ public sealed class SkiaRenderer : IRasterBackend
 
             if (layer.Kind == LayerKind.Group)
             {
-                var placementOutput = outerEffects;
+                var placementOutput = layerOutput;
                 if (placedGroup && parent.TryInvert(out var parentInverse))
-                    placementOutput = SKMatrix.Concat(outerEffects,
+                    placementOutput = SKMatrix.Concat(layerOutput,
                         SKMatrix.Concat(parent, SKMatrix.Concat(PlacementMatrix(layer.Placement), parentInverse)));
                 var output = SKMatrix.Concat(placementOutput, effects);
                 if (layer.Id == id) return SKMatrix.Concat(includeTargetEffects ? output : placementOutput, native);
                 if (FindMatrix(layer.Children, id, native, output, includeTargetEffects) is { } child) return child;
             }
-            else if (layer.Id == id) return SKMatrix.Concat(outerEffects, SKMatrix.Concat(native, includeTargetEffects ? effects : SKMatrix.Identity));
+            else if (layer.Id == id) return SKMatrix.Concat(layerOutput, SKMatrix.Concat(native, includeTargetEffects ? effects : SKMatrix.Identity));
         }
         return null;
     }

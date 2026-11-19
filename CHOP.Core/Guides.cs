@@ -46,10 +46,3 @@ public static class GuideSnap
 }
 
 public sealed record ScaleArgs(double X, double Y, int AnchorX = 1, int AnchorY = 1);
-
-/// <summary>An axis-aligned scale or reflection around a document-space pixel boundary.</summary>
-public readonly record struct PixelTransform(double X, double Y, double AnchorX, double AnchorY)
-{
-    public PointD Map(double x, double y) => new(AnchorX + (x - AnchorX) * X, AnchorY + (y - AnchorY) * Y);
-    public PointD Inverse(double x, double y) => new(AnchorX + (x - AnchorX) / X, AnchorY + (y - AnchorY) / Y);
-}

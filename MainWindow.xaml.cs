@@ -45,7 +45,10 @@ public partial class MainWindow : Window
         public int Height { get; set; } = 1080;
         public List<string> Recent { get; set; } = [];
         public bool ShowRulers { get; set; } = true;
+        public bool ShowGuides { get; set; } = true;
+        public string GuideColor { get; set; } = "#FF48CDE9";
         public RulerUnit RulerUnit { get; set; }
+        public int ToolCatalogVersion { get; set; }
         public string[]? Tools { get; set; }
     }
 
@@ -72,12 +75,23 @@ public partial class MainWindow : Window
     private int renderVersion;
     private Session? active;
     private string tool = "Move";
-    private string foreground = "#FF50A7FF";
-    private string background = "#FFFFFFFF";
+    private string artworkForeground = "#FF50A7FF", artworkBackground = "#FFFFFFFF";
+    private string maskForeground = "#FF000000", maskBackground = "#FFFFFFFF";
+    private bool UsesMaskPalette => tool == "Masker" || active?.MaskTarget is { } id && ActiveLayer()?.Id == id;
+    private string foreground
+    {
+        get => UsesMaskPalette ? maskForeground : artworkForeground;
+        set { if (UsesMaskPalette) maskForeground = value; else artworkForeground = value; }
+    }
+    private string background
+    {
+        get => UsesMaskPalette ? maskBackground : artworkBackground;
+        set { if (UsesMaskPalette) maskBackground = value; else artworkBackground = value; }
+    }
     private double brushSize = 24, hardness = .8, brushOpacity = 1;
     private LayerKind shapeKind = LayerKind.Rectangle;
     private Point? lastCursor;
-    private static readonly string[] ToolNames = ["Move", "Brush", "Eraser", "Selection", "Chop", "Text", "Shape", "Eyedropper", "Transform"];
+    private static readonly string[] ToolNames = ["Selection", "Lasso", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Bucket", "Chop"];
 
     public MainWindow()
     {
@@ -95,6 +109,9 @@ public partial class MainWindow : Window
             }
         };
         preferences = LoadPreferences();
+        if (preferences is { ToolCatalogVersion: 0, Tools: { } configured })
+            preferences.Tools = configured.Concat(new[] { "Masker", "Bucket", "Lasso" }).Distinct().ToArray();
+        preferences.ToolCatalogVersion = 1;
         BuildMenus();
         BuildPanels();
         ResetLayout();
@@ -226,6 +243,9 @@ public partial class MainWindow : Window
         Item(edit, "Configure tools…", ConfigureTools);
         var transformItem = new MenuItem { Header = "Transform" };
         edit.Items.Add(transformItem);
+        Item(transformItem, "Free Transform", () => BeginTransform(SpatialKind.FreeTransform), "Ctrl+T");
+        Item(transformItem, "Rotate", () => BeginTransform(SpatialKind.Rotate));
+        Item(transformItem, "Skew", () => BeginTransform(SpatialKind.Skew));
         Item(transformItem, "Scale…", ScaleLayer);
         Item(transformItem, "Flip Horizontal", () => RunLayer("layer.flip", new FlipArgs(true)));
         Item(transformItem, "Flip Vertical", () => RunLayer("layer.flip", new FlipArgs(false)));
@@ -256,8 +276,10 @@ public partial class MainWindow : Window
             Item(adjustments, EffectName(kind), () => AddEffect(kind));
 
         var layer = Menu("Layer");
-        Item(layer, "New raster layer", () => CreateLayer(LayerKind.Raster));
-        Item(layer, "New fill layer…", () => CreateLayer(LayerKind.Fill));
+        var newLayer = new MenuItem { Header = "New" };
+        layer.Items.Add(newLayer);
+        Item(newLayer, "Raster Layer", () => CreateLayer(LayerKind.Raster));
+        Item(newLayer, "Fill Layer…", () => CreateLayer(LayerKind.Fill));
         Item(layer, "Duplicate selected layer", Duplicate);
         Item(layer, "Rename selected layer…", Rename);
         Item(layer, "Delete selected layer", DeleteLayer);
@@ -282,8 +304,7 @@ public partial class MainWindow : Window
         foreach (var kind in new[] { EffectKind.GaussianBlur, EffectKind.MotionBlur })
             Item(blur, EffectName(kind), () => AddEffect(kind));
         var view = Menu("View");
-        rulersMenu = Item(view, "Hide Rulers", ToggleRulers);
-        UpdateRulers();
+        BuildGuideMenus(view);
         Item(view, "Zoom in", () => ZoomBy(1.25), "Ctrl++");
         Item(view, "Zoom out", () => ZoomBy(.8), "Ctrl+-");
         Item(view, "Fit canvas", Fit, "Ctrl+0");
@@ -427,6 +448,7 @@ public partial class MainWindow : Window
     private void Activate(Session? session)
     {
         if (ReferenceEquals(active, session)) return;
+        CancelTransform();
         CancelGesture();
         active = session;
         lastCursor = null;
@@ -562,6 +584,7 @@ public partial class MainWindow : Window
     private bool Run<T>(string action, T args, string? target = null, string? selectId = null)
     {
         if (active is not { } session) return false;
+        if (interactiveTransform is not null) CancelTransform();
         var ok = Guard(() =>
         {
             session.Engine.Execute(Command.Of(action, args, target));
@@ -609,6 +632,8 @@ public partial class MainWindow : Window
             RefreshLog();
         }
         finally { syncing = false; }
+        RefreshTools();
+        UpdateGuideMenu();
         UpdateCanvas();
         RefreshNavigation();
         Say();
@@ -628,9 +653,10 @@ public partial class MainWindow : Window
         canvas.ImageHeight = doc.Height;
         if (preview is null) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
-        canvas.Guides = doc.Guides;
-        canvas.Selection = doc.Selection;
-        canvas.SelectionMask = doc.SelectionMask;
+        canvas.Guides = preferences.ShowGuides ? doc.Guides : [];
+        var visibleSelection = interactiveTransform is not null ? preview ?? doc : doc;
+        canvas.Selection = visibleSelection.Selection;
+        canvas.SelectionMask = visibleSelection.SelectionMask;
         if (doc.Selection is { } selected && selectionDragDelta is { } delta)
             canvas.Selection = selected with { X = selected.X + (int)delta.X, Y = selected.Y + (int)delta.Y };
         canvas.Zoom = active.Zoom;

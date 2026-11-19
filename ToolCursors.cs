@@ -7,6 +7,7 @@ internal static class ToolCursors
 {
     public static Cursor Eraser { get; } = Load("eraser");
     public static Cursor Eyedropper { get; } = Load("eyedropper");
+    public static Cursor Rotate { get; } = Load("rotate");
     public static Cursor SelectionAdd { get; } = Load("marquee-add");
     public static Cursor SelectionSubtract { get; } = Load("marquee-subtract");
 
