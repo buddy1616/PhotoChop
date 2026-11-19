@@ -1,0 +1,178 @@
+[
+  {
+    "name": "document.create",
+    "target": null,
+    "args": {
+      "id": "phase-one",
+      "width": 720,
+      "height": 480
+    }
+  },
+  {
+    "name": "layer.create",
+    "target": null,
+    "args": {
+      "id": "artwork",
+      "name": "Vector artwork",
+      "kind": "Group"
+    }
+  },
+  {
+    "name": "layer.create",
+    "target": null,
+    "args": {
+      "id": "tile",
+      "name": "Indigo tile",
+      "kind": "Rectangle",
+      "parent": "artwork",
+      "width": 466,
+      "height": 282,
+      "color": "#EE172044",
+      "transform": {
+        "x": 126,
+        "y": 91,
+        "scaleX": 1,
+        "scaleY": 1,
+        "rotation": 0
+      }
+    }
+  },
+  {
+    "name": "layer.create",
+    "target": null,
+    "args": {
+      "id": "disc",
+      "name": "Mint disc",
+      "kind": "Ellipse",
+      "parent": "artwork",
+      "width": 182,
+      "height": 182,
+      "color": "#DF33DDB2",
+      "transform": {
+        "x": 102,
+        "y": 134,
+        "scaleX": 1,
+        "scaleY": 1,
+        "rotation": 0
+      }
+    }
+  },
+  {
+    "name": "effect.add",
+    "target": "disc",
+    "args": {
+      "id": "mint-hue",
+      "kind": "HueSaturation",
+      "enabled": true,
+      "a": -17,
+      "b": 0.12
+    }
+  },
+  {
+    "name": "layer.create",
+    "target": null,
+    "args": {
+      "id": "ink",
+      "name": "Warm painted stroke",
+      "kind": "Raster",
+      "parent": "artwork"
+    }
+  },
+  {
+    "name": "layer.paintStroke",
+    "target": "ink",
+    "args": {
+      "points": [
+        {
+          "x": 335,
+          "y": 260
+        },
+        {
+          "x": 369,
+          "y": 210
+        },
+        {
+          "x": 388,
+          "y": 233
+        },
+        {
+          "x": 412,
+          "y": 190
+        },
+        {
+          "x": 477,
+          "y": 264
+        },
+        {
+          "x": 531,
+          "y": 203
+        }
+      ],
+      "size": 18,
+      "hardness": 0.85,
+      "opacity": 1,
+      "color": "#FFFFAB61",
+      "erase": false
+    }
+  },
+  {
+    "name": "layer.create",
+    "target": null,
+    "args": {
+      "id": "caption",
+      "name": "Editable caption",
+      "kind": "Text",
+      "parent": "artwork",
+      "text": "CHOP",
+      "font": "Liberation Sans",
+      "size": 54,
+      "color": "#FFFFFFFF",
+      "transform": {
+        "x": 126,
+        "y": 191,
+        "scaleX": 1,
+        "scaleY": 1,
+        "rotation": 0
+      }
+    }
+  },
+  {
+    "name": "layer.create",
+    "target": null,
+    "args": {
+      "id": "subtitle",
+      "name": "Editable subtitle",
+      "kind": "Text",
+      "parent": "artwork",
+      "text": "PHASE 1",
+      "font": "Liberation Sans",
+      "size": 16,
+      "color": "#FFCBDFEE",
+      "transform": {
+        "x": 132,
+        "y": 263,
+        "scaleX": 1,
+        "scaleY": 1,
+        "rotation": 0
+      }
+    }
+  },
+  {
+    "name": "document.save",
+    "target": null,
+    "args": {
+      "path": {
+        "$param": "project"
+      }
+    }
+  },
+  {
+    "name": "document.export",
+    "target": null,
+    "args": {
+      "path": {
+        "$param": "png"
+      }
+    }
+  }
+]

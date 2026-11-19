@@ -1,0 +1,50 @@
+[
+  {
+    "name": "document.open",
+    "target": null,
+    "args": {
+      "path": {
+        "$param": "input"
+      }
+    }
+  },
+  {
+    "name": "layer.text",
+    "target": "caption",
+    "args": {
+      "text": "CHOP / II",
+      "font": "Liberation Sans",
+      "size": 38,
+      "color": "#FFFFFFFF"
+    }
+  },
+  {
+    "name": "effect.update",
+    "target": "disc",
+    "args": {
+      "id": "mint-hue",
+      "kind": "HueSaturation",
+      "enabled": true,
+      "a": 60,
+      "b": 0.2
+    }
+  },
+  {
+    "name": "document.save",
+    "target": null,
+    "args": {
+      "path": {
+        "$param": "project"
+      }
+    }
+  },
+  {
+    "name": "document.export",
+    "target": null,
+    "args": {
+      "path": {
+        "$param": "png"
+      }
+    }
+  }
+]

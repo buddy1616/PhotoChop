@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="CHOP.CLI/CHOP.CLI.csproj" />
+  <Project Path="CHOP.Core/CHOP.Core.csproj" />
+  <Project Path="CHOP.Rendering/CHOP.Rendering.csproj" />
+  <Project Path="CHOP.Tests/CHOP.Tests.csproj" />
+  <Project Path="PhotoChop.csproj" />
+</Solution>

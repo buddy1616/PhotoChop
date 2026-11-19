@@ -1,7 +1,18 @@
 <Window x:Class="PhotoChop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="PhotoChop"
-        Width="960"
-        Height="640"
-        Background="Black" />
+        xmlns:dock="https://github.com/Dirkster99/AvalonDock"
+        Title="CHOP" Width="1440" Height="900" MinWidth="820" MinHeight="520"
+        Background="#191B20" Foreground="#E5E8EE"
+        PreviewKeyDown="OnKey" Loaded="OnLoaded" Closing="OnClosing">
+    <DockPanel>
+        <Menu x:Name="Menus" DockPanel.Dock="Top" />
+        <Border DockPanel.Dock="Top" Background="#242730" Padding="8,5">
+            <WrapPanel x:Name="ToolOptions" VerticalAlignment="Center" />
+        </Border>
+        <StatusBar DockPanel.Dock="Bottom" Background="#242730">
+            <TextBlock x:Name="Status" Foreground="#D4D9E4" Margin="6,2" />
+        </StatusBar>
+        <dock:DockingManager x:Name="Dock" />
+    </DockPanel>
+</Window>
