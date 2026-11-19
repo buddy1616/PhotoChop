@@ -129,8 +129,18 @@ public partial class MainWindow
                 for (int i = 0; i < 4; i++) if (Distance(Middle(state.Corners[i], state.Corners[(i + 1) % 4])) <= 9) return 4 + i;
             }
         }
-        if (state.Kind != SpatialKind.Skew && (state.Corners.Any(c => Distance(c) <= 25) ||
-            state.Kind == SpatialKind.Rotate && InsideBox(state.Corners, p))) return 8;
+        if (state.Kind != SpatialKind.Skew && !InsideBox(state.Corners, p))
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                var corner = state.Corners[i];
+                double distance = Distance(corner);
+                if (distance is < 13 or > 38) continue;
+                var fromCorner = p - corner;
+                if (Vector.Multiply(fromCorner, state.Corners[(i + 1) % 4] - corner) < 0 &&
+                    Vector.Multiply(fromCorner, state.Corners[(i + 3) % 4] - corner) < 0) return 8;
+            }
+        }
         return -1;
     }
 

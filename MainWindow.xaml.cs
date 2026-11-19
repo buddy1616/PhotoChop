@@ -49,6 +49,7 @@ public partial class MainWindow : Window
         public string GuideColor { get; set; } = "#FF48CDE9";
         public RulerUnit RulerUnit { get; set; }
         public int ToolCatalogVersion { get; set; }
+        public string[]? ToolOrder { get; set; }
         public string[]? Tools { get; set; }
     }
 
@@ -58,6 +59,7 @@ public partial class MainWindow : Window
     private EditorCanvas canvas => active?.View ?? emptyCanvas;
     private LayoutDocumentPane? documentPane;
     private readonly StackPanel toolColors = new() { Margin = new Thickness(6) };
+    private readonly StackPanel secondaryTools = new() { Margin = new Thickness(6) };
     private readonly StackPanel toolsPanel = new() { Margin = new Thickness(6) };
     private readonly DockPanel layersPanel = new();
     private readonly ListBox layers = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended, AllowDrop = true };
@@ -135,7 +137,8 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        var path = Path.Combine(settingsFolder, "layout-v3.xml");
+        var path = Path.Combine(settingsFolder, "layout-v4.xml");
+        if (!File.Exists(path)) path = Path.Combine(settingsFolder, "layout-v3.xml");
         if (!File.Exists(path)) return;
         try
         {
@@ -150,6 +153,8 @@ public partial class MainWindow : Window
             workspace = Dock.Layout.Descendents().OfType<LayoutDocument>().FirstOrDefault(item => item.ContentId == "workspace");
             documentPane = workspace?.Parent as LayoutDocumentPane ?? Dock.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault();
             if (documentPane is null) ResetLayout();
+            else if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Tools"))
+                Dock.Layout.RootPanel.Children.Insert(0, CreateToolDocks());
         }
         catch (Exception error) { ResetLayout(); Say($"Workspace reset. {error.Message}"); }
     }
@@ -165,7 +170,7 @@ public partial class MainWindow : Window
         try
         {
             Directory.CreateDirectory(settingsFolder);
-            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v3.xml"));
+            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v4.xml"));
             File.WriteAllText(Path.Combine(settingsFolder, "settings.json"), JsonSerializer.Serialize(preferences, Format.Json));
         }
         catch (Exception error) { MessageBox.Show(this, error.Message, "CHOP settings"); }
@@ -191,9 +196,21 @@ public partial class MainWindow : Window
         upper.Children.Add(NewPanel("Navigation"));
         var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
             Children = { upper, right } };
-        Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { center, sidebar } } };
+        Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { CreateToolDocks(), center, sidebar } } };
         right.SelectedContentIndex = 0;
         if (active?.Tab is { } selected) selected.IsActive = true;
+    }
+
+    private LayoutAnchorablePaneGroup CreateToolDocks()
+    {
+        var toolDock = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(134) };
+        var topTools = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
+        topTools.Children.Add(NewPanel("Tools"));
+        var bottomTools = new LayoutAnchorablePane { DockHeight = new GridLength(2, GridUnitType.Star) };
+        bottomTools.Children.Add(NewPanel("More Tools"));
+        toolDock.Children.Add(topTools);
+        toolDock.Children.Add(bottomTools);
+        return toolDock;
     }
 
     private LayoutAnchorable NewPanel(string title) => new()
@@ -203,11 +220,6 @@ public partial class MainWindow : Window
 
     private void TogglePanel(string title)
     {
-        if (title == "Tools")
-        {
-            ToolPantry.Visibility = ToolPantry.IsVisible ? Visibility.Collapsed : Visibility.Visible;
-            return;
-        }
         var panel = Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(item => item.ContentId == title);
         if (panel is null)
         {
@@ -310,7 +322,7 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", "Navigation", "Layers", "History", "Command Log" })
+        foreach (string title in new[] { "Tools", "More Tools", "Navigation", "Layers", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -348,7 +360,8 @@ public partial class MainWindow : Window
 
     private void NewDocument()
     {
-        var settings = NewDocumentDialog.Show(this, preferences.Width, preferences.Height, background);
+        var (width, height) = ClipboardDimensions() ?? (preferences.Width, preferences.Height);
+        var settings = NewDocumentDialog.Show(this, width, height, background);
         if (settings is null) return;
         Guard(() =>
         {
@@ -357,6 +370,32 @@ public partial class MainWindow : Window
             session.ActiveId = settings.Id + "-layer";
             AddSession(session);
         });
+    }
+
+    private static (int Width, int Height)? ClipboardDimensions()
+    {
+        try
+        {
+            var bitmap = Clipboard.GetImage();
+            if (bitmap is null && Clipboard.GetDataObject() is { } data && data.GetDataPresent("PNG"))
+            {
+                var png = data.GetData("PNG");
+                using Stream? stream = png switch
+                {
+                    byte[] bytes => new MemoryStream(bytes, writable: false),
+                    Stream input => input,
+                    _ => null
+                };
+                if (stream is { CanSeek: true }) stream.Position = 0;
+                if (stream is not null)
+                    bitmap = System.Windows.Media.Imaging.BitmapDecoder.Create(stream,
+                        System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat,
+                        System.Windows.Media.Imaging.BitmapCacheOption.OnLoad).Frames.FirstOrDefault();
+            }
+            return bitmap is null ? null : (bitmap.PixelWidth, bitmap.PixelHeight);
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or IOException or FormatException or NotSupportedException)
+        { return null; }
     }
 
     private void SetDefaults()
@@ -683,8 +722,8 @@ public partial class MainWindow : Window
                     if (shift is { } offset && snapshot.Selection is { } area && targetId is not null &&
                         snapshot.AllLayers().FirstOrDefault(layer => layer.Id == targetId) is { Pixels: not null } layer)
                     {
-                        var result = renderer.EditSelection(snapshot, layer, area, offset);
-                        target = target with { Layers = PreviewPixels(target.Layers, targetId, result) };
+                        var moved = renderer.MoveSelection(snapshot, layer, area, (int)offset.X, (int)offset.Y);
+                        if (moved is not null) target = target with { Layers = PreviewPixels(target.Layers, targetId, moved) };
                     }
                     var pixels = maskLayer is null ? renderer.Composite(target) : renderer.MaskView(target, maskLayer);
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels));
@@ -713,8 +752,8 @@ public partial class MainWindow : Window
         finally { rendering = false; }
     }
 
-    private static Layer[] PreviewPixels(Layer[] items, string id, RasterEdit edit) => items.Select(layer =>
-        layer.Id == id ? layer with { Pixels = edit.Pixels, RasterX = edit.X, RasterY = edit.Y, PixelShifts = [] }
+    private static Layer[] PreviewPixels(Layer[] items, string id, Layer edit) => items.Select(layer =>
+        layer.Id == id ? edit
         : layer.Children.Length == 0 ? layer : layer with { Children = PreviewPixels(layer.Children, id, edit) }).ToArray();
 
     private void Say(string? message = null)
