@@ -25,6 +25,84 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void ChopLayerKeepsItsSnapshotAndPropertiesAcrossRebakeAndReopen()
+    {
+        var engine = NewEngine(12, 12);
+        var source = Path.Combine(folder, "missing.chop");
+        byte[] Snapshot(params byte[] color) => renderer.EncodePng(new Pixels(1, 1, color));
+        engine.Execute(Command.Of("layer.createChop", new CreateChopArgs("linked", "Linked",
+            new(source, Snapshot(255, 0, 0, 255)))));
+        engine.Execute(Command.Of("layer.transform", new Transform(3, 4), "linked"));
+        engine.Execute(Command.Of("document.selection", new Area(0, 0, 1, 1)));
+        engine.Execute(Command.Of("layer.scale", new ScaleArgs(.5, .5), "linked"));
+        Assert.NotNull(Assert.Single(engine.Current!.Layers).Transform.Warp);
+        engine.Execute(Command.Of("effect.add", new Effect("gray", EffectKind.Grayscale), "linked"));
+        engine.Execute(Command.Of("mask.add", 0, "linked"));
+        var before = Assert.Single(engine.Current!.Layers);
+        Assert.Throws<InvalidDataException>(() => engine.Execute(Command.Of("layer.paintStroke",
+            new StrokeArgs([new(3.5, 4.5)], 1, 1, 1, "#FFFFFFFF", false), "linked")));
+        var replacement = Path.Combine(folder, "replacement.chop");
+        engine.Execute(Command.Of("layer.rebakeChop", new ChopSnapshotArgs(replacement, Snapshot(0, 255, 0, 255)), "linked"));
+        var after = Assert.Single(engine.Current!.Layers);
+        Assert.Equal(before.Transform, after.Transform);
+        Assert.Same(before.Mask, after.Mask);
+        Assert.Same(before.Effects, after.Effects);
+        Assert.Equal(new byte[] { 0, 255, 0, 255 }, after.Pixels!.Rgba);
+        string path = Path.Combine(folder, "parent.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        var reopened = ProjectFile.Open(path);
+        Assert.Equal(replacement, Assert.Single(reopened.Layers).ChopSource);
+        Assert.False(File.Exists(replacement));
+        Assert.Equal(Composite(engine), renderer.Composite(reopened).Rgba);
+    }
+
+    [Fact]
+    public void PathHandlesRenderThroughStrokeAndSurviveProjectRoundTrip()
+    {
+        var engine = NewEngine();
+        var first = new PathNode(new(4, 12), Outgoing: new(4, 1));
+        var second = new PathNode(new(20, 12), Incoming: new(20, 1));
+        engine.Execute(Command.Of("layer.createPath", new CreatePathArgs("curve", "Curve",
+            [new([first, second])])));
+        Assert.All(Composite(engine), value => Assert.Equal(0, value));
+        engine.Execute(Command.Of("effect.add", new Effect("stroke", EffectKind.Stroke, A: 2, Ink: "#FFFF0000"), "curve"));
+        var curved = Composite(engine);
+        Assert.Contains(curved, value => value > 0);
+        engine.Execute(Command.Of("layer.path", new[] { new PathContour([new(first.Point), new(second.Point)]) }, "curve"));
+        Assert.False(curved.SequenceEqual(Composite(engine)));
+        engine.Execute(Command.Of("history.undo", 0));
+        string path = Path.Combine(folder, "curve.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        var reopened = ProjectFile.Open(path);
+        var layer = Assert.Single(reopened.Layers);
+        Assert.Null(layer.Pixels);
+        Assert.Equal(new[] { first, second }, Assert.Single(layer.Contours).Nodes);
+        Assert.Equal(curved, renderer.Composite(reopened).Rgba);
+        engine.Execute(Command.Of("layer.bake", 0, "curve"));
+        Assert.Equal(LayerKind.Raster, Assert.Single(engine.Current!.Layers).Kind);
+        Assert.Equal(curved, Composite(engine));
+    }
+
+    [Fact]
+    public void ConvertingSelectionPreservesHolesAndSeparatesDiagonalIslands()
+    {
+        var engine = NewEngine();
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(2, 2, 5, 5), SelectionMode.Replace)));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(3, 3, 3, 3), SelectionMode.Subtract)));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(7, 7, 2, 2), SelectionMode.Add)));
+        engine.Execute(Command.Of("selection.toPaths", new SelectionPathsArgs("region")));
+        var paths = engine.Current!.Layers.Where(l => l.Kind == LayerKind.Path).OrderBy(l => l.Id).ToArray();
+        Assert.Equal(2, paths.Length);
+        Assert.Equal(2, paths[0].Contours.Length);
+        Assert.Single(paths[1].Contours);
+        Assert.All(paths.SelectMany(p => p.Contours), contour =>
+        {
+            Assert.True(contour.Closed);
+            Assert.Equal(4, contour.Nodes.Length);
+        });
+    }
+
+    [Fact]
     public void FloatingMovesNeverPickUpOrErasePixelsAtIntermediateLandings()
     {
         var engine = NewEngine(7, 2);

@@ -9,12 +9,13 @@ public partial class MainWindow
     private void ScaleLayer()
     {
         if (ActiveLayer() is not { } layer || active?.Engine.Current is not { } doc) return;
-        if (doc.Selection is not null && layer.Kind != LayerKind.Raster)
+        bool scaleSelection = doc.Selection is not null && layer.Kind is not (LayerKind.Chop or LayerKind.Path);
+        if (scaleSelection && layer.Kind != LayerKind.Raster)
         {
             Say("Select a raster layer to scale selected pixels.");
             return;
         }
-        var dialog = new Window { Title = doc.Selection is null ? "Scale Layer" : "Scale Selected Pixels",
+        var dialog = new Window { Title = scaleSelection ? "Scale Selected Pixels" : "Scale Layer",
             Owner = EditorOwner, Width = 344, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize };
         var panel = new StackPanel { Margin = new Thickness(14) };

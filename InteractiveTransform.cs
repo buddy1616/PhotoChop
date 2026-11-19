@@ -37,7 +37,8 @@ public partial class MainWindow
     private void BeginTransform(SpatialKind kind)
     {
         if (active?.Engine.Current is not { } doc || ActiveLayer() is not { } layer) return;
-        if (layer.Kind == LayerKind.Effect || !Editable(doc, layer.Id) || (doc.Selection is not null && layer.Kind != LayerKind.Raster))
+        var selection = layer.Kind is LayerKind.Chop or LayerKind.Path ? null : doc.Selection;
+        if (layer.Kind == LayerKind.Effect || !Editable(doc, layer.Id) || (selection is not null && layer.Kind != LayerKind.Raster))
         {
             Say("Select an unlocked raster layer to transform selected pixels.");
             return;
@@ -45,7 +46,8 @@ public partial class MainWindow
         CancelTransform();
         CancelGesture();
         Area source = new(0, 0, doc.Width, doc.Height);
-        if (!Guard(() => source = doc.Selection ?? renderer.VisibleLayerBounds(doc, layer.Id) ?? source)) return;
+        if (!Guard(() => source = selection ?? renderer.VisibleLayerBounds(doc, layer.Id) ??
+            (layer.Kind == LayerKind.Path ? PathControlBounds(doc, layer) : null) ?? source)) return;
         interactiveTransform = new(active, layer.Id, kind, source);
         ShowTransformBox();
         RefreshTools();

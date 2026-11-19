@@ -152,6 +152,11 @@ public sealed class CommandEngine(IRasterBackend backend)
 
     private static string HistoryLabel(Command command) => command.Name switch
     {
+        "layer.createChop" => "Create Chop Layer",
+        "layer.rebakeChop" => "Re-bake Chop Layer",
+        "layer.createPath" => "Create Path",
+        "layer.path" => "Edit Path",
+        "selection.toPaths" => "Convert Selection to Paths",
         "layer.create" => $"Create {command.Read<LayerArgs>().Kind.ToString().ToLowerInvariant()} layer",
         "layer.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase pixels" : "Brush stroke",
         "mask.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase mask" : "Paint mask",
@@ -174,6 +179,32 @@ public sealed class CommandEngine(IRasterBackend backend)
         "document.resizeCanvas" => "Canvas Size",
         _ => command.Name
     };
+
+    private Layer WithChopSnapshot(Layer layer, ChopSnapshotArgs snapshot)
+    {
+        if (layer.Kind != LayerKind.Chop || string.IsNullOrWhiteSpace(snapshot.SourcePath) ||
+            !string.Equals(System.IO.Path.GetExtension(snapshot.SourcePath), ".chop", StringComparison.OrdinalIgnoreCase) ||
+            snapshot.Png is null) throw new InvalidDataException("A Chop Layer requires a source .chop file and a raster snapshot.");
+        var pixels = backend.DecodePng(snapshot.Png);
+        return layer with { ChopSource = snapshot.SourcePath, Pixels = pixels, Width = pixels.Width, Height = pixels.Height };
+    }
+
+    internal static void CheckContours(PathContour[] contours)
+    {
+        if (contours is null || contours.Length > 2000) throw new InvalidDataException("Invalid path contours.");
+        long nodes = 0;
+        bool Valid(PointD point) => double.IsFinite(point.X) && double.IsFinite(point.Y) &&
+            Math.Abs(point.X) <= 1000000 && Math.Abs(point.Y) <= 1000000;
+        foreach (var contour in contours)
+        {
+            if (contour?.Nodes is null || contour.Nodes.Length < (contour.Closed ? 3 : 1))
+                throw new InvalidDataException("Invalid path contour.");
+            nodes += contour.Nodes.Length;
+            if (nodes > 100000 || contour.Nodes.Any(node => node is null || !Valid(node.Point) ||
+                node.Incoming is { } incoming && !Valid(incoming) || node.Outgoing is { } outgoing && !Valid(outgoing)))
+                throw new InvalidDataException("Invalid path anchor or handle.");
+        }
+    }
 
     private Document OrientImage(Document doc, OrientationAction action)
     {
@@ -331,13 +362,32 @@ public sealed class CommandEngine(IRasterBackend backend)
             if (parent is not null) EnsureEditable(layers, parent);
         }
 
+        (string? Parent, string? Before) PathDestination(string? above, string? preferredParent)
+        {
+            if (above is null) { CheckParent(preferredParent); return (preferredParent, null); }
+            if (!doc.AllLayers().Any(item => item.Id == above)) throw new InvalidDataException("The source layer was not found.");
+            string? parent = ParentOf(layers, above);
+            CheckParent(parent);
+            var siblings = parent is null ? layers : doc.AllLayers().Single(item => item.Id == parent).Children;
+            int next = Array.FindIndex(siblings, item => item.Id == above) + 1;
+            return (parent, next < siblings.Length ? siblings[next].Id : null);
+        }
+
+        Layer PathLayerForCanvas(Layer path, string? parent, string? before)
+        {
+            if (parent is null) return path;
+            var staged = With(Insert(layers, parent, before, path));
+            return path with { Transform = new Transform(Warp: backend.ParentCoordinates(staged, path).Inverse()) };
+        }
+
         Document ApplySpatial(Projective transform)
         {
             var layer = Wanted();
             EnsureEditable(layers, layer.Id);
             if (layer.Kind == LayerKind.Effect) throw new InvalidDataException("Effect layers do not have transforms.");
             if (transform == Projective.Identity) return doc;
-            if (doc.Selection is { } area) return TransformSelected(doc, layer, area, transform);
+            if (layer.Kind is not (LayerKind.Chop or LayerKind.Path) && doc.Selection is { } area)
+                return TransformSelected(doc, layer, area, transform);
             var local = backend.ToParentSpace(doc, layer, transform);
             var combined = (layer.Transform.Warp ?? Projective.Identity).Then(local);
             combined.Inverse();
@@ -415,12 +465,49 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var guideId = command.Read<string>();
                 return doc.Guides.Any(item => item.Id == guideId)
                     ? doc with { Guides = doc.Guides.Where(item => item.Id != guideId).ToArray() } : doc;
+            case "layer.createChop":
+                var linked = command.Read<CreateChopArgs>();
+                NewId(linked.Id);
+                CheckParent(linked.Parent);
+                return With(Insert(layers, linked.Parent, null,
+                    WithChopSnapshot(new Layer(linked.Id, Name(linked.Name), LayerKind.Chop), linked.Snapshot)));
+            case "layer.rebakeChop":
+                var snapshot = command.Read<ChopSnapshotArgs>();
+                return Edit(layer => WithChopSnapshot(layer, snapshot));
+            case "layer.createPath":
+                var path = command.Read<CreatePathArgs>();
+                NewId(path.Id);
+                CheckContours(path.Contours);
+                var (pathParent, pathBefore) = PathDestination(path.Above, path.Parent);
+                var vector = PathLayerForCanvas(new Layer(path.Id, Name(path.Name), LayerKind.Path)
+                    { Contours = path.Contours }, pathParent, pathBefore);
+                return With(Insert(layers, pathParent, pathBefore, vector));
+            case "layer.path":
+                var contours = command.Read<PathContour[]>();
+                CheckContours(contours);
+                return Edit(layer => layer.Kind == LayerKind.Path ? layer with { Contours = contours }
+                    : throw new InvalidDataException("Select a Path layer."));
+            case "selection.toPaths":
+                var conversion = command.Read<SelectionPathsArgs>();
+                var (conversionGroup, beforePath) = PathDestination(conversion.Above, conversion.Parent);
+                var regions = SelectionContours.Trace(doc);
+                var result = layers;
+                for (int index = 0; index < regions.Length; index++)
+                {
+                    var convertedId = $"{conversion.IdPrefix}-{index + 1}";
+                    NewId(convertedId);
+                    CheckContours(regions[index]);
+                    var extracted = PathLayerForCanvas(new Layer(convertedId, $"Path {index + 1}", LayerKind.Path)
+                        { Contours = regions[index] }, conversionGroup, beforePath);
+                    result = Insert(result, conversionGroup, beforePath, extracted);
+                }
+                return ReferenceEquals(result, layers) ? doc : With(result);
             case "layer.create":
                 var create = command.Read<LayerArgs>();
                 NewId(create.Id);
                 CheckParent(create.Parent);
                 CheckTransform(create.Transform ?? new());
-                if (!Enum.IsDefined(create.Kind)) throw new InvalidDataException("Unknown layer type.");
+                if (!Enum.IsDefined(create.Kind) || create.Kind == LayerKind.Chop) throw new InvalidDataException("Unknown layer type.");
                 Format.Color(create.Color);
                 Format.Dimensions(create.Width, create.Height);
                 Range(create.Size, 1, 512);
@@ -525,12 +612,14 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Range(scale.Y, .001, 1000);
                 if (scale.AnchorX is < 0 or > 2 || scale.AnchorY is < 0 or > 2)
                     throw new InvalidDataException("Choose a transform anchor.");
-                var scaleArea = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
+                var scaleArea = (Wanted().Kind is LayerKind.Chop or LayerKind.Path ? null : doc.Selection)
+                    ?? new Area(0, 0, doc.Width, doc.Height);
                 return ApplySpatial(Projective.Anchored(scale.X, scale.Y,
                     scaleArea.X + scaleArea.Width * scale.AnchorX / 2d, scaleArea.Y + scaleArea.Height * scale.AnchorY / 2d));
             case "layer.flip":
                 bool horizontal = command.Read<FlipArgs>().Horizontal;
-                var flipArea = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
+                var flipArea = (Wanted().Kind is LayerKind.Chop or LayerKind.Path ? null : doc.Selection)
+                    ?? new Area(0, 0, doc.Width, doc.Height);
                 return ApplySpatial(Projective.Anchored(horizontal ? -1 : 1, horizontal ? 1 : -1,
                         flipArea.X + flipArea.Width / 2d, flipArea.Y + flipArea.Height / 2d));
             case "layer.warp":

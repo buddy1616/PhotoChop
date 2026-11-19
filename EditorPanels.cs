@@ -89,6 +89,7 @@ public partial class MainWindow
         {
             if (syncing || active is null) return;
             CancelTransform();
+            CancelPathEditing();
             active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
             if (active.Engine.Current?.Floating is { } floating && floating.LayerId != active.ActiveId)
             {
@@ -98,6 +99,7 @@ public partial class MainWindow
             if (active.MaskTarget != active.ActiveId) { active.MaskTarget = null; active.MaskOnly = null; UpdateCanvas(); }
             RefreshProperties();
             RefreshTools();
+            RefreshPathOverlay();
             Say();
         };
         layers.MouseDoubleClick += (_, e) =>
@@ -434,6 +436,7 @@ public partial class MainWindow
             var values = Form("Layer opacity", ("Opacity (0–100)", (layer.Opacity * 100).ToString()));
             if (values is not null) Guard(() => RunLayer("layer.opacity", Number(values[0]) / 100));
         }));
+        AddChopProperties(layer, properties);
         if (effectEditor is not null) PopulateEffects(layer);
     }
 

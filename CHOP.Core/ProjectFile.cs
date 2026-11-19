@@ -64,7 +64,7 @@ public static class ProjectFile
                             return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear, patchPath);
                         }).ToArray();
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(8, document, resources, masks, shifts), Format.Json);
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(9, document, resources, masks, shifts), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -91,7 +91,7 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
@@ -131,6 +131,12 @@ public static class ProjectFile
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
                 throw new InvalidDataException("Invalid layer metadata.");
             CommandEngine.CheckTransform(layer.Transform);
+            CommandEngine.CheckContours(layer.Contours);
+            if (layer.Kind != LayerKind.Path && layer.Contours.Length != 0)
+                throw new InvalidDataException("Only Path layers can contain vector paths.");
+            if (layer.Kind == LayerKind.Chop && (string.IsNullOrWhiteSpace(layer.ChopSource) ||
+                !string.Equals(Path.GetExtension(layer.ChopSource), ".chop", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException("Invalid Chop Layer source.");
             layer.ImagePlacement?.Inverse();
             if (layer.RasterGrid is { } grid)
             {
@@ -160,10 +166,11 @@ public static class ProjectFile
             Pixels? pixels = null;
             if (manifest.Resources.TryGetValue(layer.Id, out var resource))
             {
-                if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Unexpected raster resource.");
+                if (layer.Kind is not (LayerKind.Raster or LayerKind.Chop)) throw new InvalidDataException("Unexpected raster resource.");
                 var bytes = ReadResource(resource, $"pixels/{layer.Id}.rgba", 4);
                 pixels = new Pixels(resource.Width, resource.Height, bytes);
             }
+            if (layer.Kind == LayerKind.Chop && pixels is null) throw new InvalidDataException("Missing Chop Layer snapshot.");
             AlphaMask? mask = null;
             if (manifest.Masks?.TryGetValue(layer.Id, out var alpha) == true)
             {

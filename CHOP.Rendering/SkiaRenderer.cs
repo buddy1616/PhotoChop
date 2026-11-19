@@ -290,15 +290,25 @@ public sealed class SkiaRenderer : IRasterBackend
 
     private Frame? PrepareLayer(Layer layer, Effect[] effects)
     {
-        var raster = layer.Kind == LayerKind.Raster ? ResolveRaster(layer) : null;
-        Pixels? source = layer.Kind switch
+        Frame frame;
+        if (layer.Kind == LayerKind.Path)
         {
-            LayerKind.Raster => raster?.Pixels,
-            LayerKind.Fill => FillSource(layer, layer.Width, layer.Height),
-            _ => vectors.GetValue(layer, Rasterize)
-        };
-        if (source is null) return null;
-        var frame = Evaluate(source, effects, raster?.X ?? 0, raster?.Y ?? 0);
+            var stroke = effects.FirstOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.Stroke);
+            if (stroke is null || RasterizePath(layer.Contours, stroke) is not { } vector) return null;
+            frame = Evaluate(vector.Pixels, effects.Where(effect => !ReferenceEquals(effect, stroke)).ToArray(), vector.X, vector.Y);
+        }
+        else
+        {
+            var raster = layer.Kind is LayerKind.Raster or LayerKind.Chop ? ResolveRaster(layer) : null;
+            Pixels? source = layer.Kind switch
+            {
+                LayerKind.Raster or LayerKind.Chop => raster?.Pixels,
+                LayerKind.Fill => FillSource(layer, layer.Width, layer.Height),
+                _ => vectors.GetValue(layer, Rasterize)
+            };
+            if (source is null) return null;
+            frame = Evaluate(source, effects, raster?.X ?? 0, raster?.Y ?? 0);
+        }
         return layer.MaskEnabled && layer.Mask is { } mask ? ApplyMask(frame, mask) : frame;
     }
 
@@ -391,6 +401,67 @@ public sealed class SkiaRenderer : IRasterBackend
         var local = inverse.MapPoint((float)point.X, (float)point.Y);
         var text = vectors.GetValue(layer, Rasterize);
         return local.X >= 0 && local.Y >= 0 && local.X < text.Width && local.Y < text.Height;
+    }
+
+    private static Frame? RasterizePath(PathContour[] contours, Effect stroke)
+    {
+        using var closed = new SKPath { FillType = SKPathFillType.EvenOdd };
+        using var open = new SKPath();
+        bool anyClosed = false, anyOpen = false;
+        foreach (var contour in contours)
+        {
+            if (contour.Nodes.Length < 2) continue;
+            var builder = contour.Closed ? closed : open;
+            if (contour.Closed) anyClosed = true; else anyOpen = true;
+            var first = contour.Nodes[0].Point;
+            builder.MoveTo((float)first.X, (float)first.Y);
+            int count = contour.Closed ? contour.Nodes.Length : contour.Nodes.Length - 1;
+            for (int i = 0; i < count; i++)
+            {
+                var from = contour.Nodes[i];
+                var to = contour.Nodes[(i + 1) % contour.Nodes.Length];
+                if (from.Outgoing is null && to.Incoming is null)
+                    builder.LineTo((float)to.Point.X, (float)to.Point.Y);
+                else
+                {
+                    var a = from.Outgoing ?? from.Point;
+                    var b = to.Incoming ?? to.Point;
+                    builder.CubicTo((float)a.X, (float)a.Y, (float)b.X, (float)b.Y, (float)to.Point.X, (float)to.Point.Y);
+                }
+            }
+            if (contour.Closed) builder.Close();
+        }
+        if (!anyClosed && !anyOpen) return null;
+        var range = anyClosed ? closed.Bounds : open.Bounds;
+        if (anyOpen && anyClosed)
+        {
+            var b = open.Bounds;
+            range = new SKRect(Math.Min(range.Left, b.Left), Math.Min(range.Top, b.Top),
+                Math.Max(range.Right, b.Right), Math.Max(range.Bottom, b.Bottom));
+        }
+        range.Inflate((float)stroke.A + 2, (float)stroke.A + 2);
+        var bounds = EnclosingPixels(range);
+        using var bitmap = Surface(bounds.Width, bounds.Height);
+        using var canvas = new SKCanvas(bitmap);
+        using var paint = new SKPaint
+        {
+            Color = new SKColor(Format.Color(stroke.Ink)), IsAntialias = true, Style = SKPaintStyle.Stroke,
+            StrokeWidth = (float)stroke.A, StrokeCap = SKStrokeCap.Round, StrokeJoin = SKStrokeJoin.Round
+        };
+        canvas.Clear(SKColors.Transparent);
+        canvas.Translate(-bounds.X, -bounds.Y);
+        if (anyOpen) canvas.DrawPath(open, paint);
+        if (anyClosed)
+        {
+            if (stroke.Alignment != StrokeAlignment.Center)
+            {
+                canvas.ClipPath(closed, stroke.Alignment == StrokeAlignment.Inside ? SKClipOperation.Intersect : SKClipOperation.Difference, true);
+                paint.StrokeWidth *= 2;
+            }
+            canvas.DrawPath(closed, paint);
+        }
+        canvas.Flush();
+        return new Frame(Unpremultiply(bitmap), bounds.X, bounds.Y);
     }
 
     private static Pixels Rasterize(Layer layer)
@@ -828,11 +899,11 @@ public sealed class SkiaRenderer : IRasterBackend
         if (clipToSelection && doc.Selection is not null && !doc.Selected(x, y)) return null;
         var visible = layer.Kind switch
         {
-            LayerKind.Raster => null,
+            LayerKind.Raster or LayerKind.Chop => null,
             LayerKind.Effect => Composite(doc),
             _ => CompositeRegion(IsolatedBranch(doc.Layers, layer.Id), new Area(0, 0, width, height))
         };
-        var raster = layer.Kind == LayerKind.Raster ? ResolveRaster(layer) : null;
+        var raster = layer.Kind is LayerKind.Raster or LayerKind.Chop ? ResolveRaster(layer) : null;
         var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
         uint ColorAt(int px, int py)
