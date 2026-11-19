@@ -15,6 +15,9 @@ internal sealed class EditorCanvas : FrameworkElement
     public BitmapSource? Frame { get; set; }
     public double Zoom { get; set; } = 1;
     public Point Offset { get; set; }
+    private PixelSelection? outlineSource;
+    private Geometry? outline;
+    public PixelSelection? SelectionMask { get; set; }
     public Area? Selection { get; set; }
     public Rect? Marquee { get; set; }
     public IReadOnlyList<PointD>? Stroke { get; set; }
@@ -65,9 +68,62 @@ internal sealed class EditorCanvas : FrameworkElement
             }
             dc.Pop();
         }
-        if (Selection is { } selection) DrawOutline(dc, ViewRect(new Rect(selection.X, selection.Y, selection.Width, selection.Height)));
+        if (Selection is { } selection)
+        {
+            if (SelectionMask is { } mask)
+            {
+                if (!ReferenceEquals(outlineSource, mask))
+                {
+                    outlineSource = mask;
+                    outline = BuildOutline(mask);
+                }
+                dc.PushTransform(new MatrixTransform(Zoom, 0, 0, Zoom, Offset.X + selection.X * Zoom, Offset.Y + selection.Y * Zoom));
+                var light = new Pen(Brushes.White, 1 / Zoom);
+                var dark = new Pen(Brushes.Black, 1 / Zoom) { DashStyle = DashStyles.Dash };
+                dc.DrawGeometry(null, light, outline);
+                dc.DrawGeometry(null, dark, outline);
+                dc.Pop();
+            }
+            else DrawOutline(dc, ViewRect(new Rect(selection.X, selection.Y, selection.Width, selection.Height)));
+        }
         if (Marquee is { } marquee) DrawOutline(dc, ViewRect(marquee));
         dc.Pop();
+    }
+
+    private static Geometry BuildOutline(PixelSelection mask)
+    {
+        var geometry = new StreamGeometry();
+        var bounds = mask.Bounds;
+        using (var path = geometry.Open())
+        {
+            void Segment(int x, int y, int rx, int ry)
+            {
+                path.BeginFigure(new Point(x, y), false, false);
+                path.LineTo(new Point(rx, ry), true, false);
+            }
+            bool Hit(int x, int y) => mask.Contains(x + bounds.X, y + bounds.Y);
+            for (int y = 0; y <= bounds.Height; y++)
+            {
+                int start = -1;
+                for (int x = 0; x <= bounds.Width; x++)
+                {
+                    bool edge = x < bounds.Width && Hit(x, y - 1) != Hit(x, y);
+                    if (edge && start < 0) start = x;
+                    if (!edge && start >= 0) { Segment(start, y, x, y); start = -1; }
+                }
+            }
+            for (int x = 0; x <= bounds.Width; x++)
+            {
+                int start = -1;
+                for (int y = 0; y <= bounds.Height; y++)
+                {
+                    bool edge = y < bounds.Height && Hit(x - 1, y) != Hit(x, y);
+                    if (edge && start < 0) start = y;
+                    if (!edge && start >= 0) { Segment(x, start, x, y); start = -1; }
+                }
+            }
+        }
+        return Frozen(geometry);
     }
 
     private Rect ViewRect(Rect rect) => new(ToView(new PointD(rect.X, rect.Y)),

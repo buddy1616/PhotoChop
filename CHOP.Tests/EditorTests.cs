@@ -25,6 +25,113 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void RasterMovesAndLaterEditsRetainTheSourceAndRoundTrip()
+    {
+        var engine = NewEngine(12, 6);
+        var source = new Pixels(3, 1, [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("pixels", "Pixels", renderer.EncodePng(source))));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(0, 0, 1, 1), SelectionMode.Replace)));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(2, 0, 1, 1), SelectionMode.Add)));
+        engine.Execute(Command.Of("layer.moveSelection", new PointD(4, 2), "pixels"));
+        var moved = engine.Current!.Layers.Single();
+        Assert.Equal(source.Rgba, moved.Pixels!.Rgba);
+        Assert.Equal(new byte[] { 1, 0, 1 }, Assert.Single(moved.PixelShifts).Bits);
+        Assert.Equal(4, moved.PixelShifts[0].Dx);
+        Assert.True(engine.Current.Selected(4, 2));
+        Assert.False(engine.Current.Selected(5, 2));
+        int At(int x, int y) => (y * 12 + x) * 4;
+        var composite = Composite(engine);
+        Assert.Equal(0, composite[At(0, 0) + 3]);
+        Assert.Equal(255, composite[At(1, 0) + 1]);
+        Assert.Equal(255, composite[At(4, 2)]);
+        Assert.Equal(255, composite[At(6, 2) + 2]);
+
+        engine.Execute(Command.Of("layer.paintStroke", new StrokeArgs([new(4.5, 2.5)], 1, 1, 1, "#FFFFFFFF", false), "pixels"));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(4, 2, 1, 1), SelectionMode.Subtract)));
+        engine.Execute(Command.Of("layer.clearSelection", 0, "pixels"));
+        string path = Path.Combine(folder, "offsets.chop");
+        ProjectFile.Save(path, engine.Current!);
+        var restored = ProjectFile.Open(path);
+        Assert.Equal(3, restored.Layers[0].PixelShifts.Length);
+        Assert.Equal(source.Rgba, restored.Layers[0].Pixels!.Rgba);
+        Assert.Equal(Composite(engine), renderer.Composite(restored).Rgba);
+        Assert.Equal(0, Composite(engine)[At(6, 2) + 3]);
+    }
+
+    [Fact]
+    public void PixelSelectionsSupportColorRangeBooleanEditsAndExpansion()
+    {
+        var engine = NewEngine(7, 5);
+        Layer(engine, new("red1", "Red", LayerKind.Rectangle, Color: "#FFFF0000", Width: 1, Height: 1, Transform: new(1, 2)));
+        Layer(engine, new("red2", "Nearby red", LayerKind.Rectangle, Color: "#FFF40000", Width: 1, Height: 1, Transform: new(5, 2)));
+        engine.Execute(Command.Of("selection.colorRange", new ColorSelection("#FFFF0000", 0)));
+        Assert.True(engine.Current!.Selected(1, 2));
+        Assert.False(engine.Current.Selected(5, 2));
+        engine.Execute(Command.Of("selection.colorRange", new ColorSelection("#FFFF0000", 10)));
+        Assert.True(engine.Current.Selected(5, 2));
+        Assert.False(engine.Current.Selected(3, 2));
+        engine.Execute(Command.Of("selection.resize", 1));
+        Assert.True(engine.Current.Selected(0, 1));
+        Assert.True(engine.Current.Selected(6, 3));
+        Assert.False(engine.Current.Selected(3, 2));
+        engine.Execute(Command.Of("selection.resize", -1));
+        Assert.True(engine.Current.Selected(1, 2));
+        Assert.False(engine.Current.Selected(0, 1));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(0, 0, 2, 3), SelectionMode.Subtract)));
+        Assert.False(engine.Current.Selected(1, 2));
+        engine.Execute(Command.Of("selection.translate", new PointD(-1, 1)));
+        Assert.True(engine.Current.Selected(4, 3));
+    }
+
+    [Fact]
+    public void HistoryCanDisableAndReorderCommandsAndReplayTheSameResult()
+    {
+        var engine = new CommandEngine(renderer);
+        var log = new List<Command>();
+        engine.Executed += entry => { if (entry.Success) log.Add(entry.Command); };
+        engine.Execute(Command.Of("document.create", new NewArgs("history", 12, 10)));
+        Layer(engine, new("art", "Original", LayerKind.Fill));
+        engine.Execute(Command.Of("layer.rename", "First", "art"));
+        engine.Execute(Command.Of("layer.rename", "Second", "art"));
+        engine.Execute(Command.Of("history.change", new HistoryChange(3, 2)));
+        Assert.Equal("First", engine.Current!.Layers.Single().Name);
+        engine.Execute(Command.Of("history.change", new HistoryChange(3, Enabled: false)));
+        Assert.Equal("Second", engine.Current.Layers.Single().Name);
+        engine.Execute(Command.Of("history.change", new HistoryChange(1, Enabled: false)));
+        Assert.Empty(engine.Current.Layers);
+        Assert.NotNull(engine.History[2].Error);
+        engine.Execute(Command.Of("history.change", new HistoryChange(1, Enabled: true)));
+        Assert.Null(engine.History[2].Error);
+        var replay = new CommandEngine(renderer);
+        foreach (var command in log) replay.Execute(command);
+        Assert.Equal("Second", replay.Current!.Layers.Single().Name);
+        Assert.Equal(engine.History.Select(entry => entry.Enabled), replay.History.Select(entry => entry.Enabled));
+    }
+
+    [Fact]
+    public void FillMaskCanBeDisabledPastedViewedAndBaked()
+    {
+        var engine = NewEngine(4, 3);
+        Layer(engine, new("fill", "Fill", LayerKind.Fill, Color: "#FF00FF00"));
+        engine.Execute(Command.Of("layer.fill", "#FF0000FF", "fill"));
+        var mask = new AlphaMask(4, 3, [0, 128, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
+        engine.Execute(Command.Of("mask.paste", mask, "fill"));
+        var masked = Composite(engine);
+        Assert.Equal(0, masked[3]);
+        Assert.Equal(128, masked[7]);
+        Assert.Equal(255, masked[^2]);
+        var gray = renderer.MaskView(engine.Current!, engine.Current!.Layers[0]).Rgba;
+        Assert.Equal(new byte[] { 128, 128, 128, 255 }, gray[4..8]);
+        engine.Execute(Command.Of("mask.enable", false, "fill"));
+        Assert.Equal(255, Composite(engine)[3]);
+        engine.Execute(Command.Of("mask.enable", true, "fill"));
+        engine.Execute(Command.Of("mask.bake", 0, "fill"));
+        Assert.Equal(LayerKind.Raster, engine.Current.Layers[0].Kind);
+        Assert.Null(engine.Current.Layers[0].Mask);
+        Assert.Equal(masked, Composite(engine));
+    }
+
+    [Fact]
     public void NewDesktopDocumentHasOneStarterGroupAndPreservesPrintResolution()
     {
         var engine = new CommandEngine(renderer);

@@ -18,10 +18,14 @@ public partial class MainWindow : Window
 {
     private sealed class Session(CommandEngine engine)
     {
+        public EditorCanvas View { get; } = new();
+        public LayoutDocument? Tab { get; set; }
+        public string? MaskOnly { get; set; }
         public CommandEngine Engine { get; } = engine;
         public List<LogEntry> Log { get; } = [];
         public int LogStart { get; set; }
         public bool Recording { get; set; } = true;
+        public bool HistoryEdited { get; set; }
         public string? ActiveId { get; set; }
         public HashSet<string> Collapsed { get; } = [];
         public string? MaskTarget { get; set; }
@@ -44,20 +48,17 @@ public partial class MainWindow : Window
 
     private readonly SkiaRenderer renderer = new();
     private readonly List<Session> sessions = [];
-    private readonly TabControl documents = new()
-    {
-        HorizontalContentAlignment = HorizontalAlignment.Stretch,
-        VerticalContentAlignment = VerticalAlignment.Stretch
-    };
-    private readonly EditorCanvas canvas = new();
+    private readonly EditorCanvas emptyCanvas = new();
+    private EditorCanvas canvas => active?.View ?? emptyCanvas;
+    private LayoutDocumentPane? documentPane;
     private readonly StackPanel toolColors = new() { Margin = new Thickness(6) };
     private readonly StackPanel toolsPanel = new() { Margin = new Thickness(6) };
     private readonly DockPanel layersPanel = new();
-    private readonly ListBox layers = new() { SelectionMode = SelectionMode.Extended, AllowDrop = true };
+    private readonly ListBox layers = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended, AllowDrop = true };
     private readonly ListBox history = new();
     private readonly StackPanel properties = new() { Margin = new Thickness(8) };
     private readonly DockPanel logPanel = new();
-    private readonly ListBox commandLog = new() { SelectionMode = SelectionMode.Extended };
+    private readonly ListBox commandLog = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended };
     private readonly Dictionary<string, FrameworkElement> panelContent = [];
     private readonly string settingsFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CHOP");
     private readonly Preferences preferences;
@@ -73,25 +74,30 @@ public partial class MainWindow : Window
     private double brushSize = 24, hardness = .8, brushOpacity = 1;
     private LayerKind shapeKind = LayerKind.Rectangle;
     private Point? lastCursor;
-    private static readonly string[] ToolNames = ["Move", "Brush", "Eraser", "Selection", "Crop", "Text", "Shape", "Eyedropper", "Transform"];
+    private static readonly string[] ToolNames = ["Move", "Brush", "Eraser", "Selection", "Chop", "Text", "Shape", "Eyedropper", "Transform"];
 
     public MainWindow()
     {
         InitializeComponent();
         Dock.Theme = new AvalonDock.Themes.Vs2013DarkTheme();
+        Dock.AllowMixedOrientation = true;
+        Dock.LayoutFloatingWindowControlCreated += (_, e) =>
+        {
+            if (e.LayoutFloatingWindowControl is AvalonDock.Controls.LayoutDocumentFloatingWindowControl host)
+            {
+                host.AllowMinimize = true;
+                host.ResizeMode = ResizeMode.CanResize;
+            }
+        };
         preferences = LoadPreferences();
         BuildMenus();
         BuildPanels();
         ResetLayout();
-        documents.SelectionChanged += (_, e) =>
+        Dock.ActiveContentChanged += (_, _) =>
         {
-            if (!syncing && e.Source == documents) Activate((documents.SelectedItem as TabItem)?.Tag as Session);
+            if (sessions.FirstOrDefault(session => ReferenceEquals(Dock.ActiveContent, session.View)) is { } session)
+                Activate(session);
         };
-        canvas.SizeChanged += (_, _) =>
-        {
-            if (active is { NeedsFit: true } && canvas.ActualWidth > 0) Fit();
-        };
-        HookCanvas();
         SetTool("Move");
         Refresh();
     }
@@ -107,20 +113,21 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        var path = Path.Combine(settingsFolder, "layout.xml");
+        var path = Path.Combine(settingsFolder, "layout-v2.xml");
         if (!File.Exists(path)) return;
         try
         {
             var serializer = new XmlLayoutSerializer(Dock);
             serializer.LayoutSerializationCallback += (_, args) =>
             {
-                args.Content = args.Model.ContentId == "workspace" ? documents
+                args.Content = args.Model.ContentId == "workspace" ? emptyCanvas
                     : panelContent.GetValueOrDefault(args.Model.ContentId ?? "");
                 args.Cancel = args.Content is null;
             };
             serializer.Deserialize(path);
             workspace = Dock.Layout.Descendents().OfType<LayoutDocument>().FirstOrDefault(item => item.ContentId == "workspace");
-            if (workspace is null) ResetLayout();
+            documentPane = workspace?.Parent as LayoutDocumentPane ?? Dock.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault();
+            if (documentPane is null) ResetLayout();
         }
         catch (Exception error) { ResetLayout(); Say($"Workspace reset. {error.Message}"); }
     }
@@ -136,7 +143,7 @@ public partial class MainWindow : Window
         try
         {
             Directory.CreateDirectory(settingsFolder);
-            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout.xml"));
+            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v2.xml"));
             File.WriteAllText(Path.Combine(settingsFolder, "settings.json"), JsonSerializer.Serialize(preferences, Format.Json));
         }
         catch (Exception error) { MessageBox.Show(this, error.Message, "CHOP settings"); }
@@ -146,15 +153,27 @@ public partial class MainWindow : Window
     {
         if (Dock.Layout is { } old)
             foreach (var content in old.Descendents().OfType<LayoutContent>().ToArray()) content.Content = null;
-        workspace = new LayoutDocument { Title = "Documents", ContentId = "workspace", Content = documents, CanClose = false, CanFloat = false };
+        workspace = new LayoutDocument { Title = "Documents", ContentId = "workspace", Content = emptyCanvas, CanClose = false, CanFloat = false };
         var left = new LayoutAnchorablePane { DockWidth = new GridLength(126) };
         left.Children.Add(NewPanel("Tools"));
         var center = new LayoutDocumentPane();
-        center.Children.Add(workspace);
-        var right = new LayoutAnchorablePane { DockWidth = new GridLength(400) };
+        documentPane = center;
+        if (sessions.Count == 0) center.Children.Add(workspace);
+        foreach (var session in sessions)
+        {
+            session.Tab!.Parent?.RemoveChild(session.Tab);
+            session.Tab.Content = session.View;
+            center.Children.Add(session.Tab);
+        }
+        var right = new LayoutAnchorablePane { DockHeight = new GridLength(3, GridUnitType.Star) };
         foreach (string title in new[] { "Layers", "History", "Command Log" }) right.Children.Add(NewPanel(title));
-        Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { left, center, right } } };
+        var upper = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
+        upper.Children.Add(NewPanel("Navigation"));
+        var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
+            Children = { upper, right } };
+        Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { left, center, sidebar } } };
         right.SelectedContentIndex = 0;
+        if (active?.Tab is { } selected) selected.IsActive = true;
     }
 
     private LayoutAnchorable NewPanel(string title) => new()
@@ -208,8 +227,8 @@ public partial class MainWindow : Window
             shapeItem.IsEnabled = selected?.Kind is LayerKind.Rectangle or LayerKind.Ellipse;
         };
         var image = Menu("Image");
-        Item(image, "Crop tool", () => SetTool("Crop"));
-        Item(image, "Crop to selection", () => { if (active?.Engine.Current?.Selection is { } area) Run("document.crop", area); });
+        Item(image, "Chop tool", () => SetTool("Chop"));
+        Item(image, "Chop to selection", () => { if (active?.Engine.Current?.Selection is { } area) Run("document.chop", area); });
         Item(image, "Flatten image…", Flatten);
         Item(image, "Default document size…", SetDefaults);
 
@@ -220,6 +239,7 @@ public partial class MainWindow : Window
 
         var layer = Menu("Layer");
         Item(layer, "New raster layer", () => CreateLayer(LayerKind.Raster));
+        Item(layer, "New fill layer…", () => CreateLayer(LayerKind.Fill));
         Item(layer, "Duplicate selected layer", Duplicate);
         Item(layer, "Rename selected layer…", Rename);
         Item(layer, "Delete selected layer", DeleteLayer);
@@ -230,6 +250,11 @@ public partial class MainWindow : Window
         Item(layer, "Transform…", EditTransform);
         var select = Menu("Select");
         Item(select, "Rectangular selection", () => SetTool("Selection"), "M");
+        var modify = new MenuItem { Header = "Modify" };
+        select.Items.Add(modify);
+        Item(modify, "Expand…", () => ModifySelection(expand: true));
+        Item(modify, "Contract…", () => ModifySelection(expand: false));
+        Item(select, "Color Range…", SelectColorRange);
         Item(select, "Deselect", () => Run<Area?>("document.selection", null), "Ctrl+D");
 
         var filter = Menu("Filter");
@@ -241,8 +266,21 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", "Layers", "History", "Command Log" })
+        foreach (string title in new[] { "Tools", "Navigation", "Layers", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
+        Item(window, "Split document to the right", SplitDocument);
+        Item(window, "Float document", () => FloatDocument(WindowState.Normal));
+        Item(window, "Maximize document window", () => FloatDocument(WindowState.Maximized));
+        Item(window, "Minimize document window", () => FloatDocument(WindowState.Minimized));
+        var openDocuments = new MenuItem { Header = "Open documents" };
+        window.Items.Add(openDocuments);
+        window.SubmenuOpened += (_, e) =>
+        {
+            if (!ReferenceEquals(e.Source, window)) return;
+            openDocuments.Items.Clear();
+            openDocuments.IsEnabled = sessions.Count > 0;
+            foreach (var session in sessions) Item(openDocuments, session.Title, () => SelectTab(session));
+        };
         Item(window, "Reset workspace", ResetLayout);
         var help = Menu("Help");
         Item(help, "Editing controls", () => MessageBox.Show(this,
@@ -256,7 +294,7 @@ public partial class MainWindow : Window
         return item;
     }
 
-    private static MenuItem Item(MenuItem menu, string title, Action action, string? shortcut = null)
+    private static MenuItem Item(ItemsControl menu, string title, Action action, string? shortcut = null)
     {
         var item = new MenuItem { Header = title, InputGestureText = shortcut ?? "" };
         item.Click += (_, _) => action();
@@ -314,32 +352,85 @@ public partial class MainWindow : Window
 
     private void AddSession(Session session)
     {
+        var pane = active?.Tab?.Parent as LayoutDocumentPane;
+        if (pane is null || pane.FindParent<LayoutDocumentFloatingWindow>() is not null)
+            pane = Dock.Layout.Descendents().OfType<LayoutDocumentPane>()
+                .FirstOrDefault(item => item.FindParent<LayoutDocumentFloatingWindow>() is null) ?? documentPane;
+        if (pane is null) throw new InvalidOperationException("No document pane is available.");
+
         sessions.Add(session);
-        var title = new TextBlock { Text = session.Title, VerticalAlignment = VerticalAlignment.Center };
-        var header = new StackPanel { Orientation = Orientation.Horizontal };
-        header.Children.Add(title);
-        header.Children.Add(Button("×", () => CloseSession(session), "Close document"));
-        documents.Items.Add(new TabItem { Header = header, Tag = session, Content = new ContentControl
+        session.Tab = new LayoutDocument { Title = session.Title, Content = session.View,
+            ContentId = "document-" + Format.Id(), CanClose = true, CanFloat = true };
+        session.Tab.Closing += (_, e) => e.Cancel = !CanClose(session);
+        session.Tab.Closed += (_, _) => RemoveSession(session);
+        session.View.SizeChanged += (_, _) =>
         {
-            HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            VerticalContentAlignment = VerticalAlignment.Stretch
-        } });
+            if (ReferenceEquals(active, session) && session.NeedsFit && canvas.ActualWidth > 0) Fit();
+        };
+        session.View.PreviewMouseDown += (_, _) => Activate(session);
+        session.View.GotKeyboardFocus += (_, _) => Activate(session);
+        session.View.PreviewKeyDown += (_, e) =>
+        {
+            if (Window.GetWindow(session.View) != this) OnKey(session.View, e);
+        };
+        HookCanvas(session.View);
+        session.View.Cursor = ToolCursor(tool);
+        pane.Children.Add(session.Tab);
+        if (workspace?.Parent is { } parent) parent.RemoveChild(workspace);
         SelectTab(session);
     }
 
-    private void SelectTab(Session session) => documents.SelectedItem =
-        documents.Items.OfType<TabItem>().Single(item => ReferenceEquals(item.Tag, session));
+    private void SelectTab(Session session)
+    {
+        if (session.Tab is null) return;
+        session.Tab.IsSelected = true;
+        session.Tab.IsActive = true;
+        if (Window.GetWindow(session.View) is { } host && host != this)
+        {
+            if (host.WindowState == WindowState.Minimized) host.WindowState = WindowState.Normal;
+            host.Activate();
+        }
+        Activate(session);
+    }
 
     private void Activate(Session? session)
     {
+        if (ReferenceEquals(active, session)) return;
         CancelGesture();
-        foreach (TabItem tab in documents.Items) ((ContentControl)tab.Content).Content = null;
         active = session;
-        canvas.Frame = session?.Frame;
-        if (documents.SelectedItem is TabItem selected) ((ContentControl)selected.Content).Content = canvas;
         lastCursor = null;
         Refresh();
         if (active is { NeedsFit: true } && canvas.ActualWidth > 0) Fit();
+    }
+
+    private void SplitDocument()
+    {
+        if (active?.Tab is not { Parent: LayoutDocumentPane pane } tab ||
+            pane.FindParent<LayoutDocumentFloatingWindow>() is not null) return;
+        var neighbor = new LayoutDocumentPane();
+        if (pane.Parent is LayoutDocumentPaneGroup group && group.Orientation == Orientation.Horizontal)
+            group.Children.Insert(group.Children.IndexOf(pane) + 1, neighbor);
+        else if (pane.Parent is ILayoutContainer parent)
+        {
+            var split = new LayoutDocumentPaneGroup { Orientation = Orientation.Horizontal };
+            parent.ReplaceChild(pane, split);
+            split.Children.Add(pane);
+            split.Children.Add(neighbor);
+        }
+        else return;
+        neighbor.Children.Add(tab);
+        tab.IsActive = true;
+    }
+
+    private void FloatDocument(WindowState state)
+    {
+        if (active is not { Tab: { } tab } session) return;
+        if (!tab.IsFloating) tab.Float();
+        if (state != WindowState.Normal)
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+            {
+                if (Window.GetWindow(session.View) is { } host && host != this) host.WindowState = state;
+            }));
     }
 
     private bool Save(Session? session, bool saveAs = false)
@@ -406,14 +497,18 @@ public partial class MainWindow : Window
         return result == MessageBoxResult.No || (result == MessageBoxResult.Yes && Save(session));
     }
 
-    private void CloseSession(Session? session)
+    private void CloseSession(Session? session) => session?.Tab?.Close();
+
+    private void RemoveSession(Session session)
     {
-        if (session is null || !CanClose(session)) return;
-        var tab = documents.Items.OfType<TabItem>().Single(item => ReferenceEquals(item.Tag, session));
-        ((ContentControl)tab.Content).Content = null;
-        sessions.Remove(session);
-        documents.Items.Remove(tab);
-        if (ReferenceEquals(active, session)) Activate((documents.SelectedItem as TabItem)?.Tag as Session);
+        if (!sessions.Remove(session)) return;
+        if (sessions.Count == 0 && workspace?.Parent is null)
+        {
+            var pane = Dock.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault();
+            if (pane is not null && workspace is not null) pane.Children.Add(workspace);
+        }
+        if (ReferenceEquals(active, session))
+            Activate(sessions.FirstOrDefault(item => item.Tab?.IsActive == true) ?? sessions.FirstOrDefault());
     }
 
     private void Remember(string path)
@@ -438,6 +533,13 @@ public partial class MainWindow : Window
         var ok = Guard(() =>
         {
             session.Engine.Execute(Command.Of(action, args, target));
+            if (action == "history.change")
+            {
+                session.HistoryEdited = true;
+                session.LogStart = 0;
+            }
+            if (session.MaskOnly is { } mask && session.Engine.Current?.AllLayers().Any(layer => layer.Id == mask && layer.Mask is not null) != true)
+                session.MaskOnly = null;
             if (selectId is not null) session.ActiveId = selectId;
         });
         Refresh();
@@ -464,10 +566,11 @@ public partial class MainWindow : Window
         syncing = true;
         try
         {
-            foreach (TabItem tab in documents.Items)
-                ((TextBlock)((StackPanel)tab.Header).Children[0]).Text = ((Session)tab.Tag).Title;
+            foreach (var item in sessions)
+                if (item.Tab is { } tab) tab.Title = item.Title;
             RefreshLayers();
-            history.ItemsSource = active?.Engine.History.Select(item => item.Name).ToArray();
+            history.ItemsSource = active?.Engine.History.Select(item => item.Name +
+                (!item.Enabled ? " (disabled)" : item.Error is { } error ? $" (skipped: {error})" : "")).ToArray();
             history.SelectedIndex = active?.Engine.Cursor ?? -1;
             if (history.SelectedItem is { } step) history.ScrollIntoView(step);
             RefreshProperties();
@@ -475,6 +578,7 @@ public partial class MainWindow : Window
         }
         finally { syncing = false; }
         UpdateCanvas();
+        RefreshNavigation();
         Say();
     }
 
@@ -493,6 +597,7 @@ public partial class MainWindow : Window
         if (preview is null) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
         canvas.Selection = doc.Selection;
+        canvas.SelectionMask = doc.SelectionMask;
         if (doc.Selection is { } selected && selectionDragDelta is { } delta)
             canvas.Selection = selected with { X = selected.X + (int)delta.X, Y = selected.Y + (int)delta.Y };
         canvas.Zoom = active.Zoom;
@@ -509,7 +614,9 @@ public partial class MainWindow : Window
                 var shift = selectionDragDelta;
                 string? targetId = moveId;
                 bool isPreview = preview is not null || shift is not null;
-                bool cached = !isPreview && session.Rendered is { } prior &&
+                var maskLayer = session.MaskOnly is { } maskId
+                    ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
+                bool cached = !isPreview && maskLayer is null && session.Rendered is { } prior &&
                     ReferenceEquals(target.Layers, prior.Layers) && target.Width == prior.Width && target.Height == prior.Height;
                 var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!) : await Task.Run(() =>
                 {
@@ -519,19 +626,20 @@ public partial class MainWindow : Window
                         var result = renderer.EditSelection(snapshot, layer, area, offset);
                         target = target with { Layers = PreviewPixels(target.Layers, targetId, result) };
                     }
-                    var pixels = renderer.Composite(target);
+                    var pixels = maskLayer is null ? renderer.Composite(target) : renderer.MaskView(target, maskLayer);
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels));
                 });
                 if (!ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
                     (isPreview && preview is null && selectionDragDelta is null)) continue;
-                if (!isPreview)
+                if (!isPreview && maskLayer is null)
                 {
                     session.Rendered = snapshot;
                     session.Composite = frame.Pixels;
                     session.Frame = frame.Frame;
                 }
-                canvas.Frame = frame.Frame;
-                canvas.InvalidateVisual();
+                session.View.Frame = frame.Frame;
+                session.View.InvalidateVisual();
+                RefreshNavigation();
                 if (version == renderVersion) break;
             }
         }
@@ -540,7 +648,7 @@ public partial class MainWindow : Window
     }
 
     private static Layer[] PreviewPixels(Layer[] items, string id, RasterEdit edit) => items.Select(layer =>
-        layer.Id == id ? layer with { Pixels = edit.Pixels, RasterX = edit.X, RasterY = edit.Y }
+        layer.Id == id ? layer with { Pixels = edit.Pixels, RasterX = edit.X, RasterY = edit.Y, PixelShifts = [] }
         : layer.Children.Length == 0 ? layer : layer with { Children = PreviewPixels(layer.Children, id, edit) }).ToArray();
 
     private void Say(string? message = null)
@@ -560,7 +668,7 @@ public partial class MainWindow : Window
 
     private string[]? Form(string title, params (string Label, string Initial)[] fields) => BuildForm(title, fields);
 
-    private string[]? BuildForm(string title, (string Label, string Initial)[] fields, (double Min, double Max)[]? ranges = null)
+    private string[]? BuildForm(string title, (string Label, string Initial)[] fields, (double Min, double Max)[]? ranges = null, Action<string[]?>? previewChanged = null)
     {
         var dialog = new Window { Owner = effectDialog ?? this, Title = title, Width = 440, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false };
@@ -600,6 +708,15 @@ public partial class MainWindow : Window
             }
             else panel.Children.Add(box);
             boxes.Add(box);
+        }
+        if (previewChanged is not null)
+        {
+            var check = new CheckBox { Content = "Live preview", Margin = new Thickness(0, 8, 0, 6) };
+            void PreviewValues() => previewChanged(check.IsChecked == true ? boxes.Select(box => box.Text).ToArray() : null);
+            check.Click += (_, _) => PreviewValues();
+            foreach (var box in boxes) box.TextChanged += (_, _) => { if (check.IsChecked == true) PreviewValues(); };
+            panel.Children.Add(check);
+            dialog.Closed += (_, _) => previewChanged(null);
         }
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var ok = Button("OK", () => dialog.DialogResult = true);
