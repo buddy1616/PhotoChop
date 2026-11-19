@@ -1,0 +1,11 @@
+[
+  {
+    "Name": "CHOP Desktop",
+    "Projects": [
+      {
+        "Path": "PhotoChop.csproj",
+        "Action": "Start"
+      }
+    ]
+  }
+]

@@ -14,6 +14,8 @@ public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, dou
 
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
 public sealed record Pixels(int Width, int Height, byte[] Rgba);
+public sealed record AlphaMask(int Width, int Height, byte[] Alpha);
+public sealed record RasterEdit(Pixels Pixels, int X, int Y);
 
 public sealed record Layer(string Id, string Name, LayerKind Kind)
 {
@@ -23,6 +25,9 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public double Opacity { get; init; } = 1;
     public Blend Blend { get; init; }
     [JsonIgnore] public Pixels? Pixels { get; init; }
+    [JsonIgnore] public AlphaMask? Mask { get; init; }
+    public int RasterX { get; init; }
+    public int RasterY { get; init; }
     public string Text { get; init; } = "Text";
     public string Font { get; init; } = "Liberation Sans";
     public double Size { get; init; } = 48;
@@ -35,6 +40,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
 
 public sealed record Document(string Id, int Width, int Height)
 {
+    public double PixelsPerInch { get; init; } = 72;
     public string ColorSpace { get; init; } = "sRGB";
     public Dictionary<string, string> Metadata { get; init; } = [];
     public Layer[] Layers { get; init; } = [];
@@ -73,7 +79,9 @@ public static class Format
 public interface IRasterBackend
 {
     Pixels DecodePng(byte[] data);
-    byte[] EncodePng(Pixels pixels);
+    byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
+    RasterEdit EditSelection(Document document, Layer layer, Area selection, PointD? delta);
+    AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);
     Pixels Stroke(Document document, Layer layer, StrokeArgs stroke);
 }

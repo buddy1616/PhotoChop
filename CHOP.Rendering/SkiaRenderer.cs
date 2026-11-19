@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Collections;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Chop.Core;
@@ -9,7 +11,7 @@ namespace Chop.Rendering;
 public sealed class SkiaRenderer : IRasterBackend
 {
     private sealed record Frame(Pixels Pixels, int X = 0, int Y = 0);
-    private sealed record Evaluation(Frame Frame, Effect Effect, Evaluation? Input);
+    private sealed record Evaluation(Frame Frame, Effect Effect, Evaluation? Input, int X, int Y);
     private sealed class Evaluations
     {
         public readonly List<Evaluation> Nodes = [];
@@ -42,11 +44,33 @@ public sealed class SkiaRenderer : IRasterBackend
         return Read(bitmap);
     }
 
-    public byte[] EncodePng(Pixels pixels)
+    public byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null)
     {
         using var bitmap = Bitmap(pixels);
         using var data = bitmap.Encode(SKEncodedImageFormat.Png, 100) ?? throw new InvalidDataException("PNG encoding failed.");
-        return data.ToArray();
+        var png = data.ToArray();
+        if (pixelsPerInch is not { } ppi) return png;
+        const int afterHeader = 33;
+        const int chunkLength = 21;
+        var output = new byte[png.Length + chunkLength];
+        png.AsSpan(0, afterHeader).CopyTo(output);
+        var chunk = output.AsSpan(afterHeader, chunkLength);
+        BinaryPrimitives.WriteInt32BigEndian(chunk, 9);
+        "pHYs"u8.CopyTo(chunk[4..]);
+        uint resolution = checked((uint)Math.Round(ppi / .0254));
+        BinaryPrimitives.WriteUInt32BigEndian(chunk[8..], resolution);
+        BinaryPrimitives.WriteUInt32BigEndian(chunk[12..], resolution);
+        chunk[16] = 1;
+        uint checksum = uint.MaxValue;
+        foreach (byte value in chunk[4..17])
+        {
+            checksum ^= value;
+            for (int bit = 0; bit < 8; bit++)
+                checksum = (checksum >> 1) ^ ((checksum & 1) == 0 ? 0 : 0xEDB88320u);
+        }
+        BinaryPrimitives.WriteUInt32BigEndian(chunk[17..], ~checksum);
+        png.AsSpan(afterHeader).CopyTo(output.AsSpan(afterHeader + chunkLength));
+        return output;
     }
 
     public Pixels Composite(Document document)
@@ -83,19 +107,45 @@ public sealed class SkiaRenderer : IRasterBackend
             groupCanvas.Clear(SKColors.Transparent);
             foreach (var child in layer.Children) Draw(groupCanvas, child, doc, world);
             groupCanvas.Flush();
-            if (layer.Effects.Any(ProcessesPixels))
+            if (!layer.Effects.Any(ProcessesPixels) && layer.Mask is null)
             {
-                var frame = Evaluate(Unpremultiply(group), layer.Effects);
-                using var adjusted = Bitmap(frame.Pixels);
-                canvas.DrawBitmap(adjusted, frame.X, frame.Y, paint);
+                canvas.DrawBitmap(group, 0, 0, paint);
+                return;
             }
-            else canvas.DrawBitmap(group, 0, 0, paint);
+
+            var frame = Evaluate(Unpremultiply(group), layer.Effects);
+            using var adjusted = Bitmap(frame.Pixels);
+            if (layer.Mask is not { } groupMask)
+            {
+                canvas.DrawBitmap(adjusted, frame.X, frame.Y, paint);
+                return;
+            }
+
+            using var output = Surface(doc.Width, doc.Height);
+            using var outputCanvas = new SKCanvas(output);
+            outputCanvas.Clear(SKColors.Transparent);
+            outputCanvas.DrawBitmap(adjusted, frame.X, frame.Y);
+            using var maskSurface = Surface(doc.Width, doc.Height);
+            using var maskCanvas = new SKCanvas(maskSurface);
+            using var maskBitmap = Bitmap(MaskPixels(groupMask));
+            using var sourcePaint = new SKPaint { BlendMode = SKBlendMode.Src };
+            maskCanvas.Clear(SKColors.White);
+            maskCanvas.Concat(world);
+            maskCanvas.DrawBitmap(maskBitmap, 0, 0, sourcePaint);
+            maskCanvas.Flush();
+            using var maskPaint = new SKPaint { BlendMode = SKBlendMode.DstIn };
+            outputCanvas.DrawBitmap(maskSurface, 0, 0, maskPaint);
+            outputCanvas.Flush();
+            canvas.DrawBitmap(output, 0, 0, paint);
             return;
         }
 
         Pixels? source = layer.Kind == LayerKind.Raster ? layer.Pixels : vectors.GetValue(layer, Rasterize);
         if (source is null) return;
-        var evaluated = Evaluate(source, layer.Effects);
+        int originX = layer.Kind == LayerKind.Raster ? layer.RasterX : 0;
+        int originY = layer.Kind == LayerKind.Raster ? layer.RasterY : 0;
+        var evaluated = Evaluate(source, layer.Effects, originX, originY);
+        if (layer.Mask is { } mask) evaluated = ApplyMask(evaluated, mask);
         using var bitmap = Bitmap(evaluated.Pixels);
         using var image = SKImage.FromBitmap(bitmap);
         canvas.Save();
@@ -145,9 +195,9 @@ public sealed class SkiaRenderer : IRasterBackend
 
     private static bool ProcessesPixels(Effect effect) => effect.Enabled && effect.Kind != EffectKind.BlendMode;
 
-    private Frame Evaluate(Pixels source, Effect[] effects)
+    private Frame Evaluate(Pixels source, Effect[] effects, int x = 0, int y = 0)
     {
-        if (!effects.Any(ProcessesPixels)) return new(source);
+        if (!effects.Any(ProcessesPixels)) return new(source, x, y);
         var cache = evaluations.GetOrCreateValue(source);
         lock (cache)
         {
@@ -155,10 +205,10 @@ public sealed class SkiaRenderer : IRasterBackend
             foreach (var effect in effects)
             {
                 if (!ProcessesPixels(effect)) continue;
-                var node = cache.Nodes.Find(item => item.Effect == effect && ReferenceEquals(item.Input, input));
+                var node = cache.Nodes.Find(item => item.Effect == effect && ReferenceEquals(item.Input, input) && item.X == x && item.Y == y);
                 if (node is null)
                 {
-                    node = new Evaluation(ApplyEffect(input?.Frame ?? new Frame(source), effect), effect, input);
+                    node = new Evaluation(ApplyEffect(input?.Frame ?? new Frame(source, x, y), effect), effect, input, x, y);
                     cache.Nodes.Add(node);
                 }
                 input = node;
@@ -172,7 +222,7 @@ public sealed class SkiaRenderer : IRasterBackend
                 if (size <= budget)
                     for (var node = input; node is not null; node = node.Input) cache.Nodes.Add(node);
             }
-            return input?.Frame ?? new Frame(source);
+            return input?.Frame ?? new Frame(source, x, y);
         }
     }
 
@@ -286,12 +336,107 @@ public sealed class SkiaRenderer : IRasterBackend
         return new Frame(Unpremultiply(output), frame.X - padding, frame.Y - padding);
     }
 
-    public Pixels Stroke(Document doc, Layer layer, StrokeArgs stroke)
+    private static Frame ApplyMask(Frame frame, AlphaMask mask)
+    {
+        var source = frame.Pixels;
+        var bytes = (byte[])source.Rgba.Clone();
+        for (int y = Math.Max(0, -frame.Y); y < Math.Min(source.Height, mask.Height - frame.Y); y++)
+        for (int x = Math.Max(0, -frame.X); x < Math.Min(source.Width, mask.Width - frame.X); x++)
+        {
+            int i = (y * source.Width + x) * 4 + 3;
+            bytes[i] = (byte)((bytes[i] * mask.Alpha[(y + frame.Y) * mask.Width + x + frame.X] + 127) / 255);
+        }
+        return frame with { Pixels = source with { Rgba = bytes } };
+    }
+
+    private static Pixels MaskPixels(AlphaMask mask)
+    {
+        var rgba = new byte[mask.Alpha.Length * 4];
+        for (int i = 0; i < mask.Alpha.Length; i++) rgba[i * 4 + 3] = mask.Alpha[i];
+        return new(mask.Width, mask.Height, rgba);
+    }
+
+    public AlphaMask PaintMask(Document doc, Layer layer, StrokeArgs stroke)
+    {
+        var mask = layer.Mask!;
+        var bytes = new byte[mask.Alpha.Length * 4];
+        for (int i = 0; i < mask.Alpha.Length; i++)
+        {
+            int p = i * 4;
+            bytes[p] = bytes[p + 1] = bytes[p + 2] = mask.Alpha[i];
+            bytes[p + 3] = 255;
+        }
+        var painted = Stroke(doc, layer with { Pixels = new(mask.Width, mask.Height, bytes), RasterX = 0, RasterY = 0 },
+            stroke.Erase ? stroke with { Color = "#FF000000", Erase = false } : stroke, mask: true);
+        var alpha = new byte[mask.Alpha.Length];
+        for (int i = 0; i < alpha.Length; i++)
+        {
+            int p = i * 4;
+            alpha[i] = (byte)((54 * painted.Rgba[p] + 183 * painted.Rgba[p + 1] + 19 * painted.Rgba[p + 2] + 128) / 256);
+        }
+        return mask with { Alpha = alpha };
+    }
+
+    public RasterEdit EditSelection(Document doc, Layer layer, Area selection, PointD? delta)
+    {
+        var source = layer.Pixels!;
+        var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
+        if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
+        var offset = delta is { } motion ? inverse.MapVector((float)motion.X, (float)motion.Y) : default;
+        int dx = checked((int)Math.Round(offset.X)), dy = checked((int)Math.Round(offset.Y));
+        int left = layer.RasterX, top = layer.RasterY, right = left + source.Width, bottom = top + source.Height;
+        var selected = new BitArray(source.Width * source.Height);
+        bool hasPixels = false;
+        for (int y = 0; y < source.Height; y++)
+        for (int x = 0; x < source.Width; x++)
+        {
+            int index = (y * source.Width + x) * 4;
+            if (source.Rgba[index + 3] == 0) continue;
+            int lx = x + layer.RasterX, ly = y + layer.RasterY;
+            var p = world.MapPoint(lx + .5f, ly + .5f);
+            if (p.X < selection.X || p.Y < selection.Y || p.X >= selection.X + selection.Width || p.Y >= selection.Y + selection.Height) continue;
+            selected[index / 4] = true;
+            hasPixels = true;
+            left = Math.Min(left, lx + dx);
+            top = Math.Min(top, ly + dy);
+            right = Math.Max(right, lx + dx + 1);
+            bottom = Math.Max(bottom, ly + dy + 1);
+        }
+        if (!hasPixels || (delta is not null && dx == 0 && dy == 0))
+            return new(source, layer.RasterX, layer.RasterY);
+        int width = right - left, height = bottom - top;
+        Format.Dimensions(width, height);
+        var rgba = new byte[width * height * 4];
+        int Index(int x, int y) => ((y - top) * width + x - left) * 4;
+        for (int y = 0; y < source.Height; y++)
+            Buffer.BlockCopy(source.Rgba, y * source.Width * 4, rgba, Index(layer.RasterX, layer.RasterY + y), source.Width * 4);
+        for (int i = 0; i < selected.Length; i++)
+            if (selected[i]) Array.Clear(rgba, Index(layer.RasterX + i % source.Width, layer.RasterY + i / source.Width), 4);
+        if (delta is not null)
+            for (int i = 0; i < selected.Length; i++)
+            {
+                if (!selected[i]) continue;
+                int destination = Index(layer.RasterX + i % source.Width + dx, layer.RasterY + i / source.Width + dy);
+                int pixel = i * 4;
+                double alpha = source.Rgba[pixel + 3] / 255.0;
+                double retained = rgba[destination + 3] / 255.0 * (1 - alpha);
+                double output = alpha + retained;
+                for (int c = 0; c < 3; c++)
+                    rgba[destination + c] = Mix(rgba[destination + c], source.Rgba[pixel + c], retained, alpha, output);
+                rgba[destination + 3] = Byte(output);
+            }
+        return new(new(width, height, rgba), left, top);
+    }
+
+    public Pixels Stroke(Document doc, Layer layer, StrokeArgs stroke) => Stroke(doc, layer, stroke, mask: false);
+
+    private Pixels Stroke(Document doc, Layer layer, StrokeArgs stroke, bool mask)
     {
         int width = layer.Pixels?.Width ?? layer.Width;
         int height = layer.Pixels?.Height ?? layer.Height;
         var bytes = layer.Pixels is { } source ? (byte[])source.Rgba.Clone() : new byte[width * height * 4];
-        var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
+        var world = FindMatrix(doc.Layers, layer.Id, SKMatrix.Identity, SKMatrix.Identity, !mask) ?? SKMatrix.Identity;
+        world = SKMatrix.Concat(world, SKMatrix.CreateTranslation(layer.RasterX, layer.RasterY));
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
         double radius = stroke.Size / 2;
         uint color = Format.Color(stroke.Color);
@@ -365,9 +510,9 @@ public sealed class SkiaRenderer : IRasterBackend
 
     /// <summary>Maps source coordinates onto the canvas for transformed brush strokes.</summary>
     public static SKMatrix? WorldMatrix(IEnumerable<Layer> layers, string id, SKMatrix parent) =>
-        FindMatrix(layers, id, parent, SKMatrix.Identity);
+        FindMatrix(layers, id, parent, SKMatrix.Identity, true);
 
-    private static SKMatrix? FindMatrix(IEnumerable<Layer> layers, string id, SKMatrix parent, SKMatrix outerEffects)
+    private static SKMatrix? FindMatrix(IEnumerable<Layer> layers, string id, SKMatrix parent, SKMatrix outerEffects, bool includeTargetEffects)
     {
         foreach (var layer in layers)
         {
@@ -380,10 +525,10 @@ public sealed class SkiaRenderer : IRasterBackend
             if (layer.Kind == LayerKind.Group)
             {
                 var output = SKMatrix.Concat(outerEffects, effects);
-                if (layer.Id == id) return SKMatrix.Concat(output, native);
-                if (FindMatrix(layer.Children, id, native, output) is { } child) return child;
+                if (layer.Id == id) return SKMatrix.Concat(includeTargetEffects ? output : outerEffects, native);
+                if (FindMatrix(layer.Children, id, native, output, includeTargetEffects) is { } child) return child;
             }
-            else if (layer.Id == id) return SKMatrix.Concat(outerEffects, SKMatrix.Concat(native, effects));
+            else if (layer.Id == id) return SKMatrix.Concat(outerEffects, SKMatrix.Concat(native, includeTargetEffects ? effects : SKMatrix.Identity));
         }
         return null;
     }

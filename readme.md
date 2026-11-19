@@ -4,7 +4,9 @@ CHOP is a Windows desktop editor for layered RGBA images with editable operation
 
 ## Build and run
 
-Install the .NET 10 SDK. On Windows, open `CHOP.slnx` or run these commands from the repository root.
+Install the .NET 10 SDK. On Windows, open `CHOP.slnx` in Visual Studio, select **CHOP Desktop** in the startup dropdown, and press **F5**. If Visual Studio has remembered a different startup project, right-click **PhotoChop** in Solution Explorer and choose **Set as Startup Project**. The `CHOP.CLI` console project requires a script argument.
+
+You can also run these commands from the repository root.
 
 ```sh
 dotnet build CHOP.slnx
@@ -16,11 +18,13 @@ The solution also cross-builds on Linux. Run the WPF application on Windows with
 
 ## Desktop workflow
 
-Create a document with **File → New**. The default is 1920 × 1080 with a transparent background. A document can start with a solid color entered as `#AARRGGBB`. **Image → Default document size** saves a new default. Import a PNG with **File → Import PNG**, or use **Layer → New raster layer** to paint on an empty layer.
+Create a document with **File → New**. Set width and height in pixels, inches, or millimeters, and resolution in pixels/inch or pixels/cm. CHOP converts physical sizes to pixels and records the resolution in native saves and PNG exports. New documents start with **Group 1** containing **Layer 1**. Import a PNG with **File → Import PNG** to add a raster layer, or to open the PNG as a new document when no document is open.
 
-The Layers panel lists the topmost layer first. Drag to reorder, hold Shift while dropping on a group to put the layer inside it, and use Ctrl or Shift to select multiple layers for grouping and merging. Properties edits the selected layer's visibility, lock, opacity, blend, transform, text, shape fill, and effects. Merge and flatten bake a composite onto a raster layer after confirmation. Merging requires adjacent sibling layers and can change blends that depend on the backdrop outside that selection. Ungroup requires a visible group with default transform, normal blending, full opacity, and an empty effects stack.
+The Layers panel lists the topmost layer first. Drop near a row edge to reorder or on the center of a group to move a layer into it. Drop onto a row outside the group to move a layer out. Click the group triangle to expand or collapse it. The eye toggles visibility and the lock prevents editing. Opacity and blend mode are above the list. Double-click a layer or group to rename it and edit its effects. **Edit** contains transform, text, and shape commands for the selected item. **Image → Adjustments** contains brightness/contrast, hue/saturation, and opacity. Use **Filter** for grayscale and Gaussian blur.
 
-Use the tools on the left and adjust brush or shape options above the canvas. Colors accept `#AARRGGBB`. A brush or move gesture records a single completed command. Crop changes the canvas bounds, leaving source pixels in the editable layers. Effect rows run top to bottom. The last enabled blend override determines how the result blends with layers underneath. Transform effects run in order within the stack, before the layer's native transform for raster, text, and shape layers. Groups composite their children as an isolated surface before group effects.
+**Mask** adds a white mask to the selected layer or group. Click the row's mask control to switch between editing the mask and editing the layer. Paint black or use Eraser to hide pixels. Paint white to reveal them. Intermediate values give partial opacity. A group mask applies to the composite of all children. Merge and flatten bake a composite onto a raster layer after confirmation. Merging requires adjacent sibling layers and can change blends that depend on the backdrop. Ungroup requires a visible group with default transform, normal blending, full opacity, and no effects or mask.
+
+Use the tools on the left and adjust brush or shape options above the canvas. Set foreground and background colors at the foot of the Tools panel using `#AARRGGBB`. With the Selection tool, drag inside the selection to move its outline. With the Move tool, drag inside it to move selected raster pixels. Delete clears selected raster pixels. A gesture records a single completed command.
 
 Drag a panel header to a docking target or outside the main window to float it. Drag tabs to rearrange them. Use the pin control to auto-hide a docked panel and **Window** to show hidden panels or reset the docking layout. Layout and preferences are stored under the current user's local application data in `CHOP`.
 
@@ -33,6 +37,9 @@ Open [the editable sample](examples/phase-one.chop) from the File menu to try te
 | Ctrl+W | Close document |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
 | Ctrl+D | Deselect |
+| Ctrl+G | Group selected layers |
+| Delete | Clear selected raster pixels |
+| X | Swap foreground and background |
 | Ctrl++ / Ctrl+- or mouse wheel | Zoom |
 | Ctrl+0 / Ctrl+1 | Fit / 100% physical pixels |
 | Middle drag or Space + left drag | Pan |
@@ -58,6 +65,6 @@ The script is a JSON array of command objects with `name`, optional `target` (a 
 - `PhotoChop.csproj` builds the `CHOP.Desktop` WPF application. The desktop and `CHOP.CLI` share the command dispatcher and renderer.
 - `CHOP.Tests` covers command validation, editing, rendering, native persistence, and CLI replay.
 
-A `.chop` file is a ZIP container with a version 1 `manifest.json` and embedded `pixels/<layer-id>.rgba` resources. The manifest specifies sRGB canvas dimensions, document ID and metadata, layer order and hierarchy, content and parameters, and resource dimensions and relative entry paths. Pixel resources use row-major straight-alpha RGBA8. Saving writes a sibling temporary file and replaces the destination after the ZIP is complete.
+A `.chop` file is a ZIP container with a version 2 `manifest.json` and embedded `pixels/<layer-id>.rgba` and optional `masks/<layer-id>.alpha` resources. CHOP also opens version 1 files. The manifest specifies sRGB canvas dimensions, document ID and metadata, layer order and hierarchy, content and parameters, and resource dimensions and relative entry paths. Pixel resources use row-major straight-alpha RGBA8. Saving writes a sibling temporary file and replaces the destination after the ZIP is complete.
 
-Phase 1 uses CPU compositing, rectangular selections, and raster snapshots for paint undo. History retains up to 250 states with a 384 MiB shared raster budget, plus the latest state. Complex transformed effects must fit the renderer's image size limits. Editable text uses the bundled Liberation Sans by default. Other fonts depend on what is installed on the rendering machine. Layer masks are reserved for a later format revision.
+Phase 1 uses CPU compositing, rectangular selections, and raster snapshots for paint undo. History retains up to 250 states with a 384 MiB shared raster budget, plus the latest state. Complex transformed effects must fit the renderer's image size limits. Editable text uses the bundled Liberation Sans by default. Other fonts depend on what is installed on the rendering machine.

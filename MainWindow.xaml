@@ -5,6 +5,27 @@
         Title="CHOP" Width="1440" Height="900" MinWidth="820" MinHeight="520"
         Background="#191B20" Foreground="#E5E8EE"
         PreviewKeyDown="OnKey" Loaded="OnLoaded" Closing="OnClosing">
+    <Window.Resources>
+        <DataTemplate x:Key="LayerRowTemplate">
+            <DockPanel Margin="0,1">
+                <Button DockPanel.Dock="Left" Click="ToggleRowVisibility" ToolTip="Toggle visibility" Padding="4,1" Margin="0,0,3,0">
+                    <Grid Width="16" Height="12">
+                        <Path Data="M 1,6 Q 8,-3 15,6 Q 8,15 1,6 Z M 8,3 A 3,3 0 1 1 7.99,3" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+                        <Line X1="1" Y1="1" X2="15" Y2="11" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              Visibility="{Binding HiddenEye}" StrokeThickness="1.5" />
+                    </Grid>
+                </Button>
+                <Button DockPanel.Dock="Right" Click="ToggleRowLock" ToolTip="Toggle lock" Padding="4,1" Margin="3,0,0,0">
+                    <TextBlock Text="{Binding LockGlyph}" FontFamily="Segoe MDL2 Assets" />
+                </Button>
+                <Button DockPanel.Dock="Right" Click="ToggleRowMask" ToolTip="Select layer mask for painting" Padding="4,1"
+                        Content="{Binding MaskLabel}" Visibility="{Binding MaskVisibility}" />
+                <Button DockPanel.Dock="Left" Click="ToggleRowGroup" ToolTip="Expand or collapse group" Padding="3,1" Margin="{Binding Indent}"
+                        Content="{Binding GroupGlyph}" Visibility="{Binding GroupVisibility}" />
+                <TextBlock Text="{Binding Layer.Name}" Margin="{Binding NameIndent}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            </DockPanel>
+        </DataTemplate>
+    </Window.Resources>
     <DockPanel>
         <Menu x:Name="Menus" DockPanel.Dock="Top" />
         <Border DockPanel.Dock="Top" Background="#242730" Padding="8,5">

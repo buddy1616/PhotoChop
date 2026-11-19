@@ -25,6 +25,91 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void NewDesktopDocumentHasOneStarterGroupAndPreservesPrintResolution()
+    {
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("print", 32, 24, "#FF0044FF", 300, true)));
+        var group = Assert.Single(engine.Current!.Layers);
+        var raster = Assert.Single(group.Children);
+        Assert.Equal("Group 1", group.Name);
+        Assert.Equal("Layer 1", raster.Name);
+        Assert.False(raster.Locked);
+        Assert.Equal(new byte[] { 0, 68, 255, 255 }, Composite(engine)[..4]);
+
+        string path = Path.Combine(folder, "print.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        Assert.Equal(300, ProjectFile.Open(path).PixelsPerInch);
+        var png = renderer.EncodePng(renderer.Composite(engine.Current), engine.Current.PixelsPerInch);
+        Assert.Equal("pHYs", System.Text.Encoding.ASCII.GetString(png, 37, 4));
+        Assert.Equal(11811, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(41)));
+        Assert.Equal(Composite(engine), renderer.DecodePng(png).Rgba);
+    }
+
+    [Fact]
+    public void SelectionMoveMovesOnlySelectedPixelsOutsideOriginalRasterBoundsAndClearsWithUndo()
+    {
+        var engine = NewEngine(8, 6);
+        var png = renderer.EncodePng(new Pixels(2, 1, [255, 0, 0, 255, 0, 255, 0, 255]));
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("photo", "Imported PNG", png)));
+        engine.Execute(Command.Of("layer.transform", new Transform(2, 1), "photo"));
+        engine.Execute(Command.Of("document.selection", new Area(2, 1, 1, 1)));
+        var initial = Composite(engine);
+        engine.Execute(Command.Of("layer.moveSelection", new PointD(-2, 2), "photo"));
+        var moved = Composite(engine);
+        int At(int x, int y) => (y * 8 + x) * 4;
+        Assert.Equal(new byte[4], moved[At(2, 1)..(At(2, 1) + 4)]);
+        Assert.Equal(new byte[] { 0, 255, 0, 255 }, moved[At(3, 1)..(At(3, 1) + 4)]);
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, moved[At(0, 3)..(At(0, 3) + 4)]);
+        Assert.Equal(new Area(0, 3, 1, 1), engine.Current!.Selection);
+        engine.Execute(Command.Of("layer.clearSelection", 0, "photo"));
+        Assert.Equal(0, Composite(engine)[At(0, 3) + 3]);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(moved, Composite(engine));
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(initial, Composite(engine));
+    }
+
+    [Fact]
+    public void GroupAndLayerMasksMultiplyOpacityAndRoundTripWithOriginalPixels()
+    {
+        var engine = NewEngine(12, 10);
+        Layer(engine, new("g", "Group", LayerKind.Group, Transform: new(2, 1)));
+        Layer(engine, new("a", "Red", LayerKind.Rectangle, Parent: "g", Color: "#FFFF0000", Width: 4, Height: 4));
+        Layer(engine, new("b", "Blue", LayerKind.Rectangle, Parent: "g", Color: "#FF0000FF", Transform: new(4, 0), Width: 4, Height: 4));
+        engine.Execute(Command.Of("mask.add", 0, "g"));
+        engine.Execute(Command.Of("mask.add", 0, "a"));
+        var erase = new StrokeArgs([new(5.5, 2.5)], 8, 1, .5, "#FF000000", true);
+        engine.Execute(Command.Of("mask.paintStroke", erase, "g"));
+        engine.Execute(Command.Of("mask.paintStroke", erase with { Points = [new(3.5, 2.5)] }, "a"));
+        var pixels = Composite(engine);
+        Assert.InRange(pixels[(2 * 12 + 3) * 4 + 3], 62, 65);
+        Assert.InRange(pixels[(2 * 12 + 7) * 4 + 3], 126, 129);
+        string path = Path.Combine(folder, "masked.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        var opened = ProjectFile.Open(path);
+        Assert.Equal(pixels, renderer.Composite(opened).Rgba);
+        Assert.Equal("#FFFF0000", opened.Layers[0].Children[0].Color);
+        engine.Execute(Command.Of("mask.remove", 0, "g"));
+        Assert.Equal(255, Composite(engine)[(2 * 12 + 7) * 4 + 3]);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(pixels, Composite(engine));
+    }
+
+    [Fact]
+    public void GroupAtAnchorMovesLayersFromDifferentParentsIntoAnchorsLevel()
+    {
+        var engine = NewEngine();
+        Layer(engine, new("g", "Group 1", LayerKind.Group));
+        Layer(engine, new("a", "Nested", LayerKind.Raster, Parent: "g"));
+        Layer(engine, new("b", "Root", LayerKind.Raster));
+        engine.Execute(Command.Of("layer.group", new GroupArgs("nested", "Group 2", ["b", "a"], "a")));
+        var parent = Assert.Single(engine.Current!.Layers);
+        var grouped = Assert.Single(parent.Children);
+        Assert.Equal("nested", grouped.Id);
+        Assert.Equal(new[] { "a", "b" }, grouped.Children.Select(layer => layer.Id));
+    }
+
+    [Fact]
     public void NativeRoundTripRetainsEditableHierarchyAndExactSourcePixels()
     {
         string path = Path.Combine(folder, "layers.chop");

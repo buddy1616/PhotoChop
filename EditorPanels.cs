@@ -12,12 +12,20 @@ namespace PhotoChop;
 
 public partial class MainWindow
 {
-    private sealed record LayerRow(Layer Layer, string? Parent, int Depth)
+    private sealed record LayerRow(Layer Layer, string? Parent, int Depth, bool Collapsed, bool EditingMask)
     {
-        public override string ToString() =>
-            new string(' ', Depth * 4) + (Layer.Visible ? "● " : "○ ") + (Layer.Locked ? "▣ " : "") +
-            (Layer.Kind == LayerKind.Group ? "▾ " : "") + Layer.Name;
+        public Visibility HiddenEye => Layer.Visible ? Visibility.Collapsed : Visibility.Visible;
+        public Visibility GroupVisibility => Layer.Kind == LayerKind.Group ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility MaskVisibility => Layer.Mask is null ? Visibility.Collapsed : Visibility.Visible;
+        public string GroupGlyph => Collapsed ? "▸" : "▾";
+        public string LockGlyph => Layer.Locked ? "\uE72E" : "\uE785";
+        public string MaskLabel => EditingMask ? "▣ Mask" : "□ Mask";
+        public Thickness Indent => new(Depth * 13, 0, 3, 0);
+        public Thickness NameIndent => Layer.Kind == LayerKind.Group ? new(2, 0, 0, 0) : new(Depth * 13 + 16, 0, 0, 0);
     }
+    private StackPanel? effectEditor;
+    private Window? effectDialog;
+
     private sealed record LogRow(LogEntry Entry)
     {
         public override string ToString()
@@ -47,54 +55,66 @@ public partial class MainWindow
     private void BuildPanels()
     {
         var layerButtons = new WrapPanel { Margin = new Thickness(5) };
-        layerButtons.Children.Add(Button("+ Raster", () => CreateLayer(LayerKind.Raster)));
-        layerButtons.Children.Add(Button("Duplicate", Duplicate));
+        layerButtons.Children.Add(Button("New Raster Layer", () => CreateLayer(LayerKind.Raster)));
+        layerButtons.Children.Add(Button("Mask", AddOrSelectMask, "Add a white mask or select it for painting"));
         layerButtons.Children.Add(Button("Rename", Rename));
-        layerButtons.Children.Add(Button("Delete", DeleteLayer));
-        DockPanel.SetDock(layerButtons, System.Windows.Controls.Dock.Top);
+        layerButtons.Children.Add(Button("Duplicate", Duplicate));
+        layerButtons.Children.Add(Button("Delete Layer", DeleteLayer));
+        DockPanel.SetDock(properties, System.Windows.Controls.Dock.Top);
+        DockPanel.SetDock(layerButtons, System.Windows.Controls.Dock.Bottom);
+        layersPanel.Children.Add(properties);
         layersPanel.Children.Add(layerButtons);
+        layers.ItemTemplate = (DataTemplate)FindResource("LayerRowTemplate");
+        var itemStyle = new Style(typeof(ListBoxItem));
+        itemStyle.Setters.Add(new Setter(HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch));
+        layers.ItemContainerStyle = itemStyle;
         layersPanel.Children.Add(layers);
-        layers.SelectionChanged += (_, _) =>
+        layers.SelectionChanged += (_, e) =>
         {
             if (syncing || active is null) return;
-            active.ActiveId = (layers.SelectedItem as LayerRow)?.Layer.Id;
+            active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
+            if (active.MaskTarget != active.ActiveId) active.MaskTarget = null;
             RefreshProperties();
             Say();
         };
-        layers.MouseDoubleClick += (_, _) => Rename();
+        layers.MouseDoubleClick += (_, e) =>
+        {
+            if (RowAt(e.OriginalSource) is null || IsButton(e.OriginalSource)) return;
+            Rename();
+            e.Handled = true;
+        };
         layers.PreviewMouseLeftButtonDown += (_, e) =>
         {
             layerDragStart = e.GetPosition(layers);
-            layerDrag = RowAt(e.OriginalSource);
+            layerDrag = IsButton(e.OriginalSource) ? null : RowAt(e.OriginalSource);
         };
         layers.PreviewMouseMove += (_, e) =>
         {
             if (layerDrag is not { } row || e.LeftButton != MouseButtonState.Pressed ||
-                (e.GetPosition(layers) - layerDragStart).Length < 6) return;
+                (e.GetPosition(layers) - layerDragStart).Length < SystemParameters.MinimumVerticalDragDistance) return;
             layerDrag = null;
             DragDrop.DoDragDrop(layers, new DataObject(typeof(LayerRow), row), DragDropEffects.Move);
         };
         layers.DragOver += (_, e) =>
         {
-            e.Effects = e.Data.GetDataPresent(typeof(LayerRow)) ? DragDropEffects.Move : DragDropEffects.None;
+            e.Effects = e.Data.GetDataPresent(typeof(LayerRow)) && RowAt(e.OriginalSource)?.Layer.Id !=
+                (e.Data.GetData(typeof(LayerRow)) as LayerRow)?.Layer.Id ? DragDropEffects.Move : DragDropEffects.None;
             e.Handled = true;
         };
         layers.Drop += (_, e) =>
         {
-            if (e.Data.GetData(typeof(LayerRow)) is not LayerRow source) return;
+            if (active is null || e.Data.GetData(typeof(LayerRow)) is not LayerRow source) return;
             var target = RowAt(e.OriginalSource);
             if (target?.Layer.Id == source.Layer.Id) return;
-            if (target?.Layer.Kind == LayerKind.Group && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
-                Run("layer.reorder", new ReorderArgs(target.Layer.Id, null), source.Layer.Id, source.Layer.Id);
-            else
-            {
-                // The panel displays topmost first, the model stores bottommost first.
-                // Insert after the target in model order to display above it.
-                var all = layers.Items.Cast<LayerRow>().Where(item => item.Parent == target?.Parent).ToArray();
-                string? before = target is null ? all.LastOrDefault()?.Layer.Id
-                    : all.TakeWhile(item => item.Layer.Id != target.Layer.Id).LastOrDefault()?.Layer.Id;
-                Run("layer.reorder", new ReorderArgs(target?.Parent, before), source.Layer.Id, source.Layer.Id);
-            }
+            var item = target is null ? null : layers.ItemContainerGenerator.ContainerFromItem(target) as ListBoxItem;
+            double fraction = item is null || item.ActualHeight == 0 ? 1 : e.GetPosition(item).Y / item.ActualHeight;
+            bool intoGroup = target?.Layer.Kind == LayerKind.Group && fraction > .25 && fraction < .75;
+            string? parent = intoGroup ? target!.Layer.Id : target?.Parent;
+            var siblings = layers.Items.Cast<LayerRow>().Where(row => row.Parent == parent && row.Layer.Id != source.Layer.Id).ToArray();
+            string? before = intoGroup ? null : target is null ? siblings.LastOrDefault()?.Layer.Id :
+                fraction >= .5 ? target.Layer.Id : siblings.TakeWhile(row => row.Layer.Id != target.Layer.Id).LastOrDefault()?.Layer.Id;
+            if (intoGroup) active.Collapsed.Remove(parent!);
+            Run("layer.reorder", new ReorderArgs(parent, before), source.Layer.Id, source.Layer.Id);
             e.Handled = true;
         };
 
@@ -122,11 +142,65 @@ public partial class MainWindow
         logPanel.Children.Add(logActions);
         commandLog.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
         logPanel.Children.Add(commandLog);
-        panelContent.Add("Tools", new ScrollViewer { Content = toolsPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        var toolDock = new DockPanel();
+        DockPanel.SetDock(toolColors, System.Windows.Controls.Dock.Bottom);
+        toolDock.Children.Add(toolColors);
+        toolDock.Children.Add(new ScrollViewer { Content = toolsPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        panelContent.Add("Tools", toolDock);
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("History", history);
-        panelContent.Add("Properties", new ScrollViewer { Content = properties, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         panelContent.Add("Command Log", logPanel);
+    }
+
+    private static bool IsButton(object original)
+    {
+        for (var element = original as DependencyObject; element is Visual; element = VisualTreeHelper.GetParent(element))
+            if (element is ButtonBase) return true;
+        return false;
+    }
+
+    private void ToggleRowVisibility(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: LayerRow row })
+            Run("layer.visibility", !row.Layer.Visible, row.Layer.Id);
+    }
+
+    private void ToggleRowLock(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: LayerRow row })
+            Run("layer.lock", !row.Layer.Locked, row.Layer.Id);
+    }
+
+    private void ToggleRowGroup(object sender, RoutedEventArgs e)
+    {
+        if (active is null || sender is not FrameworkElement { DataContext: LayerRow row }) return;
+        if (!active.Collapsed.Add(row.Layer.Id)) active.Collapsed.Remove(row.Layer.Id);
+        else if (active.ActiveId is { } selected && !Rows(active.Engine.Current!.Layers, null, 0).Any(item => item.Layer.Id == selected))
+            active.ActiveId = row.Layer.Id;
+        Refresh();
+    }
+
+    private void ToggleRowMask(object sender, RoutedEventArgs e)
+    {
+        if (active is null || sender is not FrameworkElement { DataContext: LayerRow row }) return;
+        active.ActiveId = row.Layer.Id;
+        active.MaskTarget = active.MaskTarget == row.Layer.Id ? null : row.Layer.Id;
+        Refresh();
+    }
+
+    private void AddOrSelectMask()
+    {
+        if (active is null || ActiveLayer() is not { } layer) return;
+        if (layer.Mask is null && !Run("mask.add", 0, layer.Id)) return;
+        active.MaskTarget = layer.Id;
+        Refresh();
+    }
+
+    private string? DestinationGroup()
+    {
+        if (ActiveLayer() is not { } layer || active?.Engine.Current is not { } doc) return null;
+        return layer.Kind == LayerKind.Group ? layer.Id :
+            doc.AllLayers().FirstOrDefault(group => group.Children.Any(child => child.Id == layer.Id))?.Id;
     }
 
     private LayerRow? RowAt(object original) => original is DependencyObject element &&
@@ -147,12 +221,14 @@ public partial class MainWindow
             foreach (var row in rows.Where(row => row != selected && selection.Contains(row.Layer.Id))) layers.SelectedItems.Add(row);
     }
 
-    private static IEnumerable<LayerRow> Rows(IEnumerable<Layer> items, string? parent, int depth)
+    private IEnumerable<LayerRow> Rows(IEnumerable<Layer> items, string? parent, int depth)
     {
         foreach (var layer in items.Reverse())
         {
-            yield return new(layer, parent, depth);
-            foreach (var child in Rows(layer.Children, layer.Id, depth + 1)) yield return child;
+            bool collapsed = active?.Collapsed.Contains(layer.Id) == true;
+            yield return new(layer, parent, depth, collapsed, active?.MaskTarget == layer.Id);
+            if (!collapsed)
+                foreach (var child in Rows(layer.Children, layer.Id, depth + 1)) yield return child;
         }
     }
 
@@ -172,7 +248,20 @@ public partial class MainWindow
             if (!Guard(() => size = Number(input[2]))) return;
             (text, font, color) = (input[0], input[1], input[3]);
         }
-        Run("layer.create", new LayerArgs(id, kind.ToString(), kind, Transform: new(origin.X, origin.Y),
+        string? parent = DestinationGroup();
+        if (active?.Engine.Current is not { } doc) return;
+        if (parent is not null)
+        {
+            active.Collapsed.Remove(parent);
+            if (point is not null && Chop.Rendering.SkiaRenderer.WorldMatrix(doc.Layers, parent, SkiaSharp.SKMatrix.Identity) is { } matrix &&
+                matrix.TryInvert(out var inverse))
+            {
+                var local = inverse.MapPoint((float)origin.X, (float)origin.Y);
+                origin = new(local.X, local.Y);
+            }
+        }
+        string name = kind == LayerKind.Raster ? NextLayerName("Layer") : kind.ToString();
+        Run("layer.create", new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
             Width: width, Height: height, Text: text, Font: font, Size: size, Color: color), selectId: id);
     }
 
@@ -186,8 +275,38 @@ public partial class MainWindow
     private void Rename()
     {
         if (ActiveLayer() is not { } layer) return;
-        var values = Form("Rename layer", ("Name", layer.Name));
-        if (values is not null) RunLayer("layer.rename", values[0]);
+        var dialog = new Window { Owner = this, Title = "Layer name and effects", Width = 440, Height = 480,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
+        var shell = new DockPanel { Margin = new Thickness(14) };
+        var header = new StackPanel();
+        var name = new TextBox { Text = layer.Name, Margin = new Thickness(2, 2, 2, 6) };
+        header.Children.Add(new Label { Content = "Name", Target = name });
+        header.Children.Add(name);
+        var done = Button("Rename and close", () =>
+        {
+            if (name.Text == ActiveLayer()?.Name || Run("layer.rename", name.Text, layer.Id)) dialog.DialogResult = true;
+        });
+        done.IsDefault = true;
+        DockPanel.SetDock(header, System.Windows.Controls.Dock.Top);
+        DockPanel.SetDock(done, System.Windows.Controls.Dock.Bottom);
+        shell.Children.Add(header);
+        shell.Children.Add(done);
+        effectEditor = new StackPanel();
+        shell.Children.Add(new ScrollViewer { Content = effectEditor, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        dialog.Content = shell;
+        PopulateEffects(layer);
+        dialog.Loaded += (_, _) => { name.Focus(); name.SelectAll(); };
+        effectDialog = dialog;
+        try { dialog.ShowDialog(); }
+        finally { effectEditor = null; effectDialog = null; }
+    }
+
+    private string NextLayerName(string prefix)
+    {
+        var names = active?.Engine.Current?.AllLayers().Select(layer => layer.Name).ToHashSet() ?? [];
+        int number = 1;
+        while (names.Contains($"{prefix} {number}")) number++;
+        return $"{prefix} {number}";
     }
 
     private void DeleteLayer() => RunLayer("layer.delete", 0);
@@ -198,10 +317,8 @@ public partial class MainWindow
     {
         var ids = SelectedLayers();
         if (ids.Length == 0) return;
-        var values = Form("Group layers", ("Name", "Group"));
-        if (values is null) return;
         string id = Format.Id();
-        Run("layer.group", new GroupArgs(id, values[0], ids), selectId: id);
+        Run("layer.group", new GroupArgs(id, NextLayerName("Group"), ids, active?.ActiveId), selectId: id);
     }
 
     private void MoveToGroup()
@@ -252,16 +369,7 @@ public partial class MainWindow
             return;
         }
 
-        Caption(layer.Name);
-        var toggles = new WrapPanel();
-        var visible = new CheckBox { Content = "Visible", IsChecked = layer.Visible, Margin = new Thickness(2, 4, 10, 4) };
-        var locked = new CheckBox { Content = "Locked", IsChecked = layer.Locked, Margin = new Thickness(2, 4, 10, 4) };
-        visible.Click += (_, _) => RunLayer("layer.visibility", visible.IsChecked == true);
-        locked.Click += (_, _) => RunLayer("layer.lock", locked.IsChecked == true);
-        toggles.Children.Add(visible);
-        toggles.Children.Add(locked);
-        properties.Children.Add(toggles);
-
+        Caption(layer.Name + (active?.MaskTarget == layer.Id ? " · Mask selected" : ""));
         var modes = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = layer.Blend, Margin = new Thickness(2) };
         modes.SelectionChanged += (_, _) => { if (modes.SelectedItem is Blend blend) RunLayer("layer.blend", blend); };
         Caption("Blend mode");
@@ -276,18 +384,26 @@ public partial class MainWindow
             var values = Form("Layer opacity", ("Opacity (0–100)", (layer.Opacity * 100).ToString()));
             if (values is not null) Guard(() => RunLayer("layer.opacity", Number(values[0]) / 100));
         }));
-        properties.Children.Add(Button("Transform…", EditTransform));
-        if (layer.Kind == LayerKind.Text) properties.Children.Add(Button("Edit text…", EditText));
-        if (layer.Kind is LayerKind.Rectangle or LayerKind.Ellipse) properties.Children.Add(Button("Edit shape…", EditShape));
+        if (layer.Mask is not null)
+            properties.Children.Add(Button("Remove mask", () =>
+            {
+                if (Confirm("Remove this mask?")) RunLayer("mask.remove", 0);
+            }));
+        if (effectEditor is not null) PopulateEffects(layer);
+    }
 
-        Caption("Effects");
+    private void PopulateEffects(Layer layer)
+    {
+        if (effectEditor is not { } panel) return;
+        panel.Children.Clear();
+        panel.Children.Add(new TextBlock { Text = "Effects", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
         var effectKinds = new ComboBox { ItemsSource = Enum.GetValues<EffectKind>(), SelectedIndex = 0, Margin = new Thickness(2) };
         var add = Button("Add effect", () => { if (effectKinds.SelectedItem is EffectKind kind) AddEffect(kind); });
         var row = new DockPanel();
         DockPanel.SetDock(add, System.Windows.Controls.Dock.Right);
         row.Children.Add(add);
         row.Children.Add(effectKinds);
-        properties.Children.Add(row);
+        panel.Children.Add(row);
 
         for (int i = 0; i < layer.Effects.Length; i++)
         {
@@ -303,7 +419,7 @@ public partial class MainWindow
             if (i > 0) rowActions.Children.Add(Button("↑", () => RunLayer("effect.reorder", new EffectOrder(effect.Id, index - 1)), "Move effect up"));
             if (i + 1 < layer.Effects.Length) rowActions.Children.Add(Button("↓", () => RunLayer("effect.reorder", new EffectOrder(effect.Id, index + 1)), "Move effect down"));
             rowActions.Children.Add(Button("×", () => RunLayer("effect.remove", effect.Id), "Remove effect"));
-            properties.Children.Add(rowActions);
+            panel.Children.Add(rowActions);
         }
     }
 
@@ -373,7 +489,14 @@ public partial class MainWindow
             EffectKind.Opacity => [("Opacity multiplier (0 to 1)", effect.A.ToString())],
             _ => [("Blur sigma (0–100 px)", effect.A.ToString())]
         };
-        var v = Form(EffectName(effect.Kind), fields);
+        (double Min, double Max)[] ranges = effect.Kind switch
+        {
+            EffectKind.BrightnessContrast => [(-1, 1), (-1, 1)],
+            EffectKind.HueSaturation => [(-180, 180), (-1, 1)],
+            EffectKind.Opacity => [(0, 1)],
+            _ => [(0, 100)]
+        };
+        var v = BuildForm(EffectName(effect.Kind), fields, ranges);
         Effect? result = null;
         if (v is not null) Guard(() => result = effect with { A = Number(v[0]), B = v.Length == 2 ? Number(v[1]) : 0 });
         return result;
