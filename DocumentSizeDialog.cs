@@ -21,6 +21,7 @@ internal static class DocumentSizeDialog
             var row = new DockPanel { Margin = new Thickness(0, 4, 0, 6) };
             var unit = new ComboBox { ItemsSource = options, SelectedIndex = 0, MinWidth = 128, Margin = new Thickness(6, 0, 0, 0) };
             var input = new TextBox { Text = value, Padding = new Thickness(4) };
+            NumericWheel.Enable(input, 0);
             panel.Children.Add(new Label { Content = label, Target = input, Padding = new Thickness(0) });
             DockPanel.SetDock(unit, Dock.Right);
             row.Children.Add(unit);

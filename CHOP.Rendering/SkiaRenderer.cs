@@ -184,7 +184,7 @@ public sealed class SkiaRenderer : IRasterBackend
                 return;
             }
             if (!projection.TryInvert(out var inverse)) return;
-            var neutral = layer with { Transform = layer.Transform with { Warp = null }, Opacity = 1, Blend = Blend.Normal,
+            var neutral = layer with { Transform = layer.Transform with { Warp = null }, ImagePlacement = null, Opacity = 1, Blend = Blend.Normal,
                 Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() };
             var sourceBounds = SKRect.Create(region.X, region.Y, region.Width, region.Height);
             var visible = inverse.MapRect(SKRect.Create(region.X, region.Y, region.Width, region.Height));
@@ -294,8 +294,10 @@ public sealed class SkiaRenderer : IRasterBackend
         if (layer.Kind == LayerKind.Path)
         {
             var stroke = effects.FirstOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.Stroke);
-            if (stroke is null || RasterizePath(layer.Contours, stroke) is not { } vector) return null;
-            frame = Evaluate(vector.Pixels, effects.Where(effect => !ReferenceEquals(effect, stroke)).ToArray(), vector.X, vector.Y);
+            var fill = effects.FirstOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.PathFill);
+            if (RasterizePath(layer.Contours, stroke, fill) is not { } vector) return null;
+            frame = Evaluate(vector.Pixels, effects.Where(effect => !ReferenceEquals(effect, stroke) &&
+                effect.Kind != EffectKind.PathFill).ToArray(), vector.X, vector.Y);
         }
         else
         {
@@ -403,14 +405,15 @@ public sealed class SkiaRenderer : IRasterBackend
         return local.X >= 0 && local.Y >= 0 && local.X < text.Width && local.Y < text.Height;
     }
 
-    private static Frame? RasterizePath(PathContour[] contours, Effect stroke)
+    private static Frame? RasterizePath(PathContour[] contours, Effect? stroke, Effect? fill)
     {
+        if (stroke is null && fill is null) return null;
         using var closed = new SKPath { FillType = SKPathFillType.EvenOdd };
         using var open = new SKPath();
         bool anyClosed = false, anyOpen = false;
         foreach (var contour in contours)
         {
-            if (contour.Nodes.Length < 2) continue;
+            if (contour.Nodes.Length < 2 || (!contour.Closed && stroke is null)) continue;
             var builder = contour.Closed ? closed : open;
             if (contour.Closed) anyClosed = true; else anyOpen = true;
             var first = contour.Nodes[0].Point;
@@ -439,26 +442,35 @@ public sealed class SkiaRenderer : IRasterBackend
             range = new SKRect(Math.Min(range.Left, b.Left), Math.Min(range.Top, b.Top),
                 Math.Max(range.Right, b.Right), Math.Max(range.Bottom, b.Bottom));
         }
-        range.Inflate((float)stroke.A + 2, (float)stroke.A + 2);
+        float padding = (float)(stroke?.A ?? 0) + 2;
+        range.Inflate(padding, padding);
         var bounds = EnclosingPixels(range);
         using var bitmap = Surface(bounds.Width, bounds.Height);
         using var canvas = new SKCanvas(bitmap);
-        using var paint = new SKPaint
-        {
-            Color = new SKColor(Format.Color(stroke.Ink)), IsAntialias = true, Style = SKPaintStyle.Stroke,
-            StrokeWidth = (float)stroke.A, StrokeCap = SKStrokeCap.Round, StrokeJoin = SKStrokeJoin.Round
-        };
         canvas.Clear(SKColors.Transparent);
         canvas.Translate(-bounds.X, -bounds.Y);
-        if (anyOpen) canvas.DrawPath(open, paint);
-        if (anyClosed)
+        if (anyClosed && fill is not null)
         {
-            if (stroke.Alignment != StrokeAlignment.Center)
+            using var fillPaint = new SKPaint { Color = new SKColor(Format.Color(fill.Ink)), IsAntialias = true };
+            canvas.DrawPath(closed, fillPaint);
+        }
+        if (stroke is not null)
+        {
+            using var paint = new SKPaint
             {
-                canvas.ClipPath(closed, stroke.Alignment == StrokeAlignment.Inside ? SKClipOperation.Intersect : SKClipOperation.Difference, true);
-                paint.StrokeWidth *= 2;
+                Color = new SKColor(Format.Color(stroke.Ink)), IsAntialias = true, Style = SKPaintStyle.Stroke,
+                StrokeWidth = (float)stroke.A, StrokeCap = SKStrokeCap.Round, StrokeJoin = SKStrokeJoin.Round
+            };
+            if (anyOpen) canvas.DrawPath(open, paint);
+            if (anyClosed)
+            {
+                if (stroke.Alignment != StrokeAlignment.Center)
+                {
+                    canvas.ClipPath(closed, stroke.Alignment == StrokeAlignment.Inside ? SKClipOperation.Intersect : SKClipOperation.Difference, true);
+                    paint.StrokeWidth *= 2;
+                }
+                canvas.DrawPath(closed, paint);
             }
-            canvas.DrawPath(closed, paint);
         }
         canvas.Flush();
         return new Frame(Unpremultiply(bitmap), bounds.X, bounds.Y);

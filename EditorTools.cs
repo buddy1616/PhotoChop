@@ -101,6 +101,13 @@ public partial class MainWindow
             e.Handled = true;
             return;
         }
+        if (e.ChangedButton == MouseButton.Right && doc.Selection is not null &&
+            tool is "Selection" or "Lasso" or "Magic Wand")
+        {
+            ShowPathContext(doc, null);
+            e.Handled = true;
+            return;
+        }
         if (tool == "Move" && e.ChangedButton == MouseButton.Left && !Keyboard.IsKeyDown(Key.Space) && HitGuide(active, view) is { } guide)
         {
             BeginGuide(active, canvas, guide, existing: true);
@@ -513,7 +520,9 @@ public partial class MainWindow
     {
         "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" => ToolCursors.Eraser, "Masker" => ToolCursors.Masker,
         "Bucket" => ToolCursors.Bucket, "Pen" => Cursors.Pen, "Path Select" => Cursors.Arrow,
-        "Selection" or "Lasso" or "Magic Wand" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
+        "Magic Wand" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.WandSubtract :
+            Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.WandAdd : ToolCursors.Wand,
+        "Selection" or "Lasso" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.SelectionAdd : Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
         "Shape" => Cursors.SizeNESW, "Eyedropper" => ToolCursors.Eyedropper,
         "Transform" => Cursors.ScrollAll, _ => Cursors.Arrow
@@ -739,7 +748,7 @@ public partial class MainWindow
         {
             Key.C when !shift => CopyPixels, Key.V when !shift => PastePixels,
             Key.N => NewDocument, Key.O => OpenDocument, Key.S => () => Save(active, shift),
-            Key.E when shift => ExportPng, Key.W => () => CloseSession(active),
+            Key.E when shift => ExportPng, Key.E => MergeDown, Key.W => () => CloseSession(active),
             Key.Z => () => Run("history.undo", 0), Key.Y => () => Run("history.redo", 0),
             Key.D => () => Run<Area?>("document.selection", null),
             Key.G when !shift => Group,

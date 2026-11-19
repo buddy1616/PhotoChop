@@ -10,7 +10,7 @@ namespace PhotoChop;
 
 public partial class MainWindow
 {
-    private enum PathPart { Anchor, Incoming, Outgoing, Add, Extend }
+    private enum PathPart { Anchor, Incoming, Outgoing, Add, Extend, Close }
     private sealed record PathHit(Layer Layer, int Contour, int Node, PathPart Part);
     private sealed class PathDrag(EditorCanvas view, string id, SKMatrix world, PathContour[] original,
         int contour, int node, PathPart part, Point start, PointD localStart)
@@ -64,7 +64,7 @@ public partial class MainWindow
     private void CloseCurrentPath(string layerId, int contour)
     {
         var layer = active?.Engine.Current?.AllLayers().FirstOrDefault(item => item.Id == layerId);
-        if (layer is null || contour < 0 || contour >= layer.Contours.Length || layer.Contours[contour].Nodes.Length < 3) return;
+        if (layer is null || contour < 0 || contour >= layer.Contours.Length || layer.Contours[contour].Nodes.Length < 2) return;
         var updated = layer.Contours.ToArray();
         updated[contour] = updated[contour] with { Closed = true };
         EndCurrentPath();
@@ -183,9 +183,9 @@ public partial class MainWindow
             penContour >= 0 && penContour < drawingLayer.Contours.Length && !drawingLayer.Contours[penContour].Closed)
         {
             if (hit is { Part: PathPart.Anchor, Node: 0 } closing && closing.Layer.Id == drawing && closing.Contour == penContour &&
-                drawingLayer.Contours[penContour].Nodes.Length >= 3)
+                drawingLayer.Contours[penContour].Nodes.Length >= 2)
             {
-                CloseCurrentPath(drawing, penContour);
+                StartPathDrag(doc, drawingLayer, drawingLayer.Contours, penContour, 0, PathPart.Close, point);
                 return true;
             }
             var part = hit is { Part: PathPart.Anchor } tail && tail.Layer.Id == drawing &&
@@ -252,6 +252,16 @@ public partial class MainWindow
             case PathPart.Extend:
                 if (moved) nodes.Add(new PathNode(current));
                 break;
+            case PathPart.Close:
+                if (moved)
+                {
+                    var first = nodes[0];
+                    double x = current.X - drag.LocalStart.X, y = current.Y - drag.LocalStart.Y;
+                    nodes[0] = first with { Incoming = new(first.Point.X - x, first.Point.Y - y),
+                        Outgoing = new(first.Point.X + x, first.Point.Y + y) };
+                }
+                contour = contour with { Closed = true };
+                break;
             case PathPart.Anchor:
                 var original = nodes[drag.Node];
                 var dx = current.X - drag.LocalStart.X;
@@ -261,10 +271,20 @@ public partial class MainWindow
                     Incoming = original.Incoming is { } a ? Shift(a) : null, Outgoing = original.Outgoing is { } b ? Shift(b) : null };
                 break;
             case PathPart.Incoming:
-                nodes[drag.Node] = nodes[drag.Node] with { Incoming = current };
-                break;
             case PathPart.Outgoing:
-                nodes[drag.Node] = nodes[drag.Node] with { Outgoing = current };
+                var node = nodes[drag.Node];
+                bool incoming = drag.Part == PathPart.Incoming;
+                var opposite = incoming ? node.Outgoing : node.Incoming;
+                double vx = current.X - node.Point.X, vy = current.Y - node.Point.Y;
+                double length = Math.Sqrt(vx * vx + vy * vy);
+                if (opposite is { } oldHandle && length > 0 && !Keyboard.Modifiers.HasFlag(ModifierKeys.Alt))
+                {
+                    double ox = oldHandle.X - node.Point.X, oy = oldHandle.Y - node.Point.Y;
+                    double ratio = Math.Sqrt(ox * ox + oy * oy) / length;
+                    opposite = new PointD(node.Point.X - vx * ratio, node.Point.Y - vy * ratio);
+                }
+                nodes[drag.Node] = incoming ? node with { Incoming = current, Outgoing = opposite } :
+                    node with { Incoming = opposite, Outgoing = current };
                 break;
         }
 
@@ -285,6 +305,7 @@ public partial class MainWindow
                 pair.First.Closed != pair.Second.Closed || !pair.First.Nodes.SequenceEqual(pair.Second.Nodes));
         if (drag.Part == PathPart.Extend && active?.Engine.Current?.AllLayers().FirstOrDefault(l => l.Id == drag.Id) is { } existing)
             changed |= !existing.Contours[drag.Contour].Nodes.SequenceEqual(drag.Pending[drag.Contour].Nodes);
+        if (drag.Part == PathPart.Close) EndCurrentPath();
         if (changed) Run("layer.path", drag.Pending, drag.Id, drag.Id);
         else RefreshPathOverlay();
         return true;
@@ -298,27 +319,49 @@ public partial class MainWindow
         {
             var contour = hit?.Contour ?? (penLayer == target.Id ? penContour : Array.FindIndex(target.Contours, item => !item.Closed));
             Item(menu, "Close Path", () => CloseCurrentPath(target.Id, contour)).IsEnabled =
-                contour >= 0 && contour < target.Contours.Length && !target.Contours[contour].Closed && target.Contours[contour].Nodes.Length >= 3;
+                contour >= 0 && contour < target.Contours.Length && !target.Contours[contour].Closed && target.Contours[contour].Nodes.Length >= 2;
             Item(menu, "End Path", EndCurrentPath).IsEnabled = penLayer is not null;
             if (hit is { } node)
-                Item(menu, "Make Sharp Corner", () =>
-                {
-                    var contours = node.Layer.Contours.ToArray();
-                    var value = contours[node.Contour];
-                    var nodes = value.Nodes.ToArray();
-                    nodes[node.Node] = nodes[node.Node] with { Incoming = null, Outgoing = null };
-                    contours[node.Contour] = value with { Nodes = nodes };
-                    Run("layer.path", contours, node.Layer.Id, node.Layer.Id);
-                }).IsEnabled = Editable(doc, node.Layer.Id);
+            {
+                bool editable = Editable(doc, node.Layer.Id);
+                Item(menu, "Make Sharp Corner", () => ChangePathHandles(node, false, false)).IsEnabled = editable;
+                Item(menu, "Make Smooth", () => ChangePathHandles(node, true, true)).IsEnabled = editable;
+                Item(menu, "Incoming Handle Only", () => ChangePathHandles(node, true, false)).IsEnabled = editable;
+                Item(menu, "Outgoing Handle Only", () => ChangePathHandles(node, false, true)).IsEnabled = editable;
+            }
         }
 
-        if (tool == "Pen" && doc.Selection is not null)
-            Item(menu, "Convert Selection to Paths", () =>
-            {
-                string prefix = Format.Id();
-                EndCurrentPath();
-                Run("selection.toPaths", new SelectionPathsArgs(prefix, ActiveLayer()?.Id), selectId: prefix + "-1");
-            });
+        if (doc.Selection is not null)
+            Item(menu, "Convert Selection to Paths", ConvertSelectionToPaths);
         if (menu.Items.Count != 0) menu.IsOpen = true;
+    }
+
+    private void ChangePathHandles(PathHit hit, bool incoming, bool outgoing)
+    {
+        var contours = hit.Layer.Contours.ToArray();
+        var contour = contours[hit.Contour];
+        var nodes = contour.Nodes.ToArray();
+        var node = nodes[hit.Node];
+        var previous = hit.Node > 0 ? nodes[hit.Node - 1].Point : contour.Closed ? nodes[^1].Point : node.Point;
+        var next = hit.Node + 1 < nodes.Length ? nodes[hit.Node + 1].Point : contour.Closed ? nodes[0].Point : node.Point;
+        var tangent = new Vector(next.X - previous.X, next.Y - previous.Y);
+        if (tangent.Length == 0) tangent = new Vector(24, 0);
+        tangent.Normalize();
+        double HandleLength(PointD neighbor) =>
+            Math.Max(4, new Vector(neighbor.X - node.Point.X, neighbor.Y - node.Point.Y).Length / 3);
+        PointD Handle(double scale) => new(node.Point.X + tangent.X * scale, node.Point.Y + tangent.Y * scale);
+        nodes[hit.Node] = node with { Incoming = incoming ? Handle(-HandleLength(previous)) : null,
+            Outgoing = outgoing ? Handle(HandleLength(next)) : null };
+        contours[hit.Contour] = contour with { Nodes = nodes };
+        Run("layer.path", contours, hit.Layer.Id, hit.Layer.Id);
+    }
+
+    private void ConvertSelectionToPaths()
+    {
+        if (active?.Engine.Current?.Selection is null) return;
+        string prefix = Format.Id();
+        EndCurrentPath();
+        if (Run("selection.toPaths", new SelectionPathsArgs(prefix, ActiveLayer()?.Id), selectId: prefix + "-1"))
+            SetTool("Path Select");
     }
 }

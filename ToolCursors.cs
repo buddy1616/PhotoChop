@@ -9,6 +9,9 @@ internal static class ToolCursors
     public static Cursor Masker { get; } = Load("masker");
     public static Cursor Bucket { get; } = Load("bucket");
     public static Cursor Eyedropper { get; } = Load("eyedropper");
+    public static Cursor Wand { get; } = Load("wand");
+    public static Cursor WandAdd { get; } = Load("wand-add");
+    public static Cursor WandSubtract { get; } = Load("wand-subtract");
     public static Cursor Rotate { get; } = Load("rotate");
     public static Cursor SelectionAdd { get; } = Load("marquee-add");
     public static Cursor SelectionSubtract { get; } = Load("marquee-subtract");

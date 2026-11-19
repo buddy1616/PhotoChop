@@ -25,6 +25,63 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void VerticalImageFlipRendersAndBakesNestedGroups()
+    {
+        var engine = NewEngine(8, 8);
+        Layer(engine, new("outer", "Outer", LayerKind.Group));
+        Layer(engine, new("inner", "Inner", LayerKind.Group, Parent: "outer"));
+        Layer(engine, new("pixel", "Red", LayerKind.Rectangle, Parent: "inner",
+            Color: "#FFFF0000", Width: 1, Height: 1, Transform: new(3, 1)));
+        engine.Execute(Command.Of("document.orient", OrientationAction.FlipVertical));
+        var flipped = Composite(engine);
+        Assert.Equal(255, flipped[(6 * 8 + 3) * 4 + 3]);
+        Assert.Equal(0, flipped[(1 * 8 + 3) * 4 + 3]);
+        engine.Execute(Command.Of("document.orient", OrientationAction.Bake));
+        Assert.Equal(flipped, Composite(engine));
+    }
+
+    [Fact]
+    public void MergeDownBakesAdjacentSiblingsInPlaceAndCanBeUndone()
+    {
+        var engine = NewEngine(16, 16);
+        Layer(engine, new("parent", "Parent", LayerKind.Group, Transform: new(2, 3)));
+        Layer(engine, new("base", "Base", LayerKind.Rectangle, Parent: "parent",
+            Color: "#FFFF0000", Width: 4, Height: 4));
+        Layer(engine, new("top", "Top Group", LayerKind.Group, Parent: "parent", Transform: new(1, 2)));
+        Layer(engine, new("shape", "Shape", LayerKind.Rectangle, Parent: "top",
+            Color: "#FF00FF00", Width: 3, Height: 4));
+        engine.Execute(Command.Of("layer.opacity", .5, "top"));
+        engine.Execute(Command.Of("effect.add", new Effect("gray", EffectKind.Grayscale), "top"));
+        byte[] before = Composite(engine);
+        engine.Execute(Command.Of("layer.mergeDown", 0, "top"));
+        var merged = Assert.Single(Assert.Single(engine.Current!.Layers).Children);
+        Assert.Equal("base", merged.Id);
+        Assert.Equal(LayerKind.Raster, merged.Kind);
+        Assert.Empty(merged.Effects);
+        Assert.Equal(before, Composite(engine));
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(2, Assert.Single(engine.Current!.Layers).Children.Length);
+    }
+
+    [Fact]
+    public void PathFillAppliesOnlyToClosedContoursAndPreservesHoles()
+    {
+        var engine = NewEngine();
+        static PathContour Box(int x, int y, int size, bool closed = true) => new(
+            [new(new(x, y)), new(new(x + size, y)), new(new(x + size, y + size)), new(new(x, y + size))], closed);
+        engine.Execute(Command.Of("layer.createPath", new CreatePathArgs("path", "Path",
+            [Box(1, 1, 10), Box(4, 4, 4), Box(20, 3, 5, closed: false)])));
+        var effect = new Effect("fill", EffectKind.PathFill, Ink: "#FF00FF00");
+        engine.Execute(Command.Of("effect.add", effect, "path"));
+        byte[] image = Composite(engine);
+        Assert.Equal(255, image[(2 * 32 + 2) * 4 + 1]);
+        Assert.Equal(0, image[(5 * 32 + 5) * 4 + 3]);
+        Assert.Equal(0, image[(5 * 32 + 23) * 4 + 3]);
+        Layer(engine, new("raster", "Raster", LayerKind.Raster));
+        Assert.Throws<InvalidDataException>(() => engine.Execute(Command.Of("effect.add", effect, "raster")));
+    }
+
+    [Fact]
     public void ChopLayerKeepsItsSnapshotAndPropertiesAcrossRebakeAndReopen()
     {
         var engine = NewEngine(12, 12);

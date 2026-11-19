@@ -23,6 +23,19 @@ public partial class MainWindow
         public double TransformIconOpacity => Layer.TransformsEnabled ? 1 : .4;
         public double MaskIconOpacity => Layer.MaskEnabled ? 1 : .4;
         public Brush? MaskBorder => EditingMask ? Brushes.DeepSkyBlue : null;
+        public string? TypeIcon => Layer.Kind switch
+        {
+            LayerKind.Group => "M 1,4 L 1,13 15,13 15,5 8,5 6,3 1,3 Z",
+            LayerKind.Effect => "M 9,1 C 5,1 6,12 2,13 M 3,6 L 10,6 M 10,7 L 15,13 M 15,7 L 10,13",
+            LayerKind.Path => "M 2,13 C 14,12 2,4 14,3 M 1,12 L 3,12 3,14 1,14 Z M 13,2 L 15,2 15,4 13,4 Z",
+            LayerKind.Chop => "M 3,1 L 10,1 14,5 14,14 3,14 Z M 10,1 L 10,5 14,5 M 5,9 L 12,9",
+            LayerKind.Fill => "M 2,2 L 14,2 14,14 2,14 Z",
+            _ => null
+        };
+        public Visibility TypeVisibility => TypeIcon is null ? Visibility.Collapsed : Visibility.Visible;
+        public Brush? TypeFill => Layer.Kind == LayerKind.Fill ? new SolidColorBrush(Color.FromArgb(
+            (byte)(Format.Color(Layer.Color) >> 24), (byte)(Format.Color(Layer.Color) >> 16),
+            (byte)(Format.Color(Layer.Color) >> 8), (byte)Format.Color(Layer.Color))) : null;
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
         public Thickness NameIndent => Layer.Kind == LayerKind.Group ? new(2, 0, 0, 0) : new(Depth * 13 + 16, 0, 0, 0);
     }
@@ -113,13 +126,15 @@ public partial class MainWindow
         };
         layers.PreviewMouseLeftButtonDown += (_, e) =>
         {
-            layerDragStart = e.GetPosition(layers);
+            layerDragStart = layers.PointToScreen(e.GetPosition(layers));
             layerDrag = IsButton(e.OriginalSource) ? null : RowAt(e.OriginalSource);
         };
+        layers.AddHandler(PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler((_, _) => layerDrag = null), true);
         layers.PreviewMouseMove += (_, e) =>
         {
-            if (layerDrag is not { } row || e.LeftButton != MouseButtonState.Pressed ||
-                (e.GetPosition(layers) - layerDragStart).Length < Math.Max(5, SystemParameters.MinimumVerticalDragDistance)) return;
+            if (e.LeftButton != MouseButtonState.Pressed) { layerDrag = null; return; }
+            if (layerDrag is not { } row || RowAt(e.OriginalSource) is null ||
+                (layers.PointToScreen(e.GetPosition(layers)) - layerDragStart).Length < 8) return;
             layerDrag = null;
             DragLayer(row);
         };
@@ -327,7 +342,7 @@ public partial class MainWindow
     private void Rename()
     {
         if (ActiveLayer() is not { } layer) return;
-        var dialog = new Window { Owner = this, Title = "Layer name and effects", Width = 440, Height = 480,
+        var dialog = new Window { Owner = this, Title = "Layer Properties", Width = 440, Height = 480,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
         var shell = new DockPanel { Margin = new Thickness(14) };
         var header = new StackPanel();
@@ -359,6 +374,16 @@ public partial class MainWindow
         int number = 1;
         while (names.Contains($"{prefix} {number}")) number++;
         return $"{prefix} {number}";
+    }
+
+    private void MergeDown()
+    {
+        if (ActiveLayer() is not { } upper || active?.Engine.Current is not { } doc) return;
+        var parent = doc.AllLayers().FirstOrDefault(item => item.Children.Any(child => child.Id == upper.Id));
+        var siblings = parent?.Children ?? doc.Layers;
+        int index = Array.FindIndex(siblings, item => item.Id == upper.Id);
+        if (index < 1) { Say("There is no layer underneath in the same group."); return; }
+        Run("layer.mergeDown", 0, upper.Id, siblings[index - 1].Id);
     }
 
     private void DeleteLayer() => RunLayer("layer.delete", 0);
@@ -436,7 +461,6 @@ public partial class MainWindow
             var values = Form("Layer opacity", ("Opacity (0–100)", (layer.Opacity * 100).ToString()));
             if (values is not null) Guard(() => RunLayer("layer.opacity", Number(values[0]) / 100));
         }));
-        AddChopProperties(layer, properties);
         if (effectEditor is not null) PopulateEffects(layer);
     }
 
@@ -444,6 +468,7 @@ public partial class MainWindow
     {
         if (effectEditor is not { } panel) return;
         panel.Children.Clear();
+        AddChopProperties(layer, panel);
         var transformRow = new WrapPanel();
         transformRow.Children.Add(Button("Transform…", EditTransform, "Edit the layer’s combined transform"));
         transformRow.Children.Add(Button("Reset Transform", () =>
@@ -452,8 +477,16 @@ public partial class MainWindow
         }));
         if (layer.Kind != LayerKind.Effect) panel.Children.Add(transformRow);
         panel.Children.Add(new TextBlock { Text = "Effects", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
-        var effectKinds = new ComboBox { ItemsSource = Enum.GetValues<EffectKind>().Where(kind => layer.Kind != LayerKind.Effect || kind != EffectKind.Transform).ToArray(), SelectedIndex = 0, Margin = new Thickness(2) };
-        var add = Button("Add effect", () => { if (effectKinds.SelectedItem is EffectKind kind) AddEffect(kind); });
+        var effectKinds = new ComboBox
+        {
+            ItemsSource = Enum.GetValues<EffectKind>()
+                .Where(kind => (kind != EffectKind.PathFill || layer.Kind == LayerKind.Path) &&
+                    (kind != EffectKind.Transform || layer.Kind != LayerKind.Effect))
+                .Select(kind => new { Kind = kind, Name = EffectName(kind) })
+                .OrderBy(effect => effect.Name, StringComparer.CurrentCultureIgnoreCase).ToArray(),
+            DisplayMemberPath = "Name", SelectedValuePath = "Kind", SelectedIndex = 0, Margin = new Thickness(2)
+        };
+        var add = Button("Add effect", () => { if (effectKinds.SelectedValue is EffectKind kind) AddEffect(kind); });
         var row = new DockPanel();
         DockPanel.SetDock(add, System.Windows.Controls.Dock.Right);
         row.Children.Add(add);
@@ -580,7 +613,7 @@ public partial class MainWindow
             A: kind switch { EffectKind.GaussianBlur => 2, EffectKind.MotionBlur => 12, EffectKind.BitCrush => 8,
                 EffectKind.Opacity => 1, EffectKind.Stroke => 2, EffectKind.DropShadow => 120, _ => 0 },
             B: kind == EffectKind.DropShadow ? 5 : 0, Spatial: kind == EffectKind.Transform ? new() : null,
-            Ink: kind == EffectKind.Stroke ? foreground : "#FF000000", Size: kind == EffectKind.DropShadow ? 4 : 0,
+            Ink: kind is EffectKind.Stroke or EffectKind.PathFill ? foreground : "#FF000000", Size: kind == EffectKind.DropShadow ? 4 : 0,
             Opacity: kind == EffectKind.DropShadow ? .7 : 1);
         if (EffectForm(effect) is { } configured) RunLayer("effect.add", configured);
     }
@@ -588,6 +621,9 @@ public partial class MainWindow
     private Effect? EffectForm(Effect effect)
     {
         if (effect.Kind == EffectKind.Grayscale) return effect;
+        if (effect.Kind == EffectKind.PathFill)
+            return ColorPickerDialog.Show(effectDialog ?? EditorOwner, "Path Fill Color", effect.Ink) is { } color
+                ? effect with { Ink = color } : null;
         if (effect.Kind is EffectKind.Stroke or EffectKind.DropShadow) return EditStyleEffect(effect);
         if (effect.Kind == EffectKind.Transform)
         {

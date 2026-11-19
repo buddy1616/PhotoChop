@@ -51,7 +51,7 @@ public partial class MainWindow
             var layer = active?.Engine.Current?.AllLayers().FirstOrDefault(item => item.Id == target) ?? ActiveLayer();
             if (layer is null) { e.Handled = true; return; }
             string kind = layer.Kind == LayerKind.Group ? "Group" : "Layer";
-            Item(menu, "Rename and Effects…", () => { SelectLayer(layer.Id); Rename(); });
+            Item(menu, "Properties…", () => { SelectLayer(layer.Id); Rename(); });
             if (layer.Kind == LayerKind.Text) Item(menu, "Edit Text…", () => EditText(layer));
             Item(menu, "Duplicate", () => Duplicate(layer.Id));
             Item(menu, $"Bake {kind}…", () =>

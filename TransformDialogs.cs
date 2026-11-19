@@ -22,6 +22,7 @@ public partial class MainWindow
         TextBox Field(string caption)
         {
             var value = new TextBox { Text = "1", Margin = new Thickness(0, 4, 0, 8), Padding = new Thickness(5) };
+            NumericWheel.Enable(value, .001, 1000);
             panel.Children.Add(new Label { Content = caption, Target = value });
             panel.Children.Add(value);
             return value;
@@ -75,6 +76,7 @@ public partial class MainWindow
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize };
         var panel = new StackPanel { Margin = new Thickness(14) };
         var thickness = new TextBox { Text = "1", Margin = new Thickness(0, 4, 0, 8) };
+        NumericWheel.Enable(thickness, 1);
         var alignment = new ComboBox { ItemsSource = new[] { StrokeAlignment.Inside, StrokeAlignment.Outside, StrokeAlignment.Center },
             SelectedItem = StrokeAlignment.Center, Margin = new Thickness(0, 4, 0, 8) };
         string ink = foreground;
