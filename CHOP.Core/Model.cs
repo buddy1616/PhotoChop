@@ -3,9 +3,9 @@ using System.Text.Json.Serialization;
 
 namespace Chop.Core;
 
-public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill }
+public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill, Effect }
 public enum Blend { Normal, Multiply, Screen, Overlay, Add }
-public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur }
+public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush }
 
 public readonly record struct PointD(double X, double Y);
 public readonly record struct Area(int X, int Y, int Width, int Height);
@@ -19,7 +19,8 @@ public sealed record Transform(double X = 0, double Y = 0, double ScaleX = 1, do
     }
 }
 public sealed record Placement(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1);
-public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal);
+public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal, string Ink = "#FF000000", StrokeAlignment Alignment = StrokeAlignment.Outside,
+    double Size = 0, double Spread = 0, double Opacity = 1);
 
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
 public sealed record Pixels(int Width, int Height, byte[] Rgba);
@@ -40,6 +41,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     // Version 6 projects stored transforms as a list. It is merged on read.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SpatialEdit[]? SpatialEdits { get; init; }
+    public Projective? ImagePlacement { get; init; }
     public Placement Placement { get; init; } = new();
     public bool TransformsEnabled { get; init; } = true;
     [JsonIgnore] public Transform ActiveTransform => TransformsEnabled ? Transform : new();
@@ -77,6 +79,8 @@ public sealed record Document(string Id, int Width, int Height)
     public string ColorSpace { get; init; } = "sRGB";
     public Dictionary<string, string> Metadata { get; init; } = [];
     public Layer[] Layers { get; init; } = [];
+    public Projective? ImageOrientation { get; init; }
+    [JsonIgnore] public FloatingPixels? Floating { get; init; }
     public bool GuidesLocked { get; init; }
     public Guide[] Guides { get; init; } = [];
     [JsonIgnore] public Area? Selection { get; init; }
@@ -84,6 +88,13 @@ public sealed record Document(string Id, int Width, int Height)
     [JsonIgnore] public PixelSelection? SelectionMask { get; init; }
     public bool Selected(int x, int y) => SelectionMask?.Contains(x, y) ??
         (Selection is { } area && x >= area.X && y >= area.Y && x < area.X + area.Width && y < area.Y + area.Height);
+
+    public Document ReplaceLayer(string id, Layer replacement)
+    {
+        Layer[] Replace(Layer[] items) => items.Select(layer => layer.Id == id ? replacement :
+            layer.Children.Length == 0 ? layer : layer with { Children = Replace(layer.Children) }).ToArray();
+        return this with { Layers = Replace(Layers) };
+    }
 
     public IEnumerable<Layer> AllLayers() => Descendants(Layers);
     private static IEnumerable<Layer> Descendants(IEnumerable<Layer> layers) =>
@@ -120,13 +131,19 @@ public interface IRasterBackend
     Pixels DecodePng(byte[] data);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
+    Document ResolveFloating(Document document);
+    RasterEdit? CopyPixels(Document document, string layerId);
+    AlphaMask ReprojectMask(Document document, Layer layer);
+    Layer BakeStroke(Layer layer, OutlineArgs outline);
+    Layer CrushSelection(Document document, Layer layer, int size);
     RasterEdit PaintArea(Document document, Layer layer, Area bounds, Func<int, int, bool> contains, uint color);
     RasterEdit RasterizeLayer(Document document, Layer layer);
     RasterEdit? ResolveRaster(Layer layer);
+    Projective ParentCoordinates(Document document, Layer layer);
     Projective ToParentSpace(Document document, Layer layer, Projective transform);
     RasterEdit? TransformPixels(Document document, Layer layer, Area selection, Projective transform);
     Layer PrepareRasterEditing(Document document, Layer layer);
-    PixelSelection? BucketRegion(Document document, Layer layer, BucketArgs options);
+    PixelSelection? BucketRegion(Document document, Layer layer, BucketArgs options, bool clipToSelection = true);
     Layer? MoveSelection(Document document, Layer layer, Area selection, int dx, int dy);
     RasterEdit ClearSelection(Document document, Layer layer);
     AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);

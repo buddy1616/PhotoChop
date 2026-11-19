@@ -15,6 +15,7 @@ public static class ProjectFile
 
     public static void Save(string path, Document document)
     {
+        if (document.Floating is not null) throw new InvalidDataException("Resolve the floating pixels before saving the document.");
         var full = Path.GetFullPath(path);
         var temp = Path.Combine(Path.GetDirectoryName(full)!, $".{Guid.NewGuid():N}.tmp");
         try
@@ -63,7 +64,7 @@ public static class ProjectFile
                             return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear, patchPath);
                         }).ToArray();
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(7, document, resources, masks, shifts), Format.Json);
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(8, document, resources, masks, shifts), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -90,12 +91,13 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
             throw new InvalidDataException("Invalid document metadata.");
         Format.Dimensions(doc.Width, doc.Height);
+        doc.ImageOrientation?.Inverse();
         if (doc.Guides is null || doc.Guides.Any(guide => guide is null || !Format.ValidId(guide.Id) ||
             !Enum.IsDefined(guide.Axis) || guide.Position < 0 || guide.Position > (guide.Axis == GuideAxis.Vertical ? doc.Width : doc.Height)) ||
             doc.Guides.Select(guide => guide.Id).Distinct().Count() != doc.Guides.Length)
@@ -129,6 +131,7 @@ public static class ProjectFile
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
                 throw new InvalidDataException("Invalid layer metadata.");
             CommandEngine.CheckTransform(layer.Transform);
+            layer.ImagePlacement?.Inverse();
             if (layer.RasterGrid is { } grid)
             {
                 if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Only raster layers can have a pixel grid.");

@@ -6,6 +6,7 @@ namespace PhotoChop;
 internal static class ToolCursors
 {
     public static Cursor Eraser { get; } = Load("eraser");
+    public static Cursor Masker { get; } = Load("masker");
     public static Cursor Bucket { get; } = Load("bucket");
     public static Cursor Eyedropper { get; } = Load("eyedropper");
     public static Cursor Rotate { get; } = Load("rotate");

@@ -90,6 +90,11 @@ public partial class MainWindow
             if (syncing || active is null) return;
             CancelTransform();
             active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
+            if (active.Engine.Current?.Floating is { } floating && floating.LayerId != active.ActiveId)
+            {
+                Run("selection.commitFloating", 0);
+                return;
+            }
             if (active.MaskTarget != active.ActiveId) { active.MaskTarget = null; active.MaskOnly = null; UpdateCanvas(); }
             RefreshProperties();
             RefreshTools();
@@ -296,7 +301,7 @@ public partial class MainWindow
                 origin = new(local.X, local.Y);
             }
         }
-        string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), LayerKind.Group => NextLayerName("Group"), _ => kind.ToString() };
+        string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), LayerKind.Group => NextLayerName("Group"), LayerKind.Effect => NextLayerName("Effect"), _ => kind.ToString() };
         var args = new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
             Width: width, Height: height, Text: text, Font: font, Size: size, Color: color);
         if (kind == LayerKind.Text)
@@ -442,9 +447,9 @@ public partial class MainWindow
         {
             if (Confirm("Reset the layer transform to its defaults?")) RunLayer("layer.resetTransform", 0);
         }));
-        panel.Children.Add(transformRow);
+        if (layer.Kind != LayerKind.Effect) panel.Children.Add(transformRow);
         panel.Children.Add(new TextBlock { Text = "Effects", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
-        var effectKinds = new ComboBox { ItemsSource = Enum.GetValues<EffectKind>(), SelectedIndex = 0, Margin = new Thickness(2) };
+        var effectKinds = new ComboBox { ItemsSource = Enum.GetValues<EffectKind>().Where(kind => layer.Kind != LayerKind.Effect || kind != EffectKind.Transform).ToArray(), SelectedIndex = 0, Margin = new Thickness(2) };
         var add = Button("Add effect", () => { if (effectKinds.SelectedItem is EffectKind kind) AddEffect(kind); });
         var row = new DockPanel();
         DockPanel.SetDock(add, System.Windows.Controls.Dock.Right);
@@ -475,7 +480,7 @@ public partial class MainWindow
 
     private void EditTransform()
     {
-        if (ActiveLayer() is not { } layer) return;
+        if (ActiveLayer() is not { } layer || layer.Kind == LayerKind.Effect) return;
         var p = layer.Placement;
         var placement = new Projective(p.ScaleX, 0, p.X, 0, p.ScaleY, p.Y);
         var matrix = layer.Transform.NativeMatrix().Then(placement)
@@ -569,14 +574,18 @@ public partial class MainWindow
     {
         if (ActiveLayer() is null) return;
         var effect = new Effect(Format.Id(), kind,
-            A: kind == EffectKind.GaussianBlur ? 2 : kind == EffectKind.MotionBlur ? 12 : kind == EffectKind.Opacity ? 1 : 0,
-            Spatial: kind == EffectKind.Transform ? new() : null);
+            A: kind switch { EffectKind.GaussianBlur => 2, EffectKind.MotionBlur => 12, EffectKind.BitCrush => 8,
+                EffectKind.Opacity => 1, EffectKind.Stroke => 2, EffectKind.DropShadow => 120, _ => 0 },
+            B: kind == EffectKind.DropShadow ? 5 : 0, Spatial: kind == EffectKind.Transform ? new() : null,
+            Ink: kind == EffectKind.Stroke ? foreground : "#FF000000", Size: kind == EffectKind.DropShadow ? 4 : 0,
+            Opacity: kind == EffectKind.DropShadow ? .7 : 1);
         if (EffectForm(effect) is { } configured) RunLayer("effect.add", configured);
     }
 
     private Effect? EffectForm(Effect effect)
     {
         if (effect.Kind == EffectKind.Grayscale) return effect;
+        if (effect.Kind is EffectKind.Stroke or EffectKind.DropShadow) return EditStyleEffect(effect);
         if (effect.Kind == EffectKind.Transform)
         {
             var t = effect.Spatial!;
@@ -599,6 +608,7 @@ public partial class MainWindow
         {
             EffectKind.BrightnessContrast => [("Brightness (-1 to 1)", effect.A.ToString()), ("Contrast (-1 to 1)", effect.B.ToString())],
             EffectKind.HueSaturation => [("Hue (-180° to 180°)", effect.A.ToString()), ("Saturation adjustment (-1 to 1)", effect.B.ToString())],
+            EffectKind.BitCrush => [("Pixel size", effect.A.ToString())],
             EffectKind.Opacity => [("Opacity multiplier (0 to 1)", effect.A.ToString())],
             EffectKind.MotionBlur => [("Distance (px)", effect.A.ToString()), ("Angle (degrees)", effect.B.ToString())],
             _ => [("Blur sigma (0–100 px)", effect.A.ToString())]
@@ -607,6 +617,7 @@ public partial class MainWindow
         {
             EffectKind.BrightnessContrast => [(-1, 1), (-1, 1)],
             EffectKind.HueSaturation => [(-180, 180), (-1, 1)],
+            EffectKind.BitCrush => [(1, 512)],
             EffectKind.Opacity => [(0, 1)],
             EffectKind.MotionBlur => [(0, 200), (-180, 180)],
             _ => [(0, 100)]

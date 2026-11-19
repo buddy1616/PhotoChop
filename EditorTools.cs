@@ -31,6 +31,12 @@ public partial class MainWindow
     private readonly List<PointD> stroke = [];
     private readonly List<PointD> lassoPoints = [];
     private int bucketTolerance;
+    private bool polygonalLasso;
+    private bool polygonDrawing;
+    private int wandTolerance;
+    private Chop.Core.SelectionMode ModifierSelectionMode() => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ?
+        Chop.Core.SelectionMode.Subtract : Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ?
+        Chop.Core.SelectionMode.Add : Chop.Core.SelectionMode.Replace;
 
     private void HookCanvas(EditorCanvas view)
     {
@@ -107,6 +113,17 @@ public partial class MainWindow
                 case "Text": EditTextAt(doc, new PointD(point.X, point.Y)); return;
                 case "Eyedropper": Sample(point); return;
                 case "Transform": ScaleLayer(); return;
+                case "Magic Wand":
+                    RunLayer("selection.wand", new WandArgs(new PointD(point.X, point.Y), wandTolerance, ModifierSelectionMode()));
+                    return;
+                case "Lasso" when polygonalLasso:
+                    if (e.ClickCount >= 2) { FinishPolygon(); return; }
+                    if (!polygonDrawing) { polygonDrawing = true; selectionMode = ModifierSelectionMode(); }
+                    if (lassoPoints.Count < 20000) lassoPoints.Add(new PointD(point.X, point.Y));
+                    canvas.LassoPath = lassoPoints.ToArray();
+                    canvas.InvalidateVisual();
+                    e.Handled = true;
+                    return;
                 case "Bucket":
                     RunLayer("layer.bucket", new BucketArgs(new PointD(point.X, point.Y), foreground, bucketTolerance));
                     return;
@@ -186,6 +203,11 @@ public partial class MainWindow
             !IsSamplingCanvas(hoveredSession))
             hoveredView.Cursor = HitGuide(hoveredSession, e.GetPosition(hoveredView)) is { } hovered ? GuideCursor(hovered.Axis) : ToolCursor(tool);
         var point = canvas.FromView(view);
+        if (polygonDrawing && gesture is null)
+        {
+            canvas.LassoPath = lassoPoints.Append(new PointD(point.X, point.Y)).ToArray();
+            canvas.InvalidateVisual();
+        }
         if (gesture != "Pan" && TransformMouseMove(point)) { e.Handled = true; return; }
         lastCursor = point;
         switch (gesture)
@@ -373,6 +395,7 @@ public partial class MainWindow
             UpdateCanvas();
         }
         stroke.Clear();
+        polygonDrawing = false;
         lassoPoints.Clear();
         canvas.LassoPath = null;
         canvas.Stroke = null;
@@ -443,6 +466,14 @@ public partial class MainWindow
         }
     }
 
+    private void FinishPolygon()
+    {
+        var points = lassoPoints.ToArray();
+        var mode = selectionMode;
+        CancelGesture();
+        if (points.Length >= 3) Run("selection.lasso", new LassoArgs(points, mode));
+    }
+
     private void SetTool(string name)
     {
         CancelTransform();
@@ -455,16 +486,16 @@ public partial class MainWindow
 
     private void RefreshMarqueeCursor()
     {
-        if (tool is not ("Selection" or "Lasso") || interactiveTransform is not null) return;
+        if (tool is not ("Selection" or "Lasso" or "Magic Wand") || interactiveTransform is not null) return;
         foreach (var session in sessions)
             session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(tool);
     }
 
     private static Cursor ToolCursor(string name) => name switch
     {
-        "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" or "Masker" => ToolCursors.Eraser,
+        "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" => ToolCursors.Eraser, "Masker" => ToolCursors.Masker,
         "Bucket" => ToolCursors.Bucket,
-        "Selection" or "Lasso" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
+        "Selection" or "Lasso" or "Magic Wand" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.SelectionAdd : Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
         "Shape" => Cursors.SizeNESW, "Eyedropper" => ToolCursors.Eyedropper,
         "Transform" => Cursors.ScrollAll, _ => Cursors.Arrow
@@ -495,6 +526,14 @@ public partial class MainWindow
         if (interactiveTransform is { } transform) { TransformOptions(transform); return; }
         OptionLabel(tool);
         if (tool == "Bucket") SliderOption("Tolerance", 0, 255, bucketTolerance, value => bucketTolerance = (int)value);
+        if (tool == "Magic Wand") SliderOption("Tolerance", 0, 255, wandTolerance, value => wandTolerance = (int)value);
+        if (tool == "Lasso")
+        {
+            OptionLabel("Mode");
+            var modes = new ComboBox { ItemsSource = new[] { "Normal", "Polygonal" }, SelectedIndex = polygonalLasso ? 1 : 0 };
+            modes.SelectionChanged += (_, _) => { CancelGesture(); polygonalLasso = modes.SelectedIndex == 1; };
+            ToolOptions.Children.Add(modes);
+        }
         if (tool is "Brush" or "Eraser" or "Masker")
         {
             SliderOption("Size", 1, 512, brushSize, value => brushSize = value);
@@ -650,6 +689,12 @@ public partial class MainWindow
 
     private void OnKey(object sender, KeyEventArgs e)
     {
+        if (polygonDrawing && e.Key is Key.Enter or Key.Escape)
+        {
+            if (e.Key == Key.Enter) FinishPolygon(); else CancelGesture();
+            e.Handled = true;
+            return;
+        }
         if (interactiveTransform is not null && e.Key is Key.Escape or Key.Enter)
         {
             if (e.Key == Key.Enter) ApplyTransform(); else CancelTransform();
@@ -663,6 +708,7 @@ public partial class MainWindow
         bool shift = modifiers.HasFlag(ModifierKeys.Shift);
         Action? action = control ? e.Key switch
         {
+            Key.C when !shift => CopyPixels, Key.V when !shift => PastePixels,
             Key.N => NewDocument, Key.O => OpenDocument, Key.S => () => Save(active, shift),
             Key.E when shift => ExportPng, Key.W => () => CloseSession(active),
             Key.Z => () => Run("history.undo", 0), Key.Y => () => Run("history.redo", 0),
@@ -682,7 +728,7 @@ public partial class MainWindow
             string? shortcut = e.Key switch
             {
                 Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection", Key.L => "Lasso",
-                Key.I => "Eyedropper", Key.T => "Text", _ => null
+                Key.G => "Bucket", Key.W => "Magic Wand", Key.I => "Eyedropper", Key.T => "Text", _ => null
             };
             if (shortcut is not null) action = () => SetTool(shortcut);
         }
