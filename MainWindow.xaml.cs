@@ -41,6 +41,7 @@ public partial class MainWindow : Window
 
     private sealed class Preferences
     {
+        public WindowPosition? WindowPosition { get; set; }
         public int Width { get; set; } = 1920;
         public int Height { get; set; } = 1080;
         public List<string> Recent { get; set; } = [];
@@ -97,7 +98,7 @@ public partial class MainWindow : Window
     private double brushSize = 24, hardness = .8, brushOpacity = 1;
     private LayerKind shapeKind = LayerKind.Rectangle;
     private Point? lastCursor;
-    private static readonly string[] ToolNames = ["Selection", "Lasso", "Magic Wand", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Bucket", "Chop"];
+    private static readonly string[] ToolNames = ["Selection", "Lasso", "Magic Wand", "Pen", "Path Select", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Bucket", "Chop"];
 
     public MainWindow()
     {
@@ -115,10 +116,23 @@ public partial class MainWindow : Window
             }
         };
         preferences = LoadPreferences();
-        if (preferences is { ToolCatalogVersion: < 2, Tools: { } configured })
-            preferences.Tools = configured.Concat(preferences.ToolCatalogVersion == 0
-                ? new[] { "Masker", "Bucket", "Lasso", "Magic Wand" } : new[] { "Magic Wand" }).Distinct().ToArray();
-        preferences.ToolCatalogVersion = 2;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        if (WindowPlacement.TryConstrain(preferences.WindowPosition, out var placement))
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            SourceInitialized += (_, _) => WindowPlacement.Restore(this, placement);
+        }
+        if (preferences is { ToolCatalogVersion: < 3, Tools: { } configured })
+        {
+            var added = preferences.ToolCatalogVersion switch
+            {
+                0 => new[] { "Masker", "Bucket", "Lasso", "Magic Wand", "Pen", "Path Select" },
+                1 => new[] { "Magic Wand", "Pen", "Path Select" },
+                _ => new[] { "Pen", "Path Select" }
+            };
+            preferences.Tools = configured.Concat(added).Distinct().ToArray();
+        }
+        preferences.ToolCatalogVersion = 3;
         BuildMenus();
         BuildPanels();
         ResetLayout();
@@ -176,6 +190,7 @@ public partial class MainWindow : Window
         {
             Directory.CreateDirectory(settingsFolder);
             new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v4.xml"));
+            preferences.WindowPosition = WindowPlacement.Capture(this) ?? preferences.WindowPosition;
             var settings = Path.Combine(settingsFolder, "settings.json");
             var temporary = Path.Combine(settingsFolder, $".settings-{Guid.NewGuid():N}.tmp");
             try
@@ -320,6 +335,8 @@ public partial class MainWindow : Window
         Item(newLayer, "Raster Layer", () => CreateLayer(LayerKind.Raster));
         Item(newLayer, "Fill Layer…", () => CreateLayer(LayerKind.Fill));
         Item(newLayer, "Effect Layer", () => CreateLayer(LayerKind.Effect));
+        Item(newLayer, "Chop Layer…", CreateChopLayer);
+        Item(newLayer, "Path", () => CreateNewPath());
         Item(layer, "Duplicate selected layer", Duplicate);
         Item(layer, "Rename selected layer…", Rename);
         Item(layer, "Delete selected layer", DeleteLayer);
@@ -502,6 +519,7 @@ public partial class MainWindow : Window
     {
         if (ReferenceEquals(active, session)) return;
         CancelTransform();
+        CancelPathEditing();
         CancelGesture();
         active = session;
         lastCursor = null;
@@ -686,6 +704,7 @@ public partial class MainWindow : Window
         }
         finally { syncing = false; }
         RefreshTools();
+        RefreshPathOverlay();
         UpdateGuideMenu();
         UpdateCanvas();
         RefreshNavigation();

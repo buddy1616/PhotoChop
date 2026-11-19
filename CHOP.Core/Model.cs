@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace Chop.Core;
 
-public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill, Effect }
+public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill, Effect, Chop, Path }
 public enum Blend { Normal, Multiply, Screen, Overlay, Add }
 public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush }
 
@@ -49,6 +49,8 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public Projective? RasterGrid { get; init; }
     public int RasterX { get; init; }
     public int RasterY { get; init; }
+    public string? ChopSource { get; init; }
+    public PathContour[] Contours { get; init; } = [];
     public string Text { get; init; } = "Text";
     public string Font { get; init; } = "Liberation Sans";
     public double Size { get; init; } = 48;

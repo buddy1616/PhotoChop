@@ -31,6 +31,7 @@ internal sealed class EditorCanvas : FrameworkElement
         ghostGuidePen = Frozen(new Pen(brush, 1) { DashStyle = DashStyles.Dash });
     }
 
+    public PathContour[]? PathOverlay { get; set; }
     public IReadOnlyList<PointD>? LassoPath { get; set; }
     public PointD[]? TransformBox { get; set; }
     public PointD? TransformOrigin { get; set; }
@@ -98,6 +99,7 @@ internal sealed class EditorCanvas : FrameworkElement
         foreach (var guide in Guides)
             if (guide.Id != DraggedGuide) DrawGuide(dc, guide, imageArea, guidePen);
         if (GhostGuide is { } ghost) DrawGuide(dc, ghost, imageArea, ghostGuidePen);
+        if (PathOverlay is { } paths) DrawVectorPaths(dc, paths);
         if (LassoPath is { Count: > 1 } lasso)
         {
             for (int i = 1; i < lasso.Count; i++) dc.DrawLine(selectionLight, ToView(lasso[i - 1]), ToView(lasso[i]));
@@ -119,6 +121,46 @@ internal sealed class EditorCanvas : FrameworkElement
                 var center = ToView(origin);
                 dc.DrawEllipse(Brushes.Black, selectionLight, center, 6, 6);
                 dc.DrawEllipse(Brushes.White, null, center, 2, 2);
+            }
+        }
+    }
+
+    private static readonly Pen pathPen = Frozen(new Pen(Brushes.DeepSkyBlue, 1.25));
+    private static readonly Pen pathHandlePen = Frozen(new Pen(Brushes.LightSkyBlue, 1));
+
+    private void DrawVectorPaths(DrawingContext dc, PathContour[] contours)
+    {
+        foreach (var contour in contours)
+        {
+            var nodes = contour.Nodes;
+            if (nodes.Length == 0) continue;
+            var geometry = new StreamGeometry();
+            using (var stream = geometry.Open())
+            {
+                stream.BeginFigure(ToView(nodes[0].Point), false, contour.Closed);
+                int count = contour.Closed ? nodes.Length : nodes.Length - 1;
+                for (int i = 0; i < count; i++)
+                {
+                    var a = nodes[i];
+                    var b = nodes[(i + 1) % nodes.Length];
+                    if (a.Outgoing is null && b.Incoming is null) stream.LineTo(ToView(b.Point), true, false);
+                    else stream.BezierTo(ToView(a.Outgoing ?? a.Point), ToView(b.Incoming ?? b.Point), ToView(b.Point), true, false);
+                }
+            }
+            dc.DrawGeometry(null, pathPen, geometry);
+            foreach (var node in nodes)
+            {
+                var anchor = ToView(node.Point);
+                void Handle(PointD? point)
+                {
+                    if (point is not { } p) return;
+                    var end = ToView(p);
+                    dc.DrawLine(pathHandlePen, anchor, end);
+                    dc.DrawEllipse(Brushes.White, pathPen, end, 3, 3);
+                }
+                Handle(node.Incoming);
+                Handle(node.Outgoing);
+                dc.DrawRectangle(Brushes.White, pathPen, new Rect(anchor.X - 3, anchor.Y - 3, 6, 6));
             }
         }
     }

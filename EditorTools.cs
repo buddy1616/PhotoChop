@@ -70,6 +70,11 @@ public partial class MainWindow
         {
             if (interactiveTransform is { } transform) transform.Start = null;
             CancelGesture();
+            if (pathDrag is not null)
+            {
+                pathDrag = null;
+                RefreshPathOverlay();
+            }
         };
         view.MouseLeave += (_, _) => { if (gesture is null) { lastCursor = null; Say(); } };
     }
@@ -87,6 +92,11 @@ public partial class MainWindow
             return;
         }
         if (!Keyboard.IsKeyDown(Key.Space) && TransformMouseDown(point, e.ChangedButton))
+        {
+            e.Handled = true;
+            return;
+        }
+        if (!Keyboard.IsKeyDown(Key.Space) && PathMouseDown(point, e.ChangedButton))
         {
             e.Handled = true;
             return;
@@ -145,7 +155,7 @@ public partial class MainWindow
                     break;
                 case "Move":
                     if (ActiveLayer() is not { Locked: false } target || !Editable(doc, target.Id)) { Say("Select an unlocked layer to move."); return; }
-                    if (doc.Selection is { } selected)
+                    if (target.Kind is not (LayerKind.Chop or LayerKind.Path) && doc.Selection is { } selected)
                     {
                         if (target.Kind != LayerKind.Raster || !doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y)) || point.X < selected.X || point.X >= selected.X + selected.Width ||
                             point.Y < selected.Y || point.Y >= selected.Y + selected.Height) return;
@@ -203,6 +213,7 @@ public partial class MainWindow
             !IsSamplingCanvas(hoveredSession))
             hoveredView.Cursor = HitGuide(hoveredSession, e.GetPosition(hoveredView)) is { } hovered ? GuideCursor(hovered.Axis) : ToolCursor(tool);
         var point = canvas.FromView(view);
+        if (sender == canvas && UpdatePathDrag(point)) { e.Handled = true; return; }
         if (polygonDrawing && gesture is null)
         {
             canvas.LassoPath = lassoPoints.Append(new PointD(point.X, point.Y)).ToArray();
@@ -262,6 +273,11 @@ public partial class MainWindow
 
     private void CanvasUp(object sender, MouseButtonEventArgs e)
     {
+        if (e.ChangedButton == MouseButton.Left && FinishPathDrag(canvas.FromView(e.GetPosition(canvas))))
+        {
+            e.Handled = true;
+            return;
+        }
         if (TransformMouseUp(canvas.FromView(e.GetPosition(canvas)), e.ChangedButton))
         {
             e.Handled = true;
@@ -477,11 +493,13 @@ public partial class MainWindow
     private void SetTool(string name)
     {
         CancelTransform();
+        CancelPathEditing();
         CancelGesture();
         tool = name;
         foreach (var session in sessions)
             session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(name);
         RefreshTools();
+        RefreshPathOverlay();
     }
 
     private void RefreshMarqueeCursor()
@@ -494,7 +512,7 @@ public partial class MainWindow
     private static Cursor ToolCursor(string name) => name switch
     {
         "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" => ToolCursors.Eraser, "Masker" => ToolCursors.Masker,
-        "Bucket" => ToolCursors.Bucket,
+        "Bucket" => ToolCursors.Bucket, "Pen" => Cursors.Pen, "Path Select" => Cursors.Arrow,
         "Selection" or "Lasso" or "Magic Wand" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.SelectionSubtract :
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.SelectionAdd : Cursors.Cross, "Chop" => Cursors.SizeNWSE, "Text" => Cursors.IBeam,
         "Shape" => Cursors.SizeNESW, "Eyedropper" => ToolCursors.Eyedropper,
@@ -689,6 +707,17 @@ public partial class MainWindow
 
     private void OnKey(object sender, KeyEventArgs e)
     {
+        if ((tool is "Pen" or "Path Select") && (e.Key is Key.Escape or Key.Enter) && (pathDrag is not null || penLayer is not null))
+        {
+            if (e.Key == Key.Escape) { CancelPathEditing(); RefreshPathOverlay(); }
+            else
+            {
+                if (pathDrag is not null) FinishPathDrag(canvas.FromView(Mouse.GetPosition(canvas)));
+                EndCurrentPath();
+            }
+            e.Handled = true;
+            return;
+        }
         if (polygonDrawing && e.Key is Key.Enter or Key.Escape)
         {
             if (e.Key == Key.Enter) FinishPolygon(); else CancelGesture();
@@ -728,7 +757,7 @@ public partial class MainWindow
             string? shortcut = e.Key switch
             {
                 Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection", Key.L => "Lasso",
-                Key.G => "Bucket", Key.W => "Magic Wand", Key.I => "Eyedropper", Key.T => "Text", _ => null
+                Key.P => "Pen", Key.A => "Path Select", Key.G => "Bucket", Key.W => "Magic Wand", Key.I => "Eyedropper", Key.T => "Text", _ => null
             };
             if (shortcut is not null) action = () => SetTool(shortcut);
         }
