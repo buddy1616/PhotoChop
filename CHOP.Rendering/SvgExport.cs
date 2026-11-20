@@ -8,6 +8,15 @@ namespace Chop.Rendering;
 
 public sealed partial class SkiaRenderer
 {
+    public byte[] ExportImage(Document document, ImageExportFormat format) => format switch
+    {
+        ImageExportFormat.Png => EncodePng(Composite(document), document.PixelsPerInch),
+        ImageExportFormat.Jpeg => EncodeImage(document, SKEncodedImageFormat.Jpeg),
+        ImageExportFormat.WebP => EncodeImage(document, SKEncodedImageFormat.Webp),
+        ImageExportFormat.Svg => EncodeSvg(document),
+        _ => throw new InvalidDataException("Unknown export format.")
+    };
+
     public byte[] EncodeImage(Document document, SKEncodedImageFormat format)
     {
         var pixels = Composite(document);

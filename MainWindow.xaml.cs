@@ -11,7 +11,6 @@ using AvalonDock.Layout.Serialization;
 using Chop.Core;
 using Chop.Rendering;
 using Microsoft.Win32;
-using SkiaSharp;
 
 namespace PhotoChop;
 
@@ -321,9 +320,9 @@ public partial class MainWindow : Window
         var export = new MenuItem { Header = "_Export" };
         file.Items.Add(export);
         Item(export, "PNG", ExportPng, "Ctrl+Shift+E");
-        Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", SKEncodedImageFormat.Jpeg));
-        Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", SKEncodedImageFormat.Webp));
-        Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", null));
+        Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", ImageExportFormat.Jpeg));
+        Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", ImageExportFormat.WebP));
+        Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", ImageExportFormat.Svg));
         Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
 
         var edit = Menu("Edit");
@@ -659,44 +658,32 @@ public partial class MainWindow : Window
         if (picker.ShowDialog(this) != true) return;
         Guard(() =>
         {
-            byte[] source = File.ReadAllBytes(picker.FileName);
-            var image = renderer.DecodeImage(source);
-            if (!string.Equals(Path.GetExtension(picker.FileName), ".png", StringComparison.OrdinalIgnoreCase))
-                source = renderer.EncodePng(image);
-            var name = Path.GetFileNameWithoutExtension(picker.FileName);
-            string id = Format.Id();
+            var input = new ImageImportArgs(Format.Id(), Path.GetFileNameWithoutExtension(picker.FileName),
+                Data: File.ReadAllBytes(picker.FileName));
             if (active is null)
             {
                 var session = NewSession();
-                session.Engine.Execute(Command.Of("document.create", new NewArgs(Format.Id(), image.Width, image.Height)));
-                session.Engine.Execute(Command.Of("layer.importPng", new ImportArgs(id, name, source)));
-                session.ActiveId = id;
+                session.Engine.Execute(Command.Of("document.importImage", input with { DocumentId = Format.Id() }));
+                session.ActiveId = input.Id;
                 AddSession(session);
             }
             else
             {
                 string? parent = DestinationGroup();
                 if (parent is not null) active.Collapsed.Remove(parent);
-                if (!Run("layer.importPng", new ImportArgs(id, name, source, parent), selectId: id)) return;
+                if (!Run("layer.importImage", input with { Parent = parent }, selectId: input.Id)) return;
             }
             Say($"Imported {Path.GetFileName(picker.FileName)}");
         });
     }
 
-    private void ExportPng()
+    private void ExportPng() => ExportImage("PNG", ".png", "*.png", ImageExportFormat.Png);
+
+    private void ExportImage(string label, string extension, string pattern, ImageExportFormat format)
     {
         if (active is null) return;
-        var picker = new SaveFileDialog { Filter = "PNG images (*.png)|*.png", DefaultExt = ".png", AddExtension = true };
-        if (picker.ShowDialog(this) == true) Run("document.export", new PathArgs(picker.FileName));
-    }
-
-    private void ExportImage(string label, string extension, string pattern, SKEncodedImageFormat? format)
-    {
-        if (active?.Engine.Current is not { } document) return;
         var picker = new SaveFileDialog { Filter = $"{label} images ({pattern})|{pattern}", DefaultExt = extension, AddExtension = true };
-        if (picker.ShowDialog(EditorOwner) != true) return;
-        Guard(() => File.WriteAllBytes(picker.FileName, format is { } raster
-            ? renderer.EncodeImage(document, raster) : renderer.EncodeSvg(document)));
+        if (picker.ShowDialog(EditorOwner) == true) Run("document.export", new ExportArgs(picker.FileName, format));
     }
 
     private bool CanClose(Session session)

@@ -149,6 +149,8 @@ public static class Format
 public interface IRasterBackend
 {
     Pixels DecodePng(byte[] data);
+    Pixels DecodeImage(byte[] data);
+    byte[] ExportImage(Document document, ImageExportFormat format);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
     Pixels CompositeForStorage(Document document);

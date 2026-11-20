@@ -17,6 +17,10 @@ public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? P
     string Color = "#FFFFFFFF", int Width = 100, int Height = 100);
 public sealed record ImportArgs(string Id, string Name, byte[]? Png = null, string? Parent = null, string? Path = null);
 public sealed record PathArgs(string Path);
+public enum ImageExportFormat { Png, Jpeg, WebP, Svg }
+public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExportFormat.Png);
+public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null, string? Path = null,
+    string? Parent = null, string? DocumentId = null);
 public sealed record OpenArgs(string Path, byte[]? Data = null);
 public sealed record TextArgs(string Text, string Font, double Size, string Color);
 public sealed record ShapeArgs(int Width, int Height, string Color);
@@ -64,6 +68,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         string? documentId = Current?.Id;
         try
         {
+            command = CaptureFileInputs(command);
             Dispatch(command);
         }
         catch (Exception error)
@@ -73,6 +78,42 @@ public sealed class CommandEngine(IRasterBackend backend)
         }
         Executed?.Invoke(new(DateTimeOffset.Now, Current?.Id ?? documentId, command, true, null));
         return Current;
+    }
+
+    private Command CaptureFileInputs(Command command)
+    {
+        switch (command.Name)
+        {
+            case "layer.createChop":
+                var create = command.Read<CreateChopArgs>();
+                if (create.Snapshot is { Png: null, Native: null } source)
+                    return Command.Of(command.Name, create with { Snapshot = CaptureChopSnapshot(source.SourcePath) }, command.Target);
+                break;
+            case "layer.rebakeChop":
+                var snapshot = command.Read<ChopSnapshotArgs>();
+                if (snapshot.Png is null && snapshot.Native is null)
+                    return Command.Of(command.Name, CaptureChopSnapshot(snapshot.SourcePath), command.Target);
+                break;
+            case "layer.importImage":
+                var image = command.Read<ImageImportArgs>();
+                if (image is { Path: { } path, Data: null })
+                    return Command.Of(command.Name, image with { Path = null, Data = File.ReadAllBytes(path) }, command.Target);
+                break;
+            case "layer.importPng":
+                var png = command.Read<ImportArgs>();
+                if (png is { Path: { } pngPath, Png: null })
+                    return Command.Of(command.Name, png with { Path = null, Png = File.ReadAllBytes(pngPath) }, command.Target);
+                break;
+            case "layer.pastePixels":
+                var paste = command.Read<PastePixelsArgs>();
+                if (paste is { Path: { } pastePath, Png: null, Native: null })
+                {
+                    var pixels = backend.DecodeImage(File.ReadAllBytes(pastePath));
+                    return Command.Of(command.Name, paste with { Path = null, Png = backend.EncodePng(pixels) }, command.Target);
+                }
+                break;
+        }
+        return command;
     }
 
     private void Dispatch(Command command)
@@ -114,6 +155,18 @@ public sealed class CommandEngine(IRasterBackend backend)
                 }
                 Reset(doc, null);
                 return;
+            case "document.importImage":
+                var startImage = command.Read<ImageImportArgs>();
+                CheckId(startImage.Id);
+                CheckId(startImage.DocumentId ?? startImage.Id + "-document");
+                if (startImage.Parent is not null) throw new InvalidDataException("A new image document starts at the root.");
+                var imported = ReadImage(startImage);
+                var imageColor = new ColorSettings(Depth: ChannelDepth.Bit16);
+                var imageLayer = new Layer(startImage.Id, Name(startImage.Name), LayerKind.Raster)
+                    { Width = imported.Width, Height = imported.Height, Pixels = PixelBuffer.Convert(imported, imageColor) };
+                Reset(new Document(startImage.DocumentId ?? startImage.Id + "-document", imported.Width, imported.Height)
+                    { Color = imageColor, Layers = [imageLayer] }, null);
+                return;
             case "document.open":
                 var open = command.Read<OpenArgs>();
                 using (var embedded = open.Data is null ? null : new MemoryStream(open.Data, writable: false))
@@ -133,7 +186,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                 savedFloating = current.Floating is null ? null : current;
                 return;
             case "document.export":
-                File.WriteAllBytes(command.Read<PathArgs>().Path, backend.EncodePng(backend.Composite(current), current.PixelsPerInch));
+                var output = command.Read<ExportArgs>();
+                if (!Enum.IsDefined(output.Format)) throw new InvalidDataException("Unknown export format.");
+                WriteExport(output.Path, backend.ExportImage(current, output.Format));
                 return;
             case "history.undo": cursor = Math.Max(0, cursor - 1); return;
             case "history.redo": cursor = Math.Min(history.Count - 1, cursor + 1); return;
@@ -199,11 +254,47 @@ public sealed class CommandEngine(IRasterBackend backend)
         _ => command.Name
     };
 
+    private static void WriteExport(string path, byte[] data)
+    {
+        string target = System.IO.Path.GetFullPath(path);
+        string temporary = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(target)!, $".{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporary, data);
+            File.Move(temporary, target, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private Pixels ReadImage(ImageImportArgs import)
+    {
+        if ((import.Data is null) == (import.Path is null))
+            throw new InvalidDataException("Import requires either embedded image bytes or an image file path.");
+        return backend.DecodeImage(import.Data ?? File.ReadAllBytes(import.Path!));
+    }
+
+    public ChopSnapshotArgs CaptureChopSnapshot(string file)
+    {
+        string path = System.IO.Path.GetFullPath(file);
+        if (!string.Equals(System.IO.Path.GetExtension(path), ".chop", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Choose a source .chop file.");
+        if (Path is { } project && string.Equals(System.IO.Path.GetFullPath(project), path, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("A document cannot link to itself.");
+        var document = ProjectFile.Open(path);
+        var pixels = backend.CompositeForStorage(document);
+        return pixels.Native is { } native ? new(path, Native: native) :
+            new(path, backend.EncodePng(pixels, document.PixelsPerInch));
+    }
+
     private Layer WithChopSnapshot(Layer layer, ChopSnapshotArgs snapshot)
     {
         if (layer.Kind != LayerKind.Chop || string.IsNullOrWhiteSpace(snapshot.SourcePath) ||
-            !string.Equals(System.IO.Path.GetExtension(snapshot.SourcePath), ".chop", StringComparison.OrdinalIgnoreCase) ||
-            (snapshot.Png is null && snapshot.Native is null)) throw new InvalidDataException("A Chop Layer requires a source .chop file and a raster snapshot.");
+            !string.Equals(System.IO.Path.GetExtension(snapshot.SourcePath), ".chop", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("A Chop Layer requires a source .chop file.");
+        if (snapshot.Png is null && snapshot.Native is null) snapshot = CaptureChopSnapshot(snapshot.SourcePath);
         var pixels = snapshot.Native is { } native ? PixelBuffer.FromNative(native) : backend.DecodePng(snapshot.Png!);
         return layer with { ChopSource = snapshot.SourcePath, Pixels = pixels, Width = pixels.Width, Height = pixels.Height };
     }
@@ -620,6 +711,13 @@ public sealed class CommandEngine(IRasterBackend backend)
                 { Transform = create.Transform ?? new(), Text = create.Text, Font = create.Font, Size = create.Size,
                     Color = create.Color, Width = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Width : create.Width,
                     Height = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Height : create.Height }));
+            case "layer.importImage":
+                var genericImport = command.Read<ImageImportArgs>();
+                NewId(genericImport.Id);
+                CheckParent(genericImport.Parent);
+                var asset = ReadImage(genericImport);
+                return With(Insert(layers, genericImport.Parent, null, new(genericImport.Id, Name(genericImport.Name), LayerKind.Raster)
+                    { Pixels = asset, Width = asset.Width, Height = asset.Height }));
             case "layer.importPng":
                 var import = command.Read<ImportArgs>();
                 NewId(import.Id);
@@ -633,7 +731,12 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var paste = command.Read<PastePixelsArgs>();
                 NewId(paste.Id);
                 CheckParent(paste.Parent);
-                var pastedPixels = PixelBuffer.Convert(paste.Native is { } nativePaste ? PixelBuffer.FromNative(nativePaste) : backend.DecodePng(paste.Png), doc.Color);
+                if (paste.Path is not null && (paste.Png is { Length: > 0 } || paste.Native is not null))
+                    throw new InvalidDataException("Paste requires either a path or embedded pixels.");
+                var pasteSource = paste.Native is { } nativePaste ? PixelBuffer.FromNative(nativePaste) :
+                    paste.Path is { } pastePath ? backend.DecodeImage(File.ReadAllBytes(pastePath)) :
+                    backend.DecodePng(paste.Png ?? throw new InvalidDataException("Paste requires an image."));
+                var pastedPixels = PixelBuffer.Convert(pasteSource, doc.Color);
                 var pasteLayer = new Layer(paste.Id, Name(paste.Name), LayerKind.Raster)
                     { Pixels = pastedPixels, Width = pastedPixels.Width, Height = pastedPixels.Height };
                 var pastedDoc = With(Insert(layers, paste.Parent, null, pasteLayer));

@@ -187,6 +187,8 @@ public partial class MainWindow
         var logActions = new WrapPanel { Margin = new Thickness(5) };
         logActions.Children.Add(Button("Copy selected", () => ExportLog(true, true)));
         logActions.Children.Add(Button("Export script", () => ExportLog(false, false)));
+        logActions.Children.Add(Button("Export script with outputs", () => ExportLog(false, false, includeOutputs: true),
+            "Use output1, output2, and so on to supply new paths when replaying"));
         logActions.Children.Add(Button("Clear display", () =>
         {
             if (active is null) return;
@@ -717,13 +719,12 @@ public partial class MainWindow
         recording.IsChecked = active?.Recording == true;
     }
 
-    private void ExportLog(bool selection, bool clipboard)
+    private void ExportLog(bool selection, bool clipboard, bool includeOutputs = false)
     {
         if (active is null) return;
         var entries = selection ? commandLog.SelectedItems.OfType<LogRow>().Select(row => row.Entry) : active.Log;
-        var commands = entries.Where(entry => entry.Success && entry.Command.Name is not ("document.save" or "document.export"))
-            .Select(entry => entry.Command).ToArray();
-        if (commands.Length == 0) { Say("There are no editing commands to copy or export."); return; }
+        var commands = Scripts.FromRecording(entries, includeOutputs);
+        if (commands.Count == 0) { Say("There are no editing commands to copy or export."); return; }
         Guard(() =>
         {
             if (clipboard) Clipboard.SetText(JsonSerializer.Serialize(commands, Format.Json));

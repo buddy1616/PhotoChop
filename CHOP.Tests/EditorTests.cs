@@ -1550,6 +1550,60 @@ public sealed class EditorTests : IDisposable
     }
 
     [Fact]
+    public async Task CliReplaysFileOperationsAndPortableRecordedOutputs()
+    {
+        var source = NewEngine(8, 6);
+        Layer(source, new("source-shape", "Source", LayerKind.Rectangle, Width: 4, Height: 4, Color: "#FF8C2ACA"));
+        string link = Path.Combine(folder, "source.chop");
+        ProjectFile.Save(link, source.Current!);
+        string input = Path.Combine(folder, "input.webp");
+        File.WriteAllBytes(input, renderer.ExportImage(source.Current!, ImageExportFormat.WebP));
+        var engine = new CommandEngine(renderer);
+        var recorded = new List<LogEntry>();
+        engine.Executed += recorded.Add;
+        engine.Execute(Command.Of("document.importImage", new ImageImportArgs("background", "Background", Data: File.ReadAllBytes(input))));
+        engine.Execute(Command.Of("layer.importImage", new ImageImportArgs("texture", "Texture", Path: input)));
+        engine.Execute(Command.Of("layer.createChop", new CreateChopArgs("linked", "Linked", new(link))));
+        engine.Execute(Command.Of("layer.pastePixels", new PastePixelsArgs("pasted", "Pasted", X: 1, Path: input)));
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(new(ChannelColorMode.Rgb, ChannelDepth.Bit32), 144)));
+        engine.Execute(Command.Of("layer.clipping", true, "pasted"));
+        File.Delete(input);
+        File.Delete(link);
+        engine.Execute(Command.Of("history.change", new HistoryChange(1, Enabled: false)));
+        engine.Execute(Command.Of("history.change", new HistoryChange(1, Enabled: true)));
+
+        string reference = Path.Combine(folder, "reference.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(reference)));
+        var formats = new[] { ImageExportFormat.Png, ImageExportFormat.Jpeg, ImageExportFormat.WebP, ImageExportFormat.Svg };
+        foreach (var format in formats)
+            engine.Execute(Command.Of("document.export", new ExportArgs(Path.Combine(folder, "reference." + format.ToString().ToLowerInvariant()), format)));
+
+        var portable = Scripts.FromRecording(recorded, includeOutputs: true);
+        string script = Path.Combine(folder, "portable.json");
+        await File.WriteAllTextAsync(script, portable.ToJsonString(Format.Json));
+        var paths = new[] { Path.Combine(folder, "replay.chop") }.Concat(formats.Select(format =>
+            Path.Combine(folder, "replay." + format.ToString().ToLowerInvariant()))).ToArray();
+        var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+            { RedirectStandardError = true, UseShellExecute = false };
+        foreach (var argument in new[] { Path.Combine(AppContext.BaseDirectory, "cli", "CHOP.CLI.dll"), "run", script })
+            start.ArgumentList.Add(argument);
+        for (int index = 0; index < paths.Length; index++)
+            start.ArgumentList.Add($"output{index + 1}=" + JsonSerializer.Serialize(paths[index]));
+        using var process = Process.Start(start)!;
+        var errors = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        Assert.True(process.ExitCode == 0, await errors);
+
+        var replay = ProjectFile.Open(paths[0]);
+        Assert.Equal(engine.Current!.Color, replay.Color);
+        Assert.Equal(144, replay.PixelsPerInch);
+        Assert.Equal(engine.Current.AllLayers().Select(layer => layer.Id), replay.AllLayers().Select(layer => layer.Id));
+        for (int index = 0; index < formats.Length; index++)
+            Assert.Equal(renderer.ExportImage(engine.Current, formats[index]), await File.ReadAllBytesAsync(paths[index + 1]));
+        Assert.DoesNotContain(Scripts.FromRecording(recorded, includeOutputs: false), node => node?["name"]?.ToString() == "document.export");
+    }
+
+    [Fact]
     public async Task StandaloneCliReplaysGuiCommandsAndExportsMatchingPng()
     {
         string script = Path.Combine(folder, "replay.json");
