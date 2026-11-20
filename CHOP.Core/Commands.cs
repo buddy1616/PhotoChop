@@ -173,6 +173,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         "selection.lasso" => "Lasso Selection",
         "mask.maskerStroke" => "Masker Stroke",
         "layer.flip" => command.Read<FlipArgs>().Horizontal ? "Flip horizontal" : "Flip vertical",
+        "layer.mergeDown" => "Merge Down",
         "guide.set" => $"Set {command.Read<Guide>().Axis.ToString().ToLowerInvariant()} guide",
         "guide.remove" => "Remove guide",
         "document.resizeImage" => "Image Size",
@@ -197,7 +198,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             Math.Abs(point.X) <= 1000000 && Math.Abs(point.Y) <= 1000000;
         foreach (var contour in contours)
         {
-            if (contour?.Nodes is null || contour.Nodes.Length < (contour.Closed ? 3 : 1))
+            if (contour?.Nodes is null || contour.Nodes.Length < (contour.Closed ? 2 : 1))
                 throw new InvalidDataException("Invalid path contour.");
             nodes += contour.Nodes.Length;
             if (nodes > 100000 || contour.Nodes.Any(node => node is null || !Valid(node.Point) ||
@@ -269,6 +270,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         EffectKind.HueSaturation => "Hue / Saturation",
         EffectKind.GaussianBlur => "Gaussian Blur",
         EffectKind.MotionBlur => "Motion Blur",
+        EffectKind.PathFill => "Fill",
         EffectKind.DropShadow => "Drop Shadow",
         EffectKind.BitCrush => "Bit Crush",
         EffectKind.BlendMode => "Blend mode",
@@ -706,6 +708,24 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Format.Dimensions(pasted.Width, pasted.Height);
                 if (pasted.Alpha?.Length != pasted.Width * pasted.Height) throw new InvalidDataException("Invalid mask data.");
                 return Edit(layer => layer with { Mask = pasted, MaskEnabled = true });
+            case "layer.mergeDown":
+                var upper = Wanted();
+                string? downParent = ParentOf(layers, upper.Id);
+                var siblingsToMerge = downParent is null ? layers : doc.AllLayers().Single(item => item.Id == downParent).Children;
+                int upperIndex = Array.FindIndex(siblingsToMerge, item => item.Id == upper.Id);
+                if (upperIndex < 1) throw new InvalidDataException("There is no layer underneath in the same group.");
+                var lower = siblingsToMerge[upperIndex - 1];
+                RequireEditableSubtree(layers, [upper, lower]);
+                if (lower.Kind == LayerKind.Effect)
+                    throw new InvalidDataException("Select a layer above a layer with drawable content.");
+                var compositeGroup = new Layer(upper.Id, upper.Name, LayerKind.Group) { Children = [lower, upper] };
+                var merged = backend.RasterizeLayer(doc, compositeGroup);
+                var mergedLayer = new Layer(lower.Id, lower.Name, LayerKind.Raster)
+                {
+                    Pixels = merged.Pixels, RasterX = merged.X, RasterY = merged.Y,
+                    Width = merged.Pixels.Width, Height = merged.Pixels.Height
+                };
+                return With(ReplaceItems(layers, downParent, [lower, upper], [mergedLayer]));
             case "layer.bake":
             case "mask.bake":
                 return Edit(layer =>
@@ -798,6 +818,8 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "effect.add":
                 var effect = command.Read<Effect>();
                 CheckEffect(effect);
+                if (effect.Kind == EffectKind.PathFill && Wanted().Kind != LayerKind.Path)
+                    throw new InvalidDataException("The Fill effect requires a Path layer.");
                 if (Wanted().Kind == LayerKind.Effect && effect.Kind == EffectKind.Transform)
                     throw new InvalidDataException("Effect layers do not have transforms.");
                 return Edit(layer => layer.Effects.Any(item => item.Id == effect.Id)
@@ -805,6 +827,8 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "effect.update":
                 var update = command.Read<Effect>();
                 CheckEffect(update);
+                if (update.Kind == EffectKind.PathFill && Wanted().Kind != LayerKind.Path)
+                    throw new InvalidDataException("The Fill effect requires a Path layer.");
                 if (Wanted().Kind == LayerKind.Effect && update.Kind == EffectKind.Transform)
                     throw new InvalidDataException("Effect layers do not have transforms.");
                 return Edit(layer => layer with { Effects = UpdateEffects(layer.Effects, update.Id, list =>
@@ -1157,6 +1181,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case EffectKind.GaussianBlur: Range(effect.A, 0, 100); break;
             case EffectKind.MotionBlur: Range(effect.A, 0, 200); Range(effect.B, -180, 180); break;
             case EffectKind.BitCrush: Range(effect.A, 1, 512); break;
+            case EffectKind.PathFill: Format.Color(effect.Ink); break;
             case EffectKind.Stroke:
                 Range(effect.A, 1, 512);
                 if (!Enum.IsDefined(effect.Alignment)) throw new InvalidDataException("Invalid stroke alignment.");

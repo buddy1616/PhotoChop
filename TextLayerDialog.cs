@@ -22,6 +22,7 @@ internal static class TextLayerDialog
             ItemsSource = Fonts.SystemFontFamilies.Select(family => family.Source).Append("Liberation Sans").Distinct().Order().ToArray()
         };
         var size = new TextBox { Text = initial.Size.ToString(), Width = 64, Padding = new Thickness(4) };
+        NumericWheel.Enable(size, 1);
         var text = new TextBox { Text = initial.Text, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             TextWrapping = TextWrapping.Wrap, Padding = new Thickness(7), VerticalContentAlignment = VerticalAlignment.Top };
         string color = initial.Color;

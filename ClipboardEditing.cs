@@ -25,21 +25,27 @@ public partial class MainWindow
 
     private static BitmapSource? ClipboardBitmap(IDataObject? data)
     {
-        if (data?.GetDataPresent("PNG") == true)
+        foreach (string format in new[] { "PNG", "image/png", DataFormats.Tiff })
         {
-            var png = data.GetData("PNG");
-            using Stream? stream = png switch
+            try
             {
-                byte[] bytes => new MemoryStream(bytes, writable: false),
-                Stream input => input,
-                _ => null
-            };
-            if (stream is { CanSeek: true }) stream.Position = 0;
-            if (stream is not null)
-                return BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat,
+                if (data?.GetDataPresent(format, autoConvert: false) != true) continue;
+                using Stream? stream = data.GetData(format, autoConvert: false) switch
+                {
+                    byte[] bytes => new MemoryStream(bytes, writable: false),
+                    Stream input => input,
+                    _ => null
+                };
+                if (stream is null) continue;
+                if (stream.CanSeek) stream.Position = 0;
+                var image = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat,
                     BitmapCacheOption.OnLoad).Frames.FirstOrDefault();
+                if (image is not null) return image;
+            }
+            catch (Exception error) when (error is IOException or NotSupportedException or ArgumentException
+                or System.Runtime.InteropServices.COMException) { }
         }
-        return Clipboard.GetImage();
+        return ClipboardDib.Read() ?? Clipboard.GetImage();
     }
 
     private void PastePixels()

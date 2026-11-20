@@ -21,6 +21,7 @@ internal static class NewDocumentDialog
             var unit = new ComboBox { ItemsSource = units, SelectedIndex = 0, MinWidth = 120, Margin = new Thickness(6, 0, 0, 0) };
             DockPanel.SetDock(unit, Dock.Right);
             var field = new TextBox { Text = value, Padding = new Thickness(4) };
+            NumericWheel.Enable(field, 0);
             row.Children.Add(unit);
             row.Children.Add(field);
             panel.Children.Add(row);

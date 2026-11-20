@@ -161,6 +161,8 @@ public static class ProjectFile
             foreach (var effect in layer.Effects)
             {
                 CommandEngine.CheckEffect(effect);
+                if (effect.Kind == EffectKind.PathFill && layer.Kind != LayerKind.Path)
+                    throw new InvalidDataException("The Fill effect requires a Path layer.");
                 if (!effects.Add(effect.Id)) throw new InvalidDataException("Duplicate effect ID.");
             }
             Pixels? pixels = null;

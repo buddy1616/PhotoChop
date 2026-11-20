@@ -264,17 +264,17 @@ public partial class MainWindow : Window
 
     private void BuildMenus()
     {
-        var file = Menu("File");
-        Item(file, "New…", NewDocument, "Ctrl+N");
-        Item(file, "Open…", OpenDocument, "Ctrl+O");
+        var file = Menu("_File");
+        Item(file, "_New…", NewDocument, "Ctrl+N");
+        Item(file, "_Open…", OpenDocument, "Ctrl+O");
         recentMenu = new MenuItem { Header = "Recent files" };
         file.Items.Add(recentMenu);
         UpdateRecent();
         Item(file, "Import PNG…", ImportPng);
-        Item(file, "Save", () => Save(active), "Ctrl+S");
-        Item(file, "Save As…", () => Save(active, true), "Ctrl+Shift+S");
-        Item(file, "Export PNG…", ExportPng, "Ctrl+Shift+E");
-        Item(file, "Close document", () => CloseSession(active), "Ctrl+W");
+        Item(file, "_Save", () => Save(active), "Ctrl+S");
+        Item(file, "Save _As…", () => Save(active, true), "Ctrl+Shift+S");
+        Item(file, "_Export PNG…", ExportPng, "Ctrl+Shift+E");
+        Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
 
         var edit = Menu("Edit");
         Item(edit, "Undo", () => Run("history.undo", 0), "Ctrl+Z");
@@ -343,10 +343,12 @@ public partial class MainWindow : Window
         Item(layer, "Group selected layers", Group, "Ctrl+G");
         Item(layer, "Ungroup", () => RunLayer("layer.ungroup", 0));
         Item(layer, "Move into group…", MoveToGroup);
+        Item(layer, "Merge Down", MergeDown, "Ctrl+E");
         Item(layer, "Merge selected layers…", Merge);
         Item(layer, "Position and Rotation…", EditTransform);
         var select = Menu("Select");
         Item(select, "Rectangular selection", () => SetTool("Selection"), "M");
+        Item(select, "Convert Selection to Paths", ConvertSelectionToPaths);
         var modify = new MenuItem { Header = "Modify" };
         select.Items.Add(modify);
         Item(modify, "Expand…", () => ModifySelection(expand: true));
@@ -737,6 +739,7 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
+        RenderStatus.Visibility = Visibility.Visible;
         try
         {
             while (active is { } session && session.Engine.Current is { } snapshot)
@@ -781,7 +784,7 @@ public partial class MainWindow : Window
             canvas.InvalidateVisual();
             Say(error.Message);
         }
-        finally { rendering = false; }
+        finally { rendering = false; RenderStatus.Visibility = Visibility.Collapsed; }
     }
 
     private void Say(string? message = null)
@@ -810,6 +813,8 @@ public partial class MainWindow : Window
         foreach (var (label, value) in fields)
         {
             var box = new TextBox { Text = value, Margin = new Thickness(0, 3, 0, 8), Padding = new Thickness(4) };
+            if (ranges is not null) NumericWheel.Enable(box, ranges[boxes.Count].Min, ranges[boxes.Count].Max);
+            else if (double.TryParse(value, out _)) NumericWheel.Enable(box);
             var caption = new Label { Content = label, Target = box, Padding = new Thickness(0) };
             panel.Children.Add(caption);
             if (ranges is not null)

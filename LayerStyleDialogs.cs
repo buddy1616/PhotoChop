@@ -22,6 +22,7 @@ public partial class MainWindow
             panel.Children.Add(new TextBlock { Text = title, Margin = new Thickness(0, 6, 0, 3) });
             var row = new DockPanel { Margin = new Thickness(0, 0, 0, 3) };
             var box = new TextBox { Text = initial.ToString("0.###"), Width = 72, Padding = new Thickness(3) };
+            NumericWheel.Enable(box, min, max);
             var slider = new Slider { Minimum = min, Maximum = max, Value = initial, Margin = new Thickness(0, 0, 8, 0),
                 VerticalAlignment = VerticalAlignment.Center };
             DockPanel.SetDock(box, System.Windows.Controls.Dock.Right);
@@ -44,14 +45,16 @@ public partial class MainWindow
         var fields = new List<TextBox>();
         ComboBox? alignment = null;
         AngleDial? dial = null;
+        static double Opposite(double angle) => (angle + 180) % 360;
         if (shadow)
         {
             var angleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            dial = new AngleDial { Width = 52, Height = 52, Angle = effect.A };
+            dial = new AngleDial { Width = 52, Height = 52, Angle = Opposite(effect.A) };
             angleRow.Children.Add(dial);
-            angleRow.Children.Add(new Label { Content = "Angle (degrees)", VerticalAlignment = VerticalAlignment.Center });
-            var angle = new TextBox { Text = effect.A.ToString("0.###"), Width = 66, VerticalAlignment = VerticalAlignment.Center };
+            angleRow.Children.Add(new Label { Content = "Light angle (degrees)", VerticalAlignment = VerticalAlignment.Center });
+            var angle = new TextBox { Text = Opposite(effect.A).ToString("0.###"), Width = 66, VerticalAlignment = VerticalAlignment.Center };
             angleRow.Children.Add(angle);
+            NumericWheel.Enable(angle, 0, 360);
             panel.Children.Add(angleRow);
             fields.Add(angle);
             bool syncing = false;
@@ -84,7 +87,8 @@ public partial class MainWindow
         {
             var v = fields.Select(field => Number(field.Text)).ToArray();
             if (v.Any(value => !double.IsFinite(value))) throw new InvalidDataException("Enter finite values.");
-            return shadow ? effect with { A = v[0], B = v[1], Size = v[2], Spread = v[3], Opacity = v[4] / 100, Ink = ink }
+            if (shadow && v[0] is < 0 or > 360) throw new InvalidDataException("Enter a light angle between 0 and 360.");
+            return shadow ? effect with { A = Opposite(v[0]), B = v[1], Size = v[2], Spread = v[3], Opacity = v[4] / 100, Ink = ink }
                 : effect with { A = v[0], Alignment = (StrokeAlignment)alignment!.SelectedItem, Ink = ink };
         }
         var engine = active?.Engine;

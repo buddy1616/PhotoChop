@@ -12,7 +12,7 @@ public partial class MainWindow
     {
         var picker = new OpenFileDialog { Filter = "CHOP documents (*.chop)|*.chop", CheckFileExists = true };
         if (!string.IsNullOrWhiteSpace(source)) picker.FileName = source;
-        return picker.ShowDialog(EditorOwner) == true ? picker.FileName : null;
+        return picker.ShowDialog(effectDialog ?? EditorOwner) == true ? picker.FileName : null;
     }
 
     private void CreateChopLayer()
@@ -36,11 +36,11 @@ public partial class MainWindow
         string path = Path.GetFullPath(file);
         if (string.Equals(active?.Engine.Path, path, StringComparison.OrdinalIgnoreCase))
         {
-            MessageBox.Show(EditorOwner, "Choose another document. A document cannot link to itself.", "Chop Layer");
+            MessageBox.Show(effectDialog ?? EditorOwner, "Choose another document. A document cannot link to itself.", "Chop Layer");
             return null;
         }
 
-        var dialog = new Window { Owner = EditorOwner, Title = "Baking Chop Layer", Width = 365,
+        var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = "Baking Chop Layer", Width = 365,
             SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var content = new StackPanel { Margin = new Thickness(18) };
@@ -69,7 +69,7 @@ public partial class MainWindow
             }
         };
         dialog.ShowDialog();
-        if (failure is not null) MessageBox.Show(EditorOwner, failure.Message, "Could not bake Chop Layer");
+        if (failure is not null) MessageBox.Show(effectDialog ?? EditorOwner, failure.Message, "Could not bake Chop Layer");
         return snapshot;
     }
 
@@ -81,7 +81,7 @@ public partial class MainWindow
         var actions = new WrapPanel();
         actions.Children.Add(Button("Re-Bake", () => RebakeChopLayer(layer, changeSource: false)));
         actions.Children.Add(Button("Change Source…", () => RebakeChopLayer(layer, changeSource: true)));
-        actions.Children.Add(Button("Open Source", () => { if (layer.ChopSource is { } path) OpenPath(path); }));
+        actions.Children.Add(Button("Open Source", () => { if (layer.ChopSource is { } path) { effectDialog?.Close(); OpenPath(path); } }));
         panel.Children.Add(actions);
     }
 }
