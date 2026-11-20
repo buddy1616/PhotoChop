@@ -7,7 +7,8 @@ internal static class NumericWheel
 {
     public static void Enable(TextBox field, double min = double.NegativeInfinity, double max = double.PositiveInfinity, Action<double>? commit = null)
     {
-        field.Template = (System.Windows.Controls.ControlTemplate)field.FindResource("NumericTextBoxTemplate");
+        field.Template = (ControlTemplate)field.FindResource("NumericTextBoxTemplate");
+        field.Padding = new System.Windows.Thickness(5, 2, 5, 2);
         int wheel = 0;
         string accepted = field.Text;
         bool TryValue(out double value) => double.TryParse(field.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out value) &&
