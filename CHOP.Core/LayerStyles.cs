@@ -5,6 +5,24 @@ public enum TexturePreset { Checker, Grain, Weave }
 public sealed record LayerTexture(TexturePreset Preset = TexturePreset.Checker, byte[]? Png = null,
     double Scale = 1, double Depth = .5);
 
+public enum StyleContour { Linear, Cone, Rounded, Cove, Ring }
+
+public static class ContourCurve
+{
+    public static double Sample(StyleContour contour, double value)
+    {
+        double x = Math.Clamp(value, 0, 1);
+        return contour switch
+        {
+            StyleContour.Cone => 1 - Math.Abs(2 * x - 1),
+            StyleContour.Rounded => Math.Sin(x * Math.PI / 2),
+            StyleContour.Cove => 1 - Math.Cos(x * Math.PI / 2),
+            StyleContour.Ring => Math.Pow(Math.Sin(Math.PI * x), 2),
+            _ => x
+        };
+    }
+}
+
 public enum BevelTechnique { Smooth, ChiselHard, ChiselSoft }
 
 public sealed record BevelLighting(string Highlight = "#FFFFFFFF", Blend HighlightMode = Blend.Normal, double HighlightOpacity = 1,

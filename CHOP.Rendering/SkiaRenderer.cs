@@ -762,8 +762,23 @@ public sealed partial class SkiaRenderer : IRasterBackend
     private static Frame ShadowEffect(Frame frame, Effect effect)
     {
         int spread = (int)Math.Round(effect.Size * effect.Spread / 100);
-        var shadow = AlphaEffect(frame, spread, true, Format.Color(effect.Ink), effect.Opacity, spread);
+        uint ink = Format.Color(effect.Ink);
+        var shadow = AlphaEffect(frame, spread, true, ink, effect.Opacity, spread);
         shadow = Blur(shadow, effect.Size * (1 - effect.Spread / 100));
+        if (effect.Contour != StyleContour.Linear)
+        {
+            double maximum = PixelValue.FromArgb(ink).A * effect.Opacity;
+            if (maximum > 0)
+            {
+                var buffer = new PixelBuffer(shadow.Pixels.Width, shadow.Pixels.Height, PixelBuffer.Settings(shadow.Pixels));
+                for (int i = 0; i < shadow.Pixels.Width * shadow.Pixels.Height; i++)
+                {
+                    double alpha = ContourCurve.Sample(effect.Contour, PixelBuffer.Alpha(shadow.Pixels, i) / maximum) * maximum;
+                    buffer.CopyWithAlpha(shadow.Pixels, i, i, alpha);
+                }
+                shadow = shadow with { Pixels = buffer.Finish() };
+            }
+        }
         double radians = effect.A * Math.PI / 180;
         shadow = shadow with { X = shadow.X + (int)Math.Round(Math.Cos(radians) * effect.B),
             Y = shadow.Y + (int)Math.Round(Math.Sin(radians) * effect.B) };

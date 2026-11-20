@@ -100,6 +100,7 @@ public static class PsdImport
                 Color = Settings,
                 PixelsPerInch = file.Dpi is { } dpi && double.IsFinite(dpi) && dpi is >= 1 and <= 100000 ? dpi : 72,
                 Layers = layers,
+                GlobalLightAngle = Effect.LightAngle(EffectKind.BevelEmboss, -(file.GlobalAngle ?? 135)),
                 Channels = ReadExtraChannels(),
                 IccProfile = profile,
                 Guides = file.Guides.Where(guide => double.IsFinite(guide.Position) && guide.Position >= 0 &&

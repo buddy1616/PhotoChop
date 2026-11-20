@@ -31,11 +31,12 @@ internal static class ColorPickerDialog
         area.Children.Add(indicator);
         root.Children.Add(area);
         var hue = new HueSpectrum { Height = 22, Margin = new Thickness(0, 4, 0, 4) };
-        var alpha = new Slider { Minimum = 0, Maximum = 255, TickFrequency = 1, IsSnapToTickEnabled = true };
+        var opacity = StyleFields.Range(original.A * 100 / 255d, 0, 100);
+        var alpha = opacity.Slider;
         root.Children.Add(new TextBlock { Text = "Hue" });
         root.Children.Add(hue);
-        root.Children.Add(new TextBlock { Text = "Opacity" });
-        root.Children.Add(alpha);
+        root.Children.Add(new TextBlock { Text = "Opacity (%)" });
+        root.Children.Add(opacity.Row);
         var colorRow = new DockPanel { Margin = new Thickness(0, 8, 0, 8) };
         var swatch = new Border { Width = 52, Height = 28, Margin = new Thickness(0, 0, 8, 0), BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1) };
         DockPanel.SetDock(swatch, Dock.Left);
@@ -58,7 +59,7 @@ internal static class ColorPickerDialog
         {
             indicator.Margin = new Thickness(saturation * area.ActualWidth - 6, (1 - value) * area.ActualHeight - 6, 0, 0);
             hueFill.Color = FromHsv(hue.Value, 1, 1, 255);
-            current = FromHsv(hue.Value, saturation, value, (byte)alpha.Value);
+            current = FromHsv(hue.Value, saturation, value, (byte)Math.Round(alpha.Value * 255 / 100));
             swatch.Background = new SolidColorBrush(current);
             if (writeHex) hex.Text = current.ToString();
             ok.IsEnabled = true;
@@ -74,7 +75,7 @@ internal static class ColorPickerDialog
                 double sector = high == r ? (g - b) / delta : high == g ? 2 + (b - r) / delta : 4 + (r - g) / delta;
                 hue.Value = (sector * 60 + 360) % 360;
             }
-            alpha.Value = color.A;
+            alpha.Value = color.A * 100 / 255d;
         }
         void ApplyControls()
         {

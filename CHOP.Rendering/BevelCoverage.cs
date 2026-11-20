@@ -66,9 +66,8 @@ public sealed partial class SkiaRenderer
             {
                 double distance = alpha[i] switch
                 {
-                    >= 1 => inside is null ? size : Math.Sqrt(inside[i]) - .5,
-                    <= 0 => outside is null ? -size : .5 - Math.Sqrt(outside[i]),
-                    _ => alpha[i] - .5
+                    >= .5f => inside is null ? size : Math.Sqrt(inside[i]) - .5,
+                    _ => outside is null ? -size : .5 - Math.Sqrt(outside[i])
                 };
                 alpha[i] = (float)Math.Clamp((distance + offset) / size, 0, 1);
             }

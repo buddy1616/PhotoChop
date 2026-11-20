@@ -66,10 +66,10 @@ public sealed partial class SkiaRenderer
             if (effect.Kind == EffectKind.GradientOverlay)
                 color = gradient!(.5 + ((x - (source.Width - 1) / 2d) * dx + (y - (source.Height - 1) / 2d) * dy) / extent);
             else if (effect.Kind == EffectKind.PatternOverlay) color = Texel(x, y);
-            else if (shadow) weight = 1 - AlphaAt(x + (int)Math.Round(dx * effect.B), y + (int)Math.Round(dy * effect.B));
+            else if (shadow) weight = ContourCurve.Sample(effect.Contour, 1 - AlphaAt(x + (int)Math.Round(dx * effect.B), y + (int)Math.Round(dy * effect.B)));
             else if (glow)
             {
-                double halo = AlphaAt(x, y);
+                double halo = ContourCurve.Sample(effect.Contour, AlphaAt(x, y));
                 weight = effect.Alignment == StrokeAlignment.Outside ? 0 : 1 - halo;
                 if (effect.Alignment != StrokeAlignment.Inside) outside = halo * effect.Opacity * color.A;
             }
@@ -84,8 +84,8 @@ public sealed partial class SkiaRenderer
                 double slope = (Height(x + 1, y) - Height(x - 1, y)) * dx +
                     (Height(x, y + 1) - Height(x, y - 1)) * dy;
                 double light = -slope * effect.Size * Math.Cos(altitude) * (lighting?.Depth ?? 1) * (lighting?.Down == true ? -1 : 1);
-                double magnitude = Math.Abs(light);
-                double strength = magnitude / Math.Sqrt(1 + magnitude * magnitude);
+                double magnitude = 1.5 * Math.Abs(light);
+                double strength = ContourCurve.Sample(effect.Contour, magnitude / Math.Sqrt(1 + magnitude * magnitude));
                 weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength;
                 color = light < 0 ? shade : highlight;
                 if (lighting is not null)
@@ -93,7 +93,12 @@ public sealed partial class SkiaRenderer
                     mode = light < 0 ? lighting.ShadowMode : lighting.HighlightMode;
                     color = color with { A = color.A * (light < 0 ? lighting.ShadowOpacity : lighting.HighlightOpacity) };
                 }
-                if (effect.Alignment != StrokeAlignment.Inside) outside = strength * effect.Opacity * color.A;
+                if (effect.Alignment != StrokeAlignment.Inside)
+                {
+                    // Fade the relief into transparency instead of outlining its outer boundary.
+                    double edge = Math.Clamp(bevelCoverage!.At(x, y) * 2, 0, 1);
+                    outside = strength * effect.Opacity * color.A * edge;
+                }
             }
             var blended = BlendRgb(original, color, mode);
             var result = PixelValue.Lerp(original, blended, weight * color.A * effect.Opacity) with { A = original.A };

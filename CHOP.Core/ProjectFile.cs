@@ -133,7 +133,8 @@ public static class ProjectFile
         if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 11 or 12 or 13 or 14)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
-            !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
+            !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000 ||
+            !double.IsFinite(doc.GlobalLightAngle) || doc.GlobalLightAngle is < 0 or >= 360)
             throw new InvalidDataException("Invalid document metadata.");
         Format.Dimensions(doc.Width, doc.Height);
         doc.ImageOrientation?.Inverse();

@@ -21,34 +21,19 @@ public partial class MainWindow
         TextBox Numeric(string title, double initial, double min, double max)
         {
             panel.Children.Add(new TextBlock { Text = title, Margin = new Thickness(0, 6, 0, 3) });
-            var row = new DockPanel { Margin = new Thickness(0, 0, 0, 3) };
-            var box = new TextBox { Text = initial.ToString("0.###"), Width = 72, Padding = new Thickness(3) };
-            NumericWheel.Enable(box, min, max);
-            var slider = new Slider { Minimum = min, Maximum = max, Value = initial, Margin = new Thickness(0, 0, 8, 0),
-                VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(box, System.Windows.Controls.Dock.Right);
-            row.Children.Add(box);
-            row.Children.Add(slider);
-            panel.Children.Add(row);
-            bool syncing = false;
-            slider.ValueChanged += (_, _) =>
-            {
-                if (syncing) return;
-                syncing = true; box.Text = slider.Value.ToString("0.###"); syncing = false;
-            };
-            box.TextChanged += (_, _) =>
-            {
-                if (syncing || !double.TryParse(box.Text, out var number) || !double.IsFinite(number)) return;
-                syncing = true; slider.Value = number; syncing = false;
-            };
-            return box;
+            var field = StyleFields.Range(initial, min, max);
+            panel.Children.Add(field.Row);
+            return field.Input;
         }
         var fields = new List<TextBox>();
         ComboBox? alignment = null, blend = null;
         AngleDial? dial = null;
         static double Opposite(double angle) => (angle + 180) % 360;
+        var shared = new CheckBox { Content = "Use global light", IsChecked = effect.UseGlobalLight };
+        var contour = StyleFields.Contour(effect.Contour);
         if (shadow)
         {
+            panel.Children.Add(shared);
             var angleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             dial = new AngleDial { Width = 52, Height = 52, Angle = Opposite(effect.A) };
             angleRow.Children.Add(dial);
@@ -58,6 +43,9 @@ public partial class MainWindow
             NumericWheel.Enable(angle, 0, 360);
             panel.Children.Add(angleRow);
             fields.Add(angle);
+            shared.Checked += (_, _) => angle.Text = (active?.Engine.Current?.GlobalLightAngle ?? 225).ToString("0.###");
+            panel.Children.Add(new Label { Content = "Contour", Target = contour });
+            panel.Children.Add(contour);
             bool syncing = false;
             dial.Changed += value =>
             {
@@ -97,7 +85,7 @@ public partial class MainWindow
             if (v.Any(value => !double.IsFinite(value))) throw new InvalidDataException("Enter finite values.");
             if (shadow && v[0] is < 0 or > 360) throw new InvalidDataException("Enter a light angle between 0 and 360.");
             if (overlay) return effect with { Mode = (Blend)blend!.SelectedItem, Opacity = v[0] / 100, Ink = ink };
-            return shadow ? effect with { A = Opposite(v[0]), B = v[1], Size = v[2], Spread = v[3], Opacity = v[4] / 100, Ink = ink }
+            return shadow ? effect with { A = Opposite(v[0]), B = v[1], Size = v[2], Spread = v[3], Opacity = v[4] / 100, Ink = ink, UseGlobalLight = shared.IsChecked == true, Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag }
                 : effect with { A = v[0], Alignment = (StrokeAlignment)alignment!.SelectedItem, Ink = ink };
         }
         var engine = active?.Engine;
@@ -141,6 +129,8 @@ public partial class MainWindow
         foreach (var field in fields) field.TextChanged += (_, _) => RefreshPreview();
         if (alignment is not null) alignment.SelectionChanged += (_, _) => RefreshPreview();
         if (blend is not null) blend.SelectionChanged += (_, _) => RefreshPreview();
+        shared.Click += (_, _) => RefreshPreview();
+        contour.SelectionChanged += (_, _) => RefreshPreview();
         live.Click += (_, _) => RefreshPreview();
         dialog.Loaded += (_, _) => RefreshPreview();
         dialog.Closed += (_, _) => { preview = null; UpdateCanvas(); };
