@@ -225,6 +225,8 @@ public static class ProjectFile
                 layer = layer with { Transform = layer.Transform with { Warp = matrix == Projective.Identity ? null : matrix }, SpatialEdits = null };
             }
             Format.Color(layer.Color);
+            if (!double.IsFinite(layer.TextBend) || layer.TextBend is < -1 or > 1)
+                throw new InvalidDataException("Invalid text bend.");
             if (layer.Kind is LayerKind.Raster or LayerKind.Rectangle or LayerKind.Ellipse or LayerKind.Fill) Format.Dimensions(layer.Width, layer.Height);
             var effects = new HashSet<string>();
             foreach (var effect in layer.Effects)
@@ -237,7 +239,7 @@ public static class ProjectFile
             Pixels? pixels = null;
             if (manifest.Resources.TryGetValue(layer.Id, out var resource))
             {
-                if (layer.Kind is not (LayerKind.Raster or LayerKind.Chop)) throw new InvalidDataException("Unexpected raster resource.");
+                if (layer.Kind is not (LayerKind.Raster or LayerKind.Chop or LayerKind.Text)) throw new InvalidDataException("Unexpected raster resource.");
                 pixels = PixelBuffer.Convert(ReadPixels(resource, $"pixels/{layer.Id}"), doc.Color);
             }
             if (layer.Kind == LayerKind.Chop && pixels is null) throw new InvalidDataException("Missing Chop Layer snapshot.");

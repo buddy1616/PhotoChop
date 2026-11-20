@@ -16,6 +16,8 @@ public partial class MainWindow
     private Chop.Core.Transform? moveOriginal;
     private Chop.Core.Transform? movePreview;
     private Document? preview;
+    private Command? pencilPreview;
+    private object? pencilGesture;
     private SKMatrix moveParentInverse = SKMatrix.Identity;
     private Point gestureStart;
     private Point panOrigin;
@@ -199,7 +201,12 @@ public partial class MainWindow
                         (tool != "Masker" && raster.Kind != LayerKind.Raster && !(active.MaskTarget == raster.Id && raster.Mask is not null)))
                     { Say("Select an unlocked raster layer to paint."); return; }
                     stroke.Add(new(point.X, point.Y));
-                    canvas.Stroke = stroke;
+                    if (tool == "Brush" && pencilMode)
+                    {
+                        pencilGesture = new object();
+                        PreviewPencil(raster.Id);
+                    }
+                    else canvas.Stroke = stroke;
                     canvas.StrokeColor = foreground;
                     canvas.StrokeSize = brushSize;
                     canvas.StrokeOpacity = brushOpacity;
@@ -256,7 +263,10 @@ public partial class MainWindow
             case "Brush":
             case "Eraser":
                 if (stroke.Count < 99999 && (point - new Point(stroke[^1].X, stroke[^1].Y)).Length >= .25)
+                {
                     stroke.Add(new(point.X, point.Y));
+                    if (pencilGesture is not null && active.ActiveId is { } paintId) PreviewPencil(paintId);
+                }
                 canvas.InvalidateVisual();
                 break;
             case "Selection" when selectionOrigin is not null:
@@ -316,6 +326,9 @@ public partial class MainWindow
         var bounds = GestureBounds(end);
         int x = (int)Math.Floor(bounds.X), y = (int)Math.Floor(bounds.Y);
         var area = new Area(x, y, (int)Math.Ceiling(bounds.Right) - x, (int)Math.Ceiling(bounds.Bottom) - y);
+        bool pencil = pencilGesture is not null;
+        if (pencil && stroke.Count < 100000 && stroke[^1] != new PointD(end.X, end.Y))
+            stroke.Add(new(end.X, end.Y));
         var points = stroke.ToArray();
         var lasso = completed == "Lasso" ? lassoPoints.Append(new PointD(end.X, end.Y)).ToArray() : [];
         var moved = movePreview;
@@ -327,7 +340,7 @@ public partial class MainWindow
         var mode = selectionMode;
         var moveSelection = new PointD(Math.Round(motion.X), Math.Round(motion.Y));
         bool mask = active.MaskTarget is { } maskId && ActiveLayer() is { Mask: not null } layer && layer.Id == maskId;
-        CancelGesture();
+        CancelGesture(keepPencilFrame: pencil);
         switch (completed)
         {
             case "Gradient":
@@ -342,6 +355,16 @@ public partial class MainWindow
                 if (points.Length > 0 && active.ActiveId is { } paintTarget)
                 {
                     var paint = new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser", Pencil: completed == "Brush" && pencilMode);
+                    if (pencil)
+                    {
+                        active.KeepPencilFrame = true;
+                        if (!Run(mask ? "mask.paintStroke" : "layer.paintStroke", paint, paintTarget))
+                        {
+                            active.KeepPencilFrame = false;
+                            UpdateCanvas();
+                        }
+                        break;
+                    }
                     var view = canvas;
                     var overlay = new EditorCanvas.PaintOverlay(paint, active.Engine.Current?.Selection);
                     view.PendingPaint.Add(overlay);
@@ -416,8 +439,19 @@ public partial class MainWindow
         return true;
     }
 
-    private void CancelGesture()
+    private void PreviewPencil(string id)
     {
+        pencilPreview = Command.Of(active?.MaskTarget == id ? "mask.paintStroke" : "layer.paintStroke",
+            new StrokeArgs(stroke.ToArray(), brushSize, hardness, brushOpacity, foreground, Erase: false, Pencil: true), id);
+        UpdateCanvas();
+    }
+
+    private void CancelGesture(bool keepPencilFrame = false)
+    {
+        bool wasPencil = pencilGesture is not null;
+        pencilGesture = null;
+        pencilPreview = null;
+        if (wasPencil && !keepPencilFrame) UpdateCanvas();
         canvas.GradientGuide = null;
         if (guideDrag is not null) CancelGuide();
         gesture = null;
@@ -679,13 +713,7 @@ public partial class MainWindow
             OptionLabel(label);
             var input = new TextBox { Text = initial.ToString(), Width = 66, Margin = new Thickness(3, 0, 0, 0),
                 VerticalContentAlignment = VerticalAlignment.Center, ToolTip = label };
-            input.TextChanged += (_, _) =>
-            {
-                bool valid = double.TryParse(input.Text, out var number) && double.IsFinite(number) && number is >= .01 and <= 16384 &&
-                    (!size || number >= 1);
-                input.BorderBrush = valid ? SystemColors.ControlDarkBrush : Brushes.OrangeRed;
-                if (valid) assign(size ? Math.Round(number) : number);
-            };
+            NumericWheel.Enable(input, size ? 1 : .01, 16384, value => assign(size ? Math.Round(value) : value));
             ToolOptions.Children.Add(input);
         }
     }
@@ -724,11 +752,7 @@ public partial class MainWindow
     {
         OptionLabel(name);
         var field = new TextBox { Text = initial.ToString(max == 1 ? "0.00" : "0.##"), Width = 54, VerticalAlignment = VerticalAlignment.Center };
-        NumericWheel.Enable(field, min, max);
-        field.TextChanged += (_, _) =>
-        {
-            if (double.TryParse(field.Text, out double value) && value >= min && value <= max) changed(value);
-        };
+        NumericWheel.Enable(field, min, max, changed);
         ToolOptions.Children.Add(field);
     }
 

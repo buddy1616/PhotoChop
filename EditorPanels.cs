@@ -612,13 +612,13 @@ public partial class MainWindow
             Say("Unlock the text layer to edit it.");
             return;
         }
-        if (TextLayerDialog.Show(EditorOwner, "Edit text layer", new TextArgs(layer.Text, layer.Font, layer.Size, layer.Color),
+        if (TextLayerDialog.Show(EditorOwner, "Edit text layer", new TextArgs(layer.Text, layer.Font, layer.Size, layer.Color, layer.TextBend),
             input => PreviewText(input, value => Command.Of("layer.text", value, layer.Id))) is { } values)
             Run("layer.text", values, layer.Id, layer.Id);
     }
 
     private static LayerArgs ApplyText(LayerArgs layer, TextArgs text) =>
-        layer with { Text = text.Text, Font = text.Font, Size = text.Size, Color = text.Color };
+        layer with { Text = text.Text, Font = text.Font, Size = text.Size, Color = text.Color, TextBend = text.Bend };
 
     private void PreviewText(TextArgs? text, Func<TextArgs, Command> command)
     {

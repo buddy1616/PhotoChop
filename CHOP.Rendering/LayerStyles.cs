@@ -34,9 +34,10 @@ public sealed partial class SkiaRenderer
         int spread = glow ? (int)Math.Round(effect.Size * effect.Spread / 100) : 0;
         int pad = glow && effect.Alignment != StrokeAlignment.Inside ? (int)Math.Ceiling(effect.Size * 3) + spread :
             bevel && effect.Alignment != StrokeAlignment.Inside ? (int)Math.Ceiling(effect.Size * 3) : 0;
-        var coverage = glow || shadow || bevel
-            ? Blur(AlphaEffect(frame, spread, true, 0xFFFFFFFF, 1, spread), glow ? effect.Size * (1 - effect.Spread / 100) :
-                bevel ? effect.Size / 3 : effect.Size)
+        var bevelCoverage = bevel ? new BevelCoverage(source, effect.Size / 3) : null;
+        var coverage = glow || shadow
+            ? Blur(AlphaEffect(frame, spread, true, 0xFFFFFFFF, 1, spread),
+                glow ? effect.Size * (1 - effect.Spread / 100) : effect.Size)
             : frame;
         var ink = PixelValue.FromArgb(Format.Color(effect.Ink));
         int width = checked(source.Width + 2 * pad), height = checked(source.Height + 2 * pad);
@@ -76,21 +77,23 @@ public sealed partial class SkiaRenderer
             {
                 double Height(int sx, int sy)
                 {
-                    double shape = AlphaAt(sx, sy);
+                    double shape = bevelCoverage!.At(sx, sy);
                     var texel = Texel(sx, sy);
                     return shape * (1 + (texel.R - .5) * texel.A * (texture?.Depth ?? 0));
                 }
                 double slope = (Height(x + 1, y) - Height(x - 1, y)) * dx +
                     (Height(x, y + 1) - Height(x, y - 1)) * dy;
                 double light = -slope * effect.Size * Math.Cos(altitude) * (lighting?.Depth ?? 1) * (lighting?.Down == true ? -1 : 1);
-                weight = effect.Alignment == StrokeAlignment.Outside ? 0 : Math.Min(1, Math.Abs(light));
+                double magnitude = Math.Abs(light);
+                double strength = magnitude / Math.Sqrt(1 + magnitude * magnitude);
+                weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength;
                 color = light < 0 ? shade : highlight;
                 if (lighting is not null)
                 {
                     mode = light < 0 ? lighting.ShadowMode : lighting.HighlightMode;
                     color = color with { A = color.A * (light < 0 ? lighting.ShadowOpacity : lighting.HighlightOpacity) };
                 }
-                if (effect.Alignment != StrokeAlignment.Inside) outside = Math.Min(1, Math.Abs(light)) * effect.Opacity * color.A;
+                if (effect.Alignment != StrokeAlignment.Inside) outside = strength * effect.Opacity * color.A;
             }
             var blended = BlendRgb(original, color, mode);
             var result = PixelValue.Lerp(original, blended, weight * color.A * effect.Opacity) with { A = original.A };

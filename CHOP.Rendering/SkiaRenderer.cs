@@ -81,7 +81,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
     public Pixels Composite(Document document)
     {
-        var composite = CompositeRegion(ResolveFloating(document).Layers, new Area(0, 0, document.Width, document.Height));
+        var composite = CompositeRegion(ProfiledLayers(ResolveFloating(document)), new Area(0, 0, document.Width, document.Height));
         return document.Color.Mode == ChannelColorMode.Grayscale ? ViewComponent(composite, ColorComponent.Gray, opaque: false) : composite;
     }
 
@@ -329,15 +329,16 @@ public sealed partial class SkiaRenderer : IRasterBackend
         }
         else
         {
-            var raster = layer.Kind is LayerKind.Raster or LayerKind.Chop ? ResolveRaster(layer) : null;
+            var raster = layer.Kind is LayerKind.Raster or LayerKind.Chop or LayerKind.Text ? ResolveRaster(layer) : null;
             Pixels? source = layer.Kind switch
             {
                 LayerKind.Raster or LayerKind.Chop => raster?.Pixels,
+                LayerKind.Text => raster?.Pixels ?? vectors.GetValue(layer, Rasterize),
                 LayerKind.Fill => FillSource(layer, layer.Width, layer.Height),
                 _ => vectors.GetValue(layer, Rasterize)
             };
             if (source is null) return null;
-            frame = new(precision is null ? source : PixelBuffer.Convert(source, precision), raster?.X ?? 0, raster?.Y ?? 0);
+            frame = new(precision is null ? source : PixelBuffer.Convert(source, precision), raster?.X ?? layer.RasterX, raster?.Y ?? layer.RasterY);
         }
         if (layer.MaskEnabled && layer.Mask is { } mask) frame = ApplyMask(frame, mask);
         using var coverage = VectorCoverage(layer.VectorMask, new(frame.X, frame.Y, frame.Pixels.Width, frame.Pixels.Height), SKMatrix.Identity);
@@ -440,8 +441,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
             WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) is not { } world || !world.TryInvert(out var inverse))
             return false;
         var local = inverse.MapPoint((float)point.X, (float)point.Y);
-        var text = vectors.GetValue(layer, Rasterize);
-        return local.X >= 0 && local.Y >= 0 && local.X < text.Width && local.Y < text.Height;
+        var text = layer.Pixels ?? vectors.GetValue(layer, Rasterize);
+        return local.X >= layer.RasterX && local.Y >= layer.RasterY &&
+            local.X < layer.RasterX + text.Width && local.Y < layer.RasterY + text.Height;
     }
 
     private static Frame? RasterizePath(PathContour[] contours, Effect? stroke, Effect? fill)
@@ -508,13 +510,31 @@ public sealed partial class SkiaRenderer : IRasterBackend
             using var font = new SKFont(typeface, (float)layer.Size);
             string[] lines = layer.Text.Replace("\r", "").Split('\n');
             float lineHeight = Math.Max(font.Spacing, font.Size);
-            int width = Math.Clamp((int)Math.Ceiling(lines.Max(line => font.MeasureText(line))) + 4, 1, 16384);
-            int height = Math.Clamp((int)Math.Ceiling(lineHeight * lines.Length) + 4, 1, Math.Min(16384, 32_000_000 / width));
+            float widest = lines.Max(line => font.MeasureText(line));
+            float rise = (float)(layer.TextBend * widest * .22);
+            float guard = rise == 0 ? 0 : font.Size;
+            int width = Math.Clamp((int)Math.Ceiling(widest + 2 * guard) + 4, 1, 16384);
+            int height = Math.Clamp((int)Math.Ceiling(lineHeight * lines.Length + Math.Abs(rise) + guard) + 4,
+                1, Math.Min(16384, 32_000_000 / width));
             using var text = Surface(width, height);
             using var canvas = new SKCanvas(text);
             canvas.Clear(SKColors.Transparent);
             for (int i = 0; i < lines.Length && i * lineHeight < height; i++)
-                canvas.DrawText(lines[i], 1, 1 - font.Metrics.Ascent + i * lineHeight, SKTextAlign.Left, font, paint);
+            {
+                float baseline = 1 - font.Metrics.Ascent + i * lineHeight;
+                if (rise == 0 || lines[i].Length == 0)
+                {
+                    canvas.DrawText(lines[i], 1, baseline, SKTextAlign.Left, font, paint);
+                    continue;
+                }
+                float span = font.MeasureText(lines[i]);
+                float lineRise = rise * span / widest;
+                float y = baseline + Math.Max(0, rise);
+                using var path = new SKPath();
+                path.MoveTo(1 + guard, y);
+                path.QuadTo(1 + guard + span / 2, y - 2 * lineRise, 1 + guard + span, y);
+                canvas.DrawTextOnPath(lines[i], path, new SKPoint(0, 0), SKTextAlign.Center, font, paint);
+            }
             canvas.Flush();
             return Unpremultiply(text);
         }

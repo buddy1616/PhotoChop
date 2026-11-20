@@ -25,7 +25,9 @@ public static class PsdImport
         if (!Format.ValidId(documentId)) throw new InvalidDataException("Choose a valid document ID.");
         if (bytes.Length > MaxInputBytes) throw new InvalidDataException("The PSD exceeds the supported file size.");
         var file = PsdParser.Parse(bytes);
-        return new Importer(file).Read(documentId, flattened);
+        byte[]? profile = file.IccProfile.Length is > 0 and <= 16 * 1024 * 1024 ? file.IccProfile.ToArray() : null;
+        using var colorTransform = file.Mode == 4 && profile is not null ? CmykProfile.Open(profile) : null;
+        return new Importer(file, profile, colorTransform).Read(documentId, flattened);
     }
 
     private static byte[] ReadInput(Stream input)
@@ -48,7 +50,7 @@ public static class PsdImport
         return copy.ToArray();
     }
 
-    private sealed class Importer(PsdFile file)
+    private sealed class Importer(PsdFile file, byte[]? profile, CmykProfile? colorTransform)
     {
         private readonly List<string> warnings = [];
         private long decodedBytes;
@@ -72,8 +74,8 @@ public static class PsdImport
             if (file.Mode == 8) Warn("Duotone ink curves were converted to grayscale.");
             if (file.Mode == 9) Warn("Lab colors were converted to RGB.");
             if (file.IccProfile.Length > 16 * 1024 * 1024) Warn("An oversized embedded ICC profile was not imported.");
-            else if (!file.IccProfile.IsEmpty)
-                Warn("The embedded ICC profile was preserved. PhotoChop previews color without applying the profile.");
+            else if (!file.IccProfile.IsEmpty && colorTransform is null)
+                Warn("The embedded ICC profile was preserved. A display transform could not be created for this profile.");
 
             var layers = flattened || file.Layers.Count == 0 ? [] : ReadLayers();
             if (layers.Length == 0 || flattened)
@@ -99,7 +101,7 @@ public static class PsdImport
                 PixelsPerInch = file.Dpi is { } dpi && double.IsFinite(dpi) && dpi is >= 1 and <= 100000 ? dpi : 72,
                 Layers = layers,
                 Channels = ReadExtraChannels(),
-                IccProfile = file.IccProfile.Length is > 0 and <= 16 * 1024 * 1024 ? file.IccProfile.ToArray() : null,
+                IccProfile = profile,
                 Guides = file.Guides.Where(guide => double.IsFinite(guide.Position) && guide.Position >= 0 &&
                     guide.Position <= (guide.Vertical ? file.Width : file.Height)).Select((guide, index) =>
                     new Guide($"psd-guide-{index + 1}", guide.Vertical ? GuideAxis.Vertical : GuideAxis.Horizontal,
@@ -178,13 +180,14 @@ public static class PsdImport
             string? fillColor = !group && (pixels is null || source.PixelDataIrrelevant)
                 ? PsdSolidFill.Read(source) : null;
             if (fillColor is not null) pixels = null;
-            WarnAboutTags(source, pixels is not null, fillColor is not null);
+            var text = group ? null : PsdText.Read(source);
+            WarnAboutTags(source, pixels is not null, fillColor is not null, text is not null);
             bool partial = false;
             var effects = Array.Empty<Effect>();
             if (source.Tags.TryGetValue("lfx2", out var styleData) || source.Tags.TryGetValue("lmfx", out styleData) ||
                 source.Tags.TryGetValue("lfxs", out styleData))
                 effects = PsdDescriptorStyles.Read(styleData, ReadBlend,
-                    patterns ??= PsdPatterns.Read(file.GlobalTags), file.GlobalAngle, file.GlobalAltitude, out partial);
+                    patterns ??= PsdPatterns.Read(file.GlobalTags), file.GlobalAngle, file.GlobalAltitude, colorTransform, out partial);
             if (styleData.IsEmpty && source.Tags.TryGetValue("lrFX", out var legacy))
             {
                 effects = PsdLegacyStyles.Read(legacy, ReadBlend, out bool legacyPartial);
@@ -198,11 +201,13 @@ public static class PsdImport
                 vectorMask is { Enabled: true })) Warn("Pass-through groups with masks or reduced opacity use isolated compositing.");
             if (source.Clipped && !hasBelow) Warn("Clipping was released on layers with no base layer below.");
 
-            return new(id, name, group ? LayerKind.Group : fillColor is not null ? LayerKind.Fill : LayerKind.Raster)
+            return new(id, name, group ? LayerKind.Group : text is not null ? LayerKind.Text : fillColor is not null ? LayerKind.Fill : LayerKind.Raster)
             {
-                Color = fillColor ?? "#FFFFFFFF",
+                Color = fillColor ?? (text is null ? "#FFFFFFFF" : TextInk(pixels)),
+                Text = text?.Text ?? "Text", Font = text?.Font ?? "Liberation Sans",
+                Size = text?.Size ?? 48, TextBend = text?.Bend ?? 0,
                 Width = pixels?.Width ?? file.Width, Height = pixels?.Height ?? file.Height,
-                RasterX = pixels is null ? 0 : source.X, RasterY = pixels is null ? 0 : source.Y,
+                RasterX = pixels is not null || text is not null ? source.X : 0, RasterY = pixels is not null || text is not null ? source.Y : 0,
                 Pixels = pixels, Children = children, Effects = effects,
                 Visible = source.Visible, Locked = source.Locked, Opacity = source.Opacity / 255d,
                 FillOpacity = source.Tags.TryGetValue("iOpa", out var fillOpacity) && fillOpacity.Length > 0 ? fillOpacity.Span[0] / 255d : 1,
@@ -211,14 +216,23 @@ public static class PsdImport
             };
         }
 
-        private void WarnAboutTags(PsdLayer source, bool hasPixels, bool editableFill)
+        private static string TextInk(Pixels? pixels)
+        {
+            if (pixels is not null)
+                for (int i = 3; i < pixels.Rgba.Length; i += 4)
+                    if (pixels.Rgba[i] == 255)
+                        return $"#FF{pixels.Rgba[i - 3]:X2}{pixels.Rgba[i - 2]:X2}{pixels.Rgba[i - 1]:X2}";
+            return "#FF000000";
+        }
+
+        private void WarnAboutTags(PsdLayer source, bool hasPixels, bool editableFill, bool editableText)
         {
             var tags = source.Tags;
-            if (tags.ContainsKey("TySh") || tags.ContainsKey("tySh") || tags.ContainsKey("SoLd") ||
+            if ((!editableText && (tags.ContainsKey("TySh") || tags.ContainsKey("tySh"))) || tags.ContainsKey("SoLd") ||
                 tags.ContainsKey("SoLE") || tags.ContainsKey("plLd") || (!editableFill &&
                 (tags.ContainsKey("SoCo") || tags.ContainsKey("GdFl") || tags.ContainsKey("PtFl") ||
                     tags.ContainsKey("vscg") || tags.ContainsKey("vogk"))))
-                Warn(hasPixels ? "Text, Smart Objects, and Photoshop-specific fills or shapes use their saved raster pixels." :
+                Warn(hasPixels ? "Unsupported text warps, Smart Objects, and Photoshop-specific fills or shapes use their saved raster pixels." :
                     "Some Photoshop-specific layers had no editable raster and were kept as empty layers.");
             if (tags.Keys.Any(key => key is "brit" or "levl" or "curv" or "expA" or "vibA" or "hue " or "hue2" or
                 "blnc" or "blwh" or "phfl" or "mixr" or "clrL" or "nvrt" or "post" or "thrs" or "grdm" or "selc"))
