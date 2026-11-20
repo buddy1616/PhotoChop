@@ -25,8 +25,11 @@ public sealed record Transform(double X = 0, double Y = 0, double ScaleX = 1, do
     }
 }
 public sealed record Placement(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1);
+/// <summary>Original ink fractions in the document's CMYK profile.</summary>
+public sealed record CmykColor(double Cyan, double Magenta, double Yellow, double Black);
+
 public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal, string Ink = "#FF000000", StrokeAlignment Alignment = StrokeAlignment.Outside,
-    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null, bool UseGlobalLight = false, StyleContour Contour = StyleContour.Linear)
+    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null, bool UseGlobalLight = false, StyleContour Contour = StyleContour.Linear, CmykColor? CmykInk = null)
 {
     public static bool UsesLight(EffectKind kind) => kind is EffectKind.BevelEmboss or EffectKind.DropShadow or EffectKind.InnerShadow;
     public static double LightAngle(EffectKind kind, double angle) => ((angle + (kind == EffectKind.DropShadow ? 180 : 0)) % 360 + 360) % 360;

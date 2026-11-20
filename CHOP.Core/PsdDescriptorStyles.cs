@@ -40,7 +40,8 @@ internal static class PsdDescriptorStyles
                     string? strokePaint = type == EffectKind.Stroke ? style.Enum("PntT") : null;
                     if (strokePaint is not (null or "SClr" or "GrFl")) { partial = true; continue; }
                     bool gradient = type == EffectKind.GradientOverlay || strokePaint == "GrFl";
-                    var color = ReadColor(style.Get("Clr ") as Descriptor, colorTransform);
+                    var colorDescriptor = style.Get("Clr ") as Descriptor;
+                    var color = ReadColor(colorDescriptor, colorTransform);
                     if (color is null && !gradient && type is not (EffectKind.BevelEmboss or EffectKind.PatternOverlay))
                     { partial = true; continue; }
                     GradientStop[]? stops = null;
@@ -109,7 +110,7 @@ internal static class PsdDescriptorStyles
                         Mode: style.Enum("Md  ") is { } mode ? blend(mode) : Blend.Normal, Ink: color ?? "#FFFFFFFF", Alignment: align,
                         Size: Math.Clamp(style.Number("blur", style.Number("Sz  ", 4)), type == EffectKind.BevelEmboss ? 1 : .1, 100),
                         Spread: Math.Clamp(style.Number("Ckmt", 0), 0, 100),
-                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops, Texture: texture, Lighting: lighting, UseGlobalLight: useGlobal && Effect.UsesLight(type.Value), Contour: contour));
+                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops, Texture: texture, Lighting: lighting, UseGlobalLight: useGlobal && Effect.UsesLight(type.Value), Contour: contour, CmykInk: type == EffectKind.ColorOverlay ? ReadCmyk(colorDescriptor) : null));
                 }
             }
         }
@@ -136,22 +137,28 @@ internal static class PsdDescriptorStyles
         return result;
     }
 
+    private static CmykColor? ReadCmyk(Descriptor? color)
+    {
+        if (color is null || (color.Type != "CMYC" && color.Get("Cyn ") is null)) return null;
+        double Ink(string key) => Math.Clamp(color.Number(key, 0) / 100, 0, 1);
+        return new(Ink("Cyn "), Ink("Mgnt"), Ink("Ylw "), Ink("Blck"));
+    }
+
     private static string? ReadColor(Descriptor? color, CmykProfile? colorTransform)
     {
         if (color is null) return null;
-        if (color.Type == "CMYC" || color.Get("Cyn ") is not null)
+        if (ReadCmyk(color) is { } inks)
         {
-            double Ink(string key) => Math.Clamp(color.Number(key, 0) / 100, 0, 1);
             if (colorTransform is not null)
             {
-                ushort Sample(string key) => (ushort)Math.Round(Ink(key) * 65535);
+                static ushort Sample(double ink) => (ushort)Math.Round(ink * 65535);
                 ushort[] rgb = new ushort[3];
-                if (colorTransform.Convert([Sample("Cyn "), Sample("Mgnt"), Sample("Ylw "), Sample("Blck")], rgb, 1))
+                if (colorTransform.Convert([Sample(inks.Cyan), Sample(inks.Magenta), Sample(inks.Yellow), Sample(inks.Black)], rgb, 1))
                     return $"#FF{(rgb[0] + 128) / 257:X2}{(rgb[1] + 128) / 257:X2}{(rgb[2] + 128) / 257:X2}";
             }
-            double light = 1 - Ink("Blck");
-            int Rgb(string key) => (int)Math.Round(255 * (1 - Ink(key)) * light);
-            return $"#FF{Rgb("Cyn "):X2}{Rgb("Mgnt"):X2}{Rgb("Ylw "):X2}";
+            double light = 1 - inks.Black;
+            int Rgb(double ink) => (int)Math.Round(255 * (1 - ink) * light);
+            return $"#FF{Rgb(inks.Cyan):X2}{Rgb(inks.Magenta):X2}{Rgb(inks.Yellow):X2}";
         }
         if (color.Type != "RGBC") return null;
         int Read(string key) => (int)Math.Round(Math.Clamp(color.Number(key, 0), 0, 255));

@@ -14,6 +14,7 @@ public sealed partial class SkiaRenderer
     public Pixels CompositeForStorage(Document document)
     {
         document = ResolveFloating(document);
+        if (CompositeCmyk(document) is { } native) return native;
         if (document.Color is { Mode: ChannelColorMode.Cmyk, Depth: ChannelDepth.Bit8 } && document.IccProfile is { } profile)
         {
             using var transform = CmykProfile.Open(profile, fromSrgb: true);

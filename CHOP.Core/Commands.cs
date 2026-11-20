@@ -1571,9 +1571,17 @@ public sealed class CommandEngine(IRasterBackend backend)
 
     internal static void CheckEffect(Effect effect)
     {
+        if (effect is null || !Enum.IsDefined(effect.Kind)) throw new InvalidDataException("Unknown effect.");
         if (!Enum.IsDefined(effect.Contour) || effect.UseGlobalLight && !Effect.UsesLight(effect.Kind))
             throw new InvalidDataException("Invalid contour or global light setting.");
-        if (effect is null || !Enum.IsDefined(effect.Kind)) throw new InvalidDataException("Unknown effect.");
+        if (effect.CmykInk is { } inks)
+        {
+            if (effect.Kind != EffectKind.ColorOverlay) throw new InvalidDataException("Native CMYK ink requires a Color Overlay.");
+            Range(inks.Cyan, 0, 1);
+            Range(inks.Magenta, 0, 1);
+            Range(inks.Yellow, 0, 1);
+            Range(inks.Black, 0, 1);
+        }
         CheckId(effect.Id);
         switch (effect.Kind)
         {
