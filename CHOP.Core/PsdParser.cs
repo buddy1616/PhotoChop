@@ -8,6 +8,10 @@ internal sealed record PsdFile(int Width, int Height, int Depth, int Mode, int C
     IReadOnlyList<string> AlphaNames, bool IsPsb)
 {
     public bool? HasComposite { get; init; }
+    public double? GlobalAngle { get; init; }
+    public double? GlobalAltitude { get; init; }
+    public IReadOnlyDictionary<string, ReadOnlyMemory<byte>> GlobalTags { get; init; } =
+        new Dictionary<string, ReadOnlyMemory<byte>>();
     public string? Writer { get; init; }
     public ReadOnlyMemory<byte> ColorModeData { get; init; }
     public int? TransparencyIndex { get; init; }
@@ -58,6 +62,7 @@ internal static class PsdParser
         var layerAndMask = file.ReadSection(file.ReadUInt32());
         var layers = new List<PsdLayer>();
         bool transparency = false;
+        Dictionary<string, ReadOnlyMemory<byte>> global = new();
         if (layerAndMask.Remaining > 0)
         {
             (layers, transparency) = ReadLayers(layerAndMask.ReadSection(layerAndMask.ReadUInt32()));
@@ -66,7 +71,7 @@ internal static class PsdParser
             {
                 var tail = new PsdReader(trailer);
                 if (!HasTagSignature(trailer.Span)) tail.Skip(tail.ReadUInt32());
-                var global = ReadTaggedBlocks(ReadRemaining(tail), alignment: 4);
+                global = ReadTaggedBlocks(ReadRemaining(tail), alignment: 4);
                 string? alternate = depth switch { 16 => "Lr16", 32 => "Lr32", _ => null };
                 if ((alternate is not null && global.TryGetValue(alternate, out var info)) ||
                     (layers.Count == 0 && global.TryGetValue("Layr", out info)))
@@ -84,6 +89,9 @@ internal static class PsdParser
             IsPsb: false)
         {
             HasComposite = resources.HasComposite,
+            GlobalAngle = resources.GlobalAngle,
+            GlobalAltitude = resources.GlobalAltitude,
+            GlobalTags = global,
             Writer = resources.Writer,
             ColorModeData = colorMode,
             TransparencyIndex = resources.TransparencyIndex,
@@ -98,6 +106,8 @@ internal static class PsdParser
         public bool? HasComposite;
         public string? Writer;
         public double? Dpi;
+        public double? GlobalAngle;
+        public double? GlobalAltitude;
         public ReadOnlyMemory<byte> Icc;
         public int? TransparencyIndex;
         public readonly List<string> PascalNames = [];
@@ -127,6 +137,12 @@ internal static class PsdParser
                     break;
                 case 1006:
                     while (data.Remaining > 0 && info.PascalNames.Count < 56) info.PascalNames.Add(ReadPascal(data, 1));
+                    break;
+                case 1037 when data.Remaining >= 4:
+                    info.GlobalAngle = data.ReadInt32();
+                    break;
+                case 1049 when data.Remaining >= 4:
+                    info.GlobalAltitude = data.ReadInt32();
                     break;
                 case 1032 when data.Remaining >= 16:
                     data.Skip(12);

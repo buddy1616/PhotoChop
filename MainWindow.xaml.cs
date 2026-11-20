@@ -73,7 +73,9 @@ public partial class MainWindow : Window
     private EditorCanvas canvas => active?.View ?? emptyCanvas;
     private LayoutDocumentPane? documentPane;
     private readonly StackPanel toolColors = new() { Margin = new Thickness(6) };
-    private readonly Dictionary<string, StackPanel> toolPanes = new();
+    private readonly Dictionary<string, WrapPanel> toolPanes = new();
+    private const string PalettePane = "Color Palette";
+    private static IEnumerable<string> ToolDockTitles => ToolSections.Select(section => section.Title).Append(PalettePane);
     private readonly DockPanel layersPanel = new();
     private readonly ListBox layers = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended, AllowDrop = true };
     private readonly ListBox history = new();
@@ -189,7 +191,7 @@ public partial class MainWindow : Window
             else
             {
                 var existing = Dock.Layout.Descendents().OfType<LayoutAnchorable>().Select(panel => panel.ContentId).ToHashSet();
-                var missing = ToolSections.Where(section => !existing.Contains(section.Title)).Select(section => section.Title).ToArray();
+                var missing = ToolDockTitles.Where(title => !existing.Contains(title)).ToArray();
                 if (missing.Length > 0)
                 {
                     var newPanes = CreateToolDocks(missing);
@@ -269,7 +271,7 @@ public partial class MainWindow : Window
     private LayoutAnchorablePaneGroup CreateToolDocks(string[]? titles = null)
     {
         var group = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(156) };
-        foreach (string title in titles ?? ToolSections.Select(section => section.Title).ToArray())
+        foreach (string title in titles ?? ToolDockTitles)
         {
             var pane = new LayoutAnchorablePane();
             pane.Children.Add(NewPanel(title));
@@ -476,7 +478,7 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Painting Tools", "Selection Tools", "Vector Tools", "Other Tools", "Navigation", "Layers", "Channels", "History", "Command Log" })
+        foreach (string title in new[] { "Painting Tools", "Selection Tools", "Vector Tools", "Other Tools", PalettePane, "Navigation", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -555,15 +557,46 @@ public partial class MainWindow : Window
         if (picker.ShowDialog(this) == true) OpenPath(picker.FileName);
     }
 
-    private void OpenPath(string path) => Guard(() =>
+    private async void OpenPath(string path)
     {
         var existing = sessions.FirstOrDefault(item => string.Equals(item.Engine.Path, path, StringComparison.OrdinalIgnoreCase));
         if (existing is not null) { SelectTab(existing); return; }
         var session = NewSession();
-        session.Engine.Execute(Command.Of("document.open", new OpenArgs(path, File.ReadAllBytes(path))));
-        Remember(path);
-        AddSession(session);
-    });
+        try
+        {
+            await WhileLoading(() => session.Engine.Execute(Command.Of("document.open", new OpenArgs(path, File.ReadAllBytes(path)))));
+            existing = sessions.FirstOrDefault(item => string.Equals(item.Engine.Path, path, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null) { SelectTab(existing); return; }
+            Remember(path);
+            AddSession(session);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(EditorOwner, error.Message, "Could not open document", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private int waitingLoads;
+    private Cursor? cursorBeforeLoading;
+
+    private void StartWaiting()
+    {
+        if (waitingLoads++ != 0) return;
+        cursorBeforeLoading = Mouse.OverrideCursor;
+        Mouse.OverrideCursor = Cursors.Wait;
+    }
+
+    private void StopWaiting()
+    {
+        if (--waitingLoads == 0) Mouse.OverrideCursor = cursorBeforeLoading;
+    }
+
+    private async Task WhileLoading(Action load)
+    {
+        StartWaiting();
+        try { await Task.Run(load); }
+        finally { StopWaiting(); }
+    }
 
     private Session NewSession()
     {
@@ -574,6 +607,8 @@ public partial class MainWindow : Window
 
     private void AddSession(Session session)
     {
+        if (session.Engine.Current is { } document)
+            session.Collapsed.UnionWith(document.AllLayers().Where(layer => layer.Kind == LayerKind.Group && layer.InitiallyCollapsed).Select(layer => layer.Id));
         var pane = active?.Tab?.Parent as LayoutDocumentPane;
         if (pane is null || pane.FindParent<LayoutDocumentFloatingWindow>() is not null)
             pane = Dock.Layout.Descendents().OfType<LayoutDocumentPane>()
@@ -848,6 +883,8 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
+        bool firstFrame = active.Frame is null;
+        if (firstFrame) StartWaiting();
         RenderStatus.Visibility = Visibility.Visible;
         try
         {
@@ -882,7 +919,7 @@ public partial class MainWindow : Window
                         maskLayer is not null ? renderer.MaskView(target, maskLayer) : RenderChannel(target, channel, selectedLayer));
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels), Backend: (string?)backend);
                 });
-                if (gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
+                if (version != renderVersion || gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
                     (isPreview && preview is null && selectionDragDelta is null)) continue;
                 if (!isPreview && maskLayer is null && vectorLayer is null && channel is null)
                 {
@@ -905,7 +942,12 @@ public partial class MainWindow : Window
             canvas.InvalidateVisual();
             Say(error.Message);
         }
-        finally { rendering = false; RenderStatus.Visibility = Visibility.Collapsed; }
+        finally
+        {
+            if (firstFrame) StopWaiting();
+            rendering = false;
+            RenderStatus.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void Say(string? message = null)

@@ -51,7 +51,7 @@ public partial class MainWindow
         {
             try
             {
-                snapshot = await Task.Run(() => engine.CaptureChopSnapshot(path));
+                await WhileLoading(() => snapshot = engine.CaptureChopSnapshot(path));
             }
             catch (Exception error) { failure = error; }
             finally

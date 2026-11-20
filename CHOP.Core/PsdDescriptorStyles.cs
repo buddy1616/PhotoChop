@@ -12,7 +12,8 @@ internal static class PsdDescriptorStyles
             ? list.OfType<Descriptor>() : Get(key) is Descriptor single ? [single] : [];
     }
 
-    public static Effect[] Read(ReadOnlyMemory<byte> data, Func<string, Blend> blend, out bool partial)
+    public static Effect[] Read(ReadOnlyMemory<byte> data, Func<string, Blend> blend,
+        IReadOnlyDictionary<string, byte[]> patterns, double? globalAngle, double? globalAltitude, out bool partial)
     {
         partial = false;
         var effects = new List<Effect>();
@@ -33,16 +34,17 @@ internal static class PsdDescriptorStyles
                     {
                         "DrSh" => EffectKind.DropShadow, "IrSh" => EffectKind.InnerShadow, "OrGl" or "IrGl" => EffectKind.Glow,
                         "ebbl" => EffectKind.BevelEmboss, "SoFi" => EffectKind.ColorOverlay, "GrFl" => EffectKind.GradientOverlay,
-                        "FrFX" => EffectKind.Stroke, _ => null
+                        "FrFX" => EffectKind.Stroke, "patternFill" => EffectKind.PatternOverlay, _ => null
                     };
                     if (type is null) { partial = true; continue; }
-                    if (type == EffectKind.Stroke && style.Enum("PntT") is { } paint && paint != "SClr")
-                    { partial = true; continue; }
+                    string? strokePaint = type == EffectKind.Stroke ? style.Enum("PntT") : null;
+                    if (strokePaint is not (null or "SClr" or "GrFl")) { partial = true; continue; }
+                    bool gradient = type == EffectKind.GradientOverlay || strokePaint == "GrFl";
                     var color = ReadColor(style.Get("Clr ") as Descriptor);
-                    if (color is null && type is not (EffectKind.BevelEmboss or EffectKind.GradientOverlay))
+                    if (color is null && !gradient && type is not (EffectKind.BevelEmboss or EffectKind.PatternOverlay))
                     { partial = true; continue; }
                     GradientStop[]? stops = null;
-                    if (type == EffectKind.GradientOverlay)
+                    if (gradient)
                     {
                         stops = ReadGradient(style.Get("Grad") as Descriptor);
                         if (stops is null) { partial = true; continue; }
@@ -51,7 +53,9 @@ internal static class PsdDescriptorStyles
                             style.Number("Scl ", 100) != 100 || style.Get("Ofst") is Descriptor offset &&
                             (offset.Number("Hrzn", 0) != 0 || offset.Number("Vrtc", 0) != 0);
                     }
-                    double angle = style.Flag("uglg") ? root.Number("gagl", 120) : style.Number("lagl", 120);
+                    bool useGlobal = style.Flag("uglg");
+                    double localAngle = style.Number("lagl", style.Number("Angl", 120));
+                    double angle = useGlobal ? globalAngle ?? root.Number("gagl", localAngle) : localAngle;
                     angle = ((key is "DrSh" or "IrSh" or "ebbl" ? -angle : angle) % 360 + 360) % 360;
                     var align = key switch
                     {
@@ -60,6 +64,15 @@ internal static class PsdDescriptorStyles
                         "FrFX" => style.Enum("Styl") switch { "InsF" => StrokeAlignment.Inside, "CtrF" => StrokeAlignment.Center, _ => StrokeAlignment.Outside },
                         _ => StrokeAlignment.Outside
                     };
+                    LayerTexture? texture = null;
+                    if (type == EffectKind.PatternOverlay || (type == EffectKind.BevelEmboss && style.Flag("useTexture")))
+                    {
+                        if (style.Get("Ptrn") is Descriptor pattern && pattern.Enum("Idnt")?.TrimEnd('\0') is { } id &&
+                            patterns.TryGetValue(id, out var png))
+                            texture = new(Png: png, Scale: Math.Clamp(style.Number("Scl ", 100) / 100, .1, 10),
+                                Depth: Math.Clamp(style.Number("textureDepth", 100) / 100, 0, 1));
+                        else if (type == EffectKind.PatternOverlay) { partial = true; continue; }
+                    }
                     BevelLighting? lighting = null;
                     if (type == EffectKind.BevelEmboss)
                     {
@@ -74,11 +87,11 @@ internal static class PsdDescriptorStyles
                     }
                     effects.Add(new($"psd-style-{effects.Count + 1}", type.Value, Enabled: masterEnabled && style.Flag("enab"),
                         A: type == EffectKind.Stroke ? Math.Clamp(style.Number("Sz  ", 1), 1, 512) : angle,
-                        B: type == EffectKind.BevelEmboss ? Math.Clamp(style.Number("Lald", 30), 0, 90) : Math.Clamp(style.Number("Dstn", 0), 0, 512),
+                        B: type == EffectKind.BevelEmboss ? Math.Clamp((useGlobal ? globalAltitude : null) ?? style.Number("Lald", 30), 0, 90) : strokePaint == "GrFl" ? angle : Math.Clamp(style.Number("Dstn", 0), 0, 512),
                         Mode: style.Enum("Md  ") is { } mode ? blend(mode) : Blend.Normal, Ink: color ?? "#FFFFFFFF", Alignment: align,
                         Size: Math.Clamp(style.Number("blur", style.Number("Sz  ", 4)), type == EffectKind.BevelEmboss ? 1 : .1, 100),
                         Spread: Math.Clamp(style.Number("Ckmt", 0), 0, 100),
-                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops, Lighting: lighting));
+                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops, Texture: texture, Lighting: lighting));
                 }
             }
         }
@@ -107,7 +120,15 @@ internal static class PsdDescriptorStyles
 
     private static string? ReadColor(Descriptor? color)
     {
-        if (color?.Type != "RGBC") return null;
+        if (color is null) return null;
+        if (color.Type == "CMYC" || color.Get("Cyn ") is not null)
+        {
+            double Ink(string key) => Math.Clamp(color.Number(key, 0) / 100, 0, 1);
+            double light = 1 - Ink("Blck");
+            int Rgb(string key) => (int)Math.Round(255 * (1 - Ink(key)) * light);
+            return $"#FF{Rgb("Cyn "):X2}{Rgb("Mgnt"):X2}{Rgb("Ylw "):X2}";
+        }
+        if (color.Type != "RGBC") return null;
         int Read(string key) => (int)Math.Round(Math.Clamp(color.Number(key, 0), 0, 255));
         return $"#FF{Read("Rd  "):X2}{Read("Grn "):X2}{Read("Bl  "):X2}";
     }
@@ -135,7 +156,10 @@ internal static class PsdDescriptorStyles
             case "doub": return BitConverter.Int64BitsToDouble(reader.ReadInt64());
             case "UntF": reader.Skip(4); return BitConverter.Int64BitsToDouble(reader.ReadInt64());
             case "UnFl": reader.Skip(4); return (double)BitConverter.Int32BitsToSingle(reader.ReadInt32());
-            case "TEXT": reader.Skip(reader.ReadUInt32() * 2L); return string.Empty;
+            case "TEXT":
+                uint characters = reader.ReadUInt32();
+                if (characters > 16384) throw new InvalidDataException("Photoshop style text is too long.");
+                return System.Text.Encoding.BigEndianUnicode.GetString(reader.ReadMemory((int)characters * 2).Span);
             case "tdta": reader.Skip(reader.ReadUInt32()); return string.Empty;
             case "VlLs":
                 uint length = reader.ReadUInt32();
