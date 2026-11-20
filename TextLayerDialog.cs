@@ -22,7 +22,9 @@ internal static class TextLayerDialog
             ItemsSource = Fonts.SystemFontFamilies.Select(family => family.Source).Append("Liberation Sans").Distinct().Order().ToArray()
         };
         var size = new TextBox { Text = initial.Size.ToString(), Width = 64, Padding = new Thickness(4) };
-        NumericWheel.Enable(size, 1);
+        NumericWheel.Enable(size, 1, 512);
+        var bend = new TextBox { Text = (initial.Bend * 100).ToString("0.##"), Width = 58, Padding = new Thickness(4) };
+        NumericWheel.Enable(bend, -100, 100);
         var text = new TextBox { Text = initial.Text, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             TextWrapping = TextWrapping.Wrap, Padding = new Thickness(7), VerticalContentAlignment = VerticalAlignment.Top };
         string color = initial.Color;
@@ -42,6 +44,8 @@ internal static class TextLayerDialog
         var options = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 9) };
         options.Children.Add(new Label { Content = "Size (px)", Target = size });
         options.Children.Add(size);
+        options.Children.Add(new Label { Content = "Arc (%)", Target = bend });
+        options.Children.Add(bend);
         options.Children.Add(colorButton);
         header.Children.Add(new Label { Content = "Font", Target = font });
         header.Children.Add(font);
@@ -60,14 +64,15 @@ internal static class TextLayerDialog
         dialog.Content = shell;
 
         TextArgs? Read() => double.TryParse(size.Text, out var value) && double.IsFinite(value) && value is >= 1 and <= 512 &&
-            !string.IsNullOrWhiteSpace(font.Text) ? new TextArgs(text.Text, font.Text.Trim(), value, color) : null;
+            double.TryParse(bend.Text, out var arc) && arc is >= -100 and <= 100 &&
+            !string.IsNullOrWhiteSpace(font.Text) ? new TextArgs(text.Text, font.Text.Trim(), value, color, arc / 100) : null;
         TextArgs? result = null;
         apply.Click += (_, _) =>
         {
             result = Read();
             if (result is null)
             {
-                MessageBox.Show(dialog, "Enter a font family and a size from 1 to 512 pixels.", title);
+                MessageBox.Show(dialog, "Enter a font, a size from 1 to 512 pixels, and an arc from −100% to 100%.", title);
                 return;
             }
             dialog.DialogResult = true;
@@ -75,6 +80,7 @@ internal static class TextLayerDialog
         live.Click += (_, _) => Preview();
         text.TextChanged += (_, _) => Preview();
         size.TextChanged += (_, _) => Preview();
+        bend.TextChanged += (_, _) => Preview();
         font.AddHandler(TextBox.TextChangedEvent, new TextChangedEventHandler((_, _) => Preview()));
         font.SelectionChanged += (_, _) => Preview();
         dialog.Closed += (_, _) => previewChanged(null);

@@ -41,6 +41,7 @@ public partial class MainWindow : Window
         public System.Windows.Media.Imaging.BitmapSource? Frame { get; set; }
         public Document? Rendered { get; set; }
         public bool NeedsFit { get; set; } = true;
+        public bool KeepPencilFrame { get; set; }
         public string Title => (Engine.Path is { } path ? Path.GetFileName(path) : InitialTitle ?? "Untitled") + (Engine.Dirty ? " *" : "");
     }
 
@@ -869,7 +870,7 @@ public partial class MainWindow : Window
         }
         canvas.ImageWidth = doc.Width;
         canvas.ImageHeight = doc.Height;
-        if (preview is null) canvas.Frame = active.Frame is { } priorFrame &&
+        if (preview is null && pencilGesture is null && !active.KeepPencilFrame) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
         canvas.Guides = preferences.ShowGuides ? doc.Guides : [];
         var visibleSelection = interactiveTransform is not null ? preview ?? doc : doc;
@@ -896,7 +897,9 @@ public partial class MainWindow : Window
                 string? targetId = moveId;
                 var selectedLayer = ActiveLayer();
                 var channel = (channelList.SelectedItem as ChannelRow) is { Key: not "composite" } component ? component : null;
-                bool isPreview = preview is not null || shift is not null;
+                var pencil = pencilPreview;
+                var pencilId = pencilGesture;
+                bool isPreview = preview is not null || shift is not null || pencil is not null;
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
                 var vectorLayer = session.VectorMaskOnly && session.VectorMaskTarget is { } vectorId
@@ -904,7 +907,7 @@ public partial class MainWindow : Window
                 bool cached = !isPreview && maskLayer is null && vectorLayer is null && channel is null && session.Rendered is { } prior &&
                     ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color;
                 bool gpuRequested = preferences.ExperimentalGpu;
-                var accelerator = !cached && gpuRequested && channel is null && maskLayer is null && vectorLayer is null &&
+                var accelerator = !cached && pencil is null && gpuRequested && channel is null && maskLayer is null && vectorLayer is null &&
                     SkiaRenderer.CanCompositeOnGpu(target) ? gpu ??= new WindowsGpuCompositor() : null;
                 var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!, Backend: session.RenderBackend) : await Task.Run(() =>
                 {
@@ -913,14 +916,21 @@ public partial class MainWindow : Window
                     {
                         target = session.Engine.Preview(snapshot, Command.Of("layer.moveSelection", offset, targetId));
                     }
+                    if (pencil is not null)
+                    {
+                        target = session.Engine.Preview(snapshot, pencil);
+                        if (session.MaskOnly is { } editMask)
+                            maskLayer = target.AllLayers().FirstOrDefault(layer => layer.Id == editMask && layer.Mask is not null);
+                    }
                     var (accelerated, backend) = accelerator?.TryComposite(renderer, target) ??
                         (null, gpuRequested ? "CPU · preview not eligible for GPU" : "CPU");
                     var pixels = accelerated ?? (vectorLayer is not null ? renderer.VectorMaskView(target, vectorLayer) :
                         maskLayer is not null ? renderer.MaskView(target, maskLayer) : RenderChannel(target, channel, selectedLayer));
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels), Backend: (string?)backend);
                 });
-                if (version != renderVersion || gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
-                    (isPreview && preview is null && selectionDragDelta is null)) continue;
+                if ((version != renderVersion && (pencilId is null || !ReferenceEquals(pencilId, pencilGesture))) || gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
+                    (isPreview && preview is null && selectionDragDelta is null &&
+                        (pencilId is null || !ReferenceEquals(pencilId, pencilGesture)))) continue;
                 if (!isPreview && maskLayer is null && vectorLayer is null && channel is null)
                 {
                     session.Rendered = snapshot;
@@ -930,9 +940,13 @@ public partial class MainWindow : Window
                 }
                 if (frame.Backend is { } backend) GpuStatus.Content = backend;
                 session.View.Frame = frame.Frame;
-                if (!isPreview) session.View.PendingPaint.Clear();
+                if (!isPreview)
+                {
+                    session.KeepPencilFrame = false;
+                    session.View.PendingPaint.Clear();
+                }
                 session.View.InvalidateVisual();
-                RefreshNavigation();
+                if (pencil is null) RefreshNavigation();
                 if (version == renderVersion) break;
             }
         }

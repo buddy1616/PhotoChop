@@ -7,6 +7,21 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void TextArcIsAReplayableEditAndChangesTheRenderedBaseline()
+    {
+        var renderer = new SkiaRenderer();
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("test", 280, 140)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("title", "Title", LayerKind.Text, Text: "INFERNO")));
+        byte[] straight = renderer.Composite(engine.Current!).Rgba;
+        engine.Execute(Command.Of("layer.text", new TextArgs("INFERNO", "Liberation Sans", 48, "#FFFFFFFF", .5), "title"));
+        var curved = renderer.Composite(engine.Current!).Rgba;
+        Assert.Equal(.5, engine.Current!.Layers[0].TextBend);
+        Assert.Contains((byte)255, curved);
+        Assert.False(straight.SequenceEqual(curved));
+    }
+
+    [Fact]
     public void BevelFollowsTheMaskedEdgeOfAnOpaqueLayer()
     {
         var renderer = new SkiaRenderer();

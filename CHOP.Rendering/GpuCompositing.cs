@@ -9,7 +9,8 @@ public sealed partial class SkiaRenderer
     public static bool CanCompositeOnGpu(Document document)
     {
         if ((long)document.Width * document.Height < 1_000_000 || document.Floating is not null ||
-            document.Color.Mode == ChannelColorMode.Grayscale) return false;
+            document.Color.Mode == ChannelColorMode.Grayscale ||
+            (document.Color.Mode == ChannelColorMode.Cmyk && document.IccProfile is not null)) return false;
         int leaves = 0;
         bool Supported(Layer layer)
         {

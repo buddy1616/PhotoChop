@@ -14,6 +14,13 @@ public sealed partial class SkiaRenderer
     public Pixels CompositeForStorage(Document document)
     {
         document = ResolveFloating(document);
+        if (document.Color is { Mode: ChannelColorMode.Cmyk, Depth: ChannelDepth.Bit8 } && document.IccProfile is { } profile)
+        {
+            using var transform = CmykProfile.Open(profile, fromSrgb: true);
+            if (transform is not null && StorageCmyk(Composite(document), document.Color, transform) is { } managed)
+                return managed;
+            return CompositeRegion(document.Layers, new(0, 0, document.Width, document.Height), document.Color);
+        }
         if (NativePrecision(document) is not { } precision) return Composite(document);
         return CompositeRegion(document.Layers, new(0, 0, document.Width, document.Height), precision);
     }

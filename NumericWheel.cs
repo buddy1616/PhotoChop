@@ -5,16 +5,27 @@ namespace PhotoChop;
 
 internal static class NumericWheel
 {
-    public static void Enable(TextBox field, double min = double.NegativeInfinity, double max = double.PositiveInfinity)
+    public static void Enable(TextBox field, double min = double.NegativeInfinity, double max = double.PositiveInfinity, Action<double>? commit = null)
     {
+        field.Template = (System.Windows.Controls.ControlTemplate)field.FindResource("NumericTextBoxTemplate");
         int wheel = 0;
-        field.LostKeyboardFocus += (_, _) => wheel = 0;
+        string accepted = field.Text;
+        bool TryValue(out double value) => double.TryParse(field.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out value) &&
+            double.IsFinite(value) && value >= min && value <= max;
+
+        void Commit()
+        {
+            if (!TryValue(out double value)) { field.Text = accepted; return; }
+            accepted = field.Text;
+            commit?.Invoke(value);
+        }
+
+        field.LostKeyboardFocus += (_, _) => Commit();
+        field.MouseLeave += (_, _) => wheel = 0;
         field.PreviewMouseWheel += (_, e) =>
         {
             var culture = CultureInfo.CurrentCulture;
-            if (!field.IsKeyboardFocused || field.IsReadOnly ||
-                !double.TryParse(field.Text, NumberStyles.Float, culture, out double current) ||
-                !double.IsFinite(current)) return;
+            if (field.IsReadOnly || !TryValue(out double current)) return;
 
             wheel += e.Delta;
             int ticks = wheel / 120;
@@ -29,7 +40,8 @@ internal static class NumericWheel
             double step = digits switch { 0 => 1, 1 => .1, _ => .01 };
             double updated = Math.Clamp(current + ticks * step, min, max);
             field.Text = updated.ToString($"F{digits}", culture);
-            field.SelectAll();
+            Commit();
+            if (field.IsKeyboardFocused) field.SelectAll();
         };
     }
 }

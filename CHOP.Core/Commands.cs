@@ -14,7 +14,7 @@ public sealed record Command(string Name, string? Target, JsonElement Args)
 public sealed record NewArgs(string Id, int Width, int Height, string? Background = null, double PixelsPerInch = 72, bool StarterLayers = false, ColorSettings? Color = null);
 public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? Parent = null,
     Transform? Transform = null, string Text = "Text", string Font = "Liberation Sans", double Size = 48,
-    string Color = "#FFFFFFFF", int Width = 100, int Height = 100);
+    string Color = "#FFFFFFFF", int Width = 100, int Height = 100, double TextBend = 0);
 public sealed record ImportArgs(string Id, string Name, byte[]? Png = null, string? Parent = null, string? Path = null);
 public sealed record PathArgs(string Path);
 public enum ImageExportFormat { Png, Jpeg, WebP, Svg }
@@ -22,7 +22,7 @@ public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExp
 public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null, string? Path = null,
     string? Parent = null, string? DocumentId = null);
 public sealed record OpenArgs(string Path, byte[]? Data = null);
-public sealed record TextArgs(string Text, string Font, double Size, string Color);
+public sealed record TextArgs(string Text, string Font, double Size, string Color, double Bend = 0);
 public sealed record ShapeArgs(int Width, int Height, string Color);
 public sealed record StrokeArgs(PointD[] Points, double Size, double Hardness, double Opacity, string Color, bool Erase, bool Pencil = false);
 public sealed record ReorderArgs(string? Parent, string? Before);
@@ -756,9 +756,10 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Format.Color(create.Color);
                 Format.Dimensions(create.Width, create.Height);
                 Range(create.Size, 1, 512);
+                Range(create.TextBend, -1, 1);
                 if (create.Text is null || string.IsNullOrWhiteSpace(create.Font)) throw new InvalidDataException("Invalid text settings.");
                 return With(Insert(layers, create.Parent, null, new(create.Id, Name(create.Name), create.Kind)
-                { Transform = create.Transform ?? new(), Text = create.Text, Font = create.Font, Size = create.Size,
+                { Transform = create.Transform ?? new(), Text = create.Text, Font = create.Font, Size = create.Size, TextBend = create.TextBend,
                     Color = create.Color, Width = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Width : create.Width,
                     Height = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Height : create.Height }));
             case "layer.importImage":
@@ -894,9 +895,11 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var text = command.Read<TextArgs>();
                 Format.Color(text.Color);
                 Range(text.Size, 1, 512);
+                Range(text.Bend, -1, 1);
                 if (text.Text is null || string.IsNullOrWhiteSpace(text.Font)) throw new InvalidDataException("Invalid text settings.");
                 return Edit(layer => layer.Kind == LayerKind.Text ? layer with
-                    { Text = text.Text, Font = text.Font, Size = text.Size, Color = text.Color }
+                    { Text = text.Text, Font = text.Font, Size = text.Size, Color = text.Color, TextBend = text.Bend,
+                        Pixels = text == new TextArgs(layer.Text, layer.Font, layer.Size, layer.Color, layer.TextBend) ? layer.Pixels : null }
                     : throw new InvalidDataException("Select a text layer."));
             case "layer.fill":
                 var fillColor = command.Read<string>();
