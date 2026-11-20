@@ -23,6 +23,8 @@ public partial class MainWindow : Window
         public EditorCanvas View => Viewport.Canvas;
         public LayoutDocument? Tab { get; set; }
         public string? MaskOnly { get; set; }
+        public string? VectorMaskTarget { get; set; }
+        public string? ChannelView { get; set; }
         public CommandEngine Engine { get; } = engine;
         public List<LogEntry> Log { get; } = [];
         public int LogStart { get; set; }
@@ -175,6 +177,9 @@ public partial class MainWindow : Window
             if (documentPane is null) ResetLayout();
             else if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Tools"))
                 Dock.Layout.RootPanel.Children.Insert(0, CreateToolDocks());
+            if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Channels") &&
+                Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Layers")?.Parent is LayoutAnchorablePane rightPane)
+                rightPane.Children.Insert(rightPane.Children.IndexOf(rightPane.Children.First(panel => panel.ContentId == "Layers")) + 1, NewPanel("Channels"));
         }
         catch (Exception error) { ResetLayout(); Say($"Workspace reset. {error.Message}"); }
     }
@@ -219,7 +224,7 @@ public partial class MainWindow : Window
             center.Children.Add(session.Tab);
         }
         var right = new LayoutAnchorablePane { DockHeight = new GridLength(3, GridUnitType.Star) };
-        foreach (string title in new[] { "Layers", "History", "Command Log" }) right.Children.Add(NewPanel(title));
+        foreach (string title in new[] { "Layers", "Channels", "History", "Command Log" }) right.Children.Add(NewPanel(title));
         var upper = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
         upper.Children.Add(NewPanel("Navigation"));
         var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
@@ -350,6 +355,7 @@ public partial class MainWindow : Window
         foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity })
             Item(adjustments, EffectName(kind), () => AddEffect(kind));
 
+        AddColorModeMenu(image);
         Item(image, "Canvas Size…", () => ResizeDocument(canvasOnly: true));
         Item(image, "Image Size…", () => ResizeDocument(canvasOnly: false));
         var orientation = new MenuItem { Header = "Image Rotation" };
@@ -371,6 +377,9 @@ public partial class MainWindow : Window
         Item(image, "Default document size…", SetDefaults);
 
         var layer = Menu("Layer");
+        var addLayerItem = new MenuItem { Header = "Add" };
+        layer.Items.Add(addLayerItem);
+        Item(addLayerItem, "Vector Mask", AddVectorMask);
         var newLayer = new MenuItem { Header = "New" };
         layer.Items.Add(newLayer);
         Item(newLayer, "Raster Layer", () => CreateLayer(LayerKind.Raster));
@@ -411,7 +420,7 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", "More Tools", "Navigation", "Layers", "History", "Command Log" })
+        foreach (string title in new[] { "Tools", "More Tools", "Navigation", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -721,6 +730,9 @@ public partial class MainWindow : Window
             if (session.MaskOnly is { } mask && session.Engine.Current?.AllLayers().Any(layer => layer.Id == mask && layer.Mask is not null) != true)
                 session.MaskOnly = null;
             if (selectId is not null) session.ActiveId = selectId;
+            if (session.VectorMaskTarget != session.ActiveId || session.Engine.Current?.AllLayers()
+                .Any(layer => layer.Id == session.VectorMaskTarget && layer.VectorMask is not null) != true)
+                session.VectorMaskTarget = null;
         });
         Refresh();
         return ok;
@@ -749,6 +761,7 @@ public partial class MainWindow : Window
             foreach (var item in sessions)
                 if (item.Tab is { } tab) tab.Title = item.Title;
             RefreshLayers();
+            RefreshChannels();
             history.ItemsSource = active?.Engine.History.Select(item => item.Name +
                 (!item.Enabled ? " (disabled)" : item.Error is { } error ? $" (skipped: {error})" : "")).ToArray();
             history.SelectedIndex = active?.Engine.Cursor ?? -1;
@@ -800,11 +813,13 @@ public partial class MainWindow : Window
                 var target = preview ?? snapshot;
                 var shift = selectionDragDelta;
                 string? targetId = moveId;
+                var selectedLayer = ActiveLayer();
+                var channel = (channelList.SelectedItem as ChannelRow) is { Key: not "composite" } component ? component : null;
                 bool isPreview = preview is not null || shift is not null;
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
-                bool cached = !isPreview && maskLayer is null && session.Rendered is { } prior &&
-                    ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height;
+                bool cached = !isPreview && maskLayer is null && channel is null && session.Rendered is { } prior &&
+                    ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color;
                 var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!) : await Task.Run(() =>
                 {
                     if (shift is { } offset && snapshot.Selection is { } area && targetId is not null &&
@@ -812,12 +827,12 @@ public partial class MainWindow : Window
                     {
                         target = session.Engine.Preview(snapshot, Command.Of("layer.moveSelection", offset, targetId));
                     }
-                    var pixels = maskLayer is null ? renderer.Composite(target) : renderer.MaskView(target, maskLayer);
+                    var pixels = maskLayer is null ? RenderChannel(target, channel, selectedLayer) : renderer.MaskView(target, maskLayer);
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels));
                 });
                 if (!ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
                     (isPreview && preview is null && selectionDragDelta is null)) continue;
-                if (!isPreview && maskLayer is null)
+                if (!isPreview && maskLayer is null && channel is null)
                 {
                     session.Rendered = snapshot;
                     session.Composite = frame.Pixels;

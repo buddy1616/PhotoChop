@@ -38,6 +38,9 @@ public partial class MainWindow
             (byte)(Format.Color(Layer.Color) >> 24), (byte)(Format.Color(Layer.Color) >> 16),
             (byte)(Format.Color(Layer.Color) >> 8), (byte)Format.Color(Layer.Color))) : null;
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
+        public Visibility ClippingVisibility => Layer.Clipped ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility VectorMaskVisibility => Layer.VectorMask is null ? Visibility.Collapsed : Visibility.Visible;
+        public double VectorMaskOpacity => Layer.VectorMask?.Enabled == true ? 1 : .4;
         public Thickness NameIndent => Layer.Kind == LayerKind.Group ? new(2, 0, 0, 0) : new(Depth * 13 + 16, 0, 0, 0);
     }
     private StackPanel? effectEditor;
@@ -106,6 +109,9 @@ public partial class MainWindow
             CancelTransform();
             CancelPathEditing();
             active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
+            if (active.VectorMaskTarget != active.ActiveId) active.VectorMaskTarget = null;
+            RefreshChannels();
+            if (active.ChannelView != "composite") UpdateCanvas();
             if (active.Engine.Current?.Floating is { } floating && floating.LayerId != active.ActiveId)
             {
                 Run("selection.commitFloating", 0);
@@ -128,6 +134,7 @@ public partial class MainWindow
         };
         layers.PreviewMouseLeftButtonDown += (_, e) =>
         {
+            if (TryToggleClipping(e)) { layerDrag = null; e.Handled = true; return; }
             layerDragStart = layers.PointToScreen(e.GetPosition(layers));
             layerDrag = IsButton(e.OriginalSource) || RowAt(e.OriginalSource) is not { } row ? null :
                 layers.SelectedItems.Contains(row) ? DragRoots(layers.SelectedItems.OfType<LayerRow>()) : [row];
@@ -202,6 +209,7 @@ public partial class MainWindow
         panelContent.Add("More Tools", toolDock);
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Layers", layersPanel);
+        panelContent.Add("Channels", BuildChannels());
         panelContent.Add("History", history);
         panelContent.Add("Command Log", logPanel);
     }

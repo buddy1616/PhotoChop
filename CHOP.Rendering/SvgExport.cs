@@ -40,7 +40,7 @@ public sealed partial class SkiaRenderer
             Attribute("height", Number(document.Height));
             Attribute("viewBox", $"0 0 {document.Width} {document.Height}");
 
-            if (document.Floating is null && document.Layers.All(Supported))
+            if (document.Floating is null && document.Color.Mode != ChannelColorMode.Grayscale && document.Layers.All(Supported))
                 foreach (var layer in document.Layers) WriteLayer(layer);
             else WriteImage(Composite(document), 0, 0);
 
@@ -158,7 +158,7 @@ public sealed partial class SkiaRenderer
     private static bool Supported(Layer layer)
     {
         if (!layer.Visible || layer.Opacity == 0) return true;
-        if (layer.Kind == LayerKind.Effect || (layer.Mask is not null && layer.MaskEnabled) ||
+        if (layer.Kind == LayerKind.Effect || layer.Clipped || ActiveVectorMask(layer.VectorMask) || (layer.Mask is not null && layer.MaskEnabled) ||
             (layer.TransformsEnabled ? CommandEngine.EffectiveBlend(layer) : layer.Blend) != Blend.Normal)
             return false;
         var matrix = ExportMatrix(layer);

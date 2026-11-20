@@ -25,6 +25,82 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void NativeCmykAndFloatAlphaChannelsRoundTripWithoutQuantizingSamples()
+    {
+        var engine = NewEngine(4, 3);
+        var settings = new ColorSettings(ChannelColorMode.Cmyk, ChannelDepth.Bit16);
+        engine.Execute(Command.Of("document.color", settings));
+        Layer(engine, new("native", "CMYK", LayerKind.Raster));
+        byte[][] planes = [[0, 0], [255, 255], [255, 255], [1, 0], [255, 255]];
+        engine.Execute(Command.Of("layer.channels", new ColorPlanes(settings, 1, 1, planes), "native"));
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, Composite(engine)[..4]);
+        byte[] alpha = new byte[8];
+        ChannelSamples.Write(alpha, ChannelDepth.Bit32, 0, .31234567f);
+        ChannelSamples.Write(alpha, ChannelDepth.Bit32, 1, 1.5f);
+        var channel = new ChannelPlane(new("alpha", "Spot", 1, 1, true), 2, 1, ChannelDepth.Bit32, alpha);
+        engine.Execute(Command.Of("channel.set", channel));
+        engine.Execute(Command.Of("channel.select", "alpha"));
+        Assert.Equal(new Area(2, 1, 1, 1), engine.Current!.Selection);
+        string path = Path.Combine(folder, "channels.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        var restored = ProjectFile.Open(path);
+        Assert.Equal(settings, restored.Color);
+        var source = Assert.Single(restored.Layers).SourceChannels!;
+        Assert.Equal(planes.SelectMany(plane => plane), source.Planes.SelectMany(plane => plane));
+        var restoredChannel = Assert.Single(restored.Channels);
+        Assert.Equal(channel.Info, restoredChannel.Info);
+        Assert.Equal(alpha, restoredChannel.Samples);
+        Assert.Equal(1.5f, ChannelSamples.Read(restoredChannel.Samples, ChannelDepth.Bit32, 1));
+        engine.Execute(Command.Of("document.orient", OrientationAction.FlipHorizontal));
+        var flipped = Assert.Single(engine.Current!.Channels);
+        Assert.Equal(alpha[4..].Concat(alpha[..4]), flipped.Samples);
+        engine.Execute(Command.Of("document.color", new ColorSettings(ChannelColorMode.Grayscale, ChannelDepth.Bit32)));
+        Assert.Equal(54, Composite(engine)[3 * 4]);
+    }
+
+    [Fact]
+    public void ClippingStackKeepsBaseAlphaAndCombinesRasterAndVectorMasksAcrossReopen()
+    {
+        var engine = NewEngine(8, 5);
+        Layer(engine, new("base", "Base", LayerKind.Group));
+        Layer(engine, new("shape", "Shape", LayerKind.Rectangle, Parent: "base",
+            Width: 8, Height: 5, Color: "#FF0000FF"));
+        engine.Execute(Command.Of("mask.paste", new AlphaMask(3, 4, Enumerable.Repeat((byte)128, 12).ToArray(), 2, 0, 0), "base"));
+        var contour = new PathContour([new(new(0, 1)), new(new(8, 1)), new(new(8, 4)), new(new(0, 4))], true);
+        engine.Execute(Command.Of("vectorMask.add", new VectorMask([contour]), "base"));
+        Layer(engine, new("clip", "Clipped", LayerKind.Rectangle, Width: 8, Height: 5, Color: "#FFFF0000"));
+        engine.Execute(Command.Of("layer.clipping", true, "clip"));
+        byte[] pixels = Composite(engine);
+        Assert.Equal(new byte[] { 255, 0, 0, 128 }, pixels[((2 * 8 + 3) * 4)..((2 * 8 + 3) * 4 + 4)]);
+        Assert.Equal(0, pixels[(2 * 8 + 1) * 4 + 3]);
+        Assert.Equal(0, pixels[3 * 4 + 3]);
+        string path = Path.Combine(folder, "masks.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        Assert.Equal(pixels, renderer.Composite(ProjectFile.Open(path)).Rgba);
+        engine.Execute(Command.Of("vectorMask.enabled", false, "base"));
+        Assert.Equal(128, Composite(engine)[3 * 4 + 3]);
+    }
+
+    [Fact]
+    public void GradientPreservesUnselectedPixelsAndSamplesAlongTheDrag()
+    {
+        var engine = NewEngine(6, 3);
+        Layer(engine, new("raster", "Raster", LayerKind.Raster, Width: 6, Height: 3));
+        engine.Execute(Command.Of("document.selection", new Area(1, 1, 4, 1)));
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(1.5, 1.5), new(4.5, 1.5),
+            "#FF000000", "#FFFFFFFF"), "raster"));
+        byte[] pixels = Composite(engine);
+        int pixel(int x) => (6 + x) * 4;
+        Assert.Equal(0, pixels[pixel(1)]);
+        Assert.Equal(85, pixels[pixel(2)]);
+        Assert.Equal(170, pixels[pixel(3)]);
+        Assert.Equal(255, pixels[pixel(4)]);
+        Assert.Equal(255, pixels[pixel(1) + 3]);
+        Assert.Equal(0, pixels[pixel(0) + 3]);
+        Assert.Equal(0, pixels[pixel(5) + 3]);
+    }
+
+    [Fact]
     public void ResetRotationAndResetFlipKeepTheOtherComponentAcrossSaveAndOpen()
     {
         var engine = NewEngine(8, 4);

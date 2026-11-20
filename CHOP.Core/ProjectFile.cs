@@ -9,9 +9,12 @@ public static class ProjectFile
     private const int MaxManifestBytes = 8_000_000;
     private const int MaxRasterBytes = 512 * 1024 * 1024;
     private sealed record Manifest(int Version, Document Document, Dictionary<string, Resource> Resources, Dictionary<string, Resource>? Masks = null,
-        Dictionary<string, ShiftResource[]>? Shifts = null);
+        Dictionary<string, ShiftResource[]>? Shifts = null, Dictionary<string, ColorResource>? LayerChannels = null,
+        ExtraChannelResource[]? Channels = null);
+    private sealed record ColorResource(ColorSettings Settings, Resource[] Planes);
+    private sealed record ExtraChannelResource(ChannelInfo Info, ChannelDepth Depth, Resource Plane);
     private sealed record ShiftResource(Area Source, int Dx, int Dy, string? Map, bool Clear = false, string? Patch = null);
-    private sealed record Resource(string Path, int Width, int Height);
+    private sealed record Resource(string Path, int Width, int Height, int X = 0, int Y = 0, byte Outside = 255);
 
     public static void Save(string path, Document document)
     {
@@ -25,6 +28,7 @@ public static class ProjectFile
                 var resources = new Dictionary<string, Resource>();
                 var masks = new Dictionary<string, Resource>();
                 var shifts = new Dictionary<string, ShiftResource[]>();
+                var layerChannels = new Dictionary<string, ColorResource>();
                 long rasterBytes = 0;
                 void WriteResource(Dictionary<string, Resource> map, string id, Resource resource, byte[] bytes)
                 {
@@ -34,12 +38,26 @@ public static class ProjectFile
                     using var output = archive.CreateEntry(resource.Path).Open();
                     output.Write(bytes);
                 }
+                Resource WritePlane(string name, int width, int height, byte[] bytes)
+                {
+                    rasterBytes += bytes.LongLength;
+                    if (rasterBytes > MaxRasterBytes) throw new InvalidDataException("Image resources exceed the supported size.");
+                    using var output = archive.CreateEntry(name).Open();
+                    output.Write(bytes);
+                    return new(name, width, height);
+                }
                 foreach (var layer in document.AllLayers())
                 {
                     if (layer.Pixels is { } pixels)
                         WriteResource(resources, layer.Id, new($"pixels/{layer.Id}.rgba", pixels.Width, pixels.Height), pixels.Rgba);
+                    if (layer.SourceChannels is { } source)
+                    {
+                        ChannelSamples.Validate(source);
+                        layerChannels.Add(layer.Id, new(source.Settings, source.Planes.Select((samples, i) =>
+                            WritePlane($"channels/layers/{layer.Id}/{i}.bin", source.Width, source.Height, samples)).ToArray()));
+                    }
                     if (layer.Mask is { } mask)
-                        WriteResource(masks, layer.Id, new($"masks/{layer.Id}.alpha", mask.Width, mask.Height), mask.Alpha);
+                        WriteResource(masks, layer.Id, new($"masks/{layer.Id}.alpha", mask.Width, mask.Height, mask.X, mask.Y, mask.Outside), mask.Alpha);
                     if (layer.PixelShifts.Length != 0)
                         shifts[layer.Id] = layer.PixelShifts.Select((shift, i) =>
                         {
@@ -64,7 +82,13 @@ public static class ProjectFile
                             return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear, patchPath);
                         }).ToArray();
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(9, document, resources, masks, shifts), Format.Json);
+                var extraChannels = document.Channels.Select(channel =>
+                {
+                    ChannelSamples.Validate(channel.Width, channel.Height, channel.Depth, channel.Samples);
+                    return new ExtraChannelResource(channel.Info, channel.Depth, WritePlane(
+                        $"channels/document/{channel.Info.Id}.bin", channel.Width, channel.Height, channel.Samples));
+                }).ToArray();
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(10, document, resources, masks, shifts, layerChannels, extraChannels), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -91,7 +115,7 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
@@ -99,6 +123,7 @@ public static class ProjectFile
         Format.Dimensions(doc.Width, doc.Height);
         doc.ImageOrientation?.Inverse();
         doc.ImageFlip?.Inverse();
+        ChannelSamples.Validate(doc.Color);
         if (doc.Guides is null || doc.Guides.Any(guide => guide is null || !Format.ValidId(guide.Id) ||
             !Enum.IsDefined(guide.Axis) || guide.Position < 0 || guide.Position > (guide.Axis == GuideAxis.Vertical ? doc.Width : doc.Height)) ||
             doc.Guides.Select(guide => guide.Id).Distinct().Count() != doc.Guides.Length)
@@ -132,6 +157,7 @@ public static class ProjectFile
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
                 throw new InvalidDataException("Invalid layer metadata.");
             CommandEngine.CheckTransform(layer.Transform);
+            if (layer.VectorMask is { } vectorMask) CommandEngine.CheckContours(vectorMask.Contours);
             CommandEngine.CheckContours(layer.Contours);
             if (layer.Kind != LayerKind.Path && layer.Contours.Length != 0)
                 throw new InvalidDataException("Only Path layers can contain vector paths.");
@@ -178,7 +204,7 @@ public static class ProjectFile
             if (manifest.Masks?.TryGetValue(layer.Id, out var alpha) == true)
             {
                 var bytes = ReadResource(alpha, $"masks/{layer.Id}.alpha", 1);
-                mask = new AlphaMask(alpha.Width, alpha.Height, bytes);
+                mask = new AlphaMask(alpha.Width, alpha.Height, bytes, alpha.X, alpha.Y, alpha.Outside);
             }
             PixelShift[] shifts = [];
             if (manifest.Shifts?.TryGetValue(layer.Id, out var moves) == true)
@@ -206,11 +232,36 @@ public static class ProjectFile
                     return new PixelShift(area, bits, move.Dx, move.Dy, move.Clear, patch);
                 }).ToArray();
             }
-            return layer with { Pixels = pixels, Mask = mask, PixelShifts = shifts, Children = layer.Children.Select(Restore).ToArray() };
+            ColorPlanes? source = null;
+            if (manifest.LayerChannels?.TryGetValue(layer.Id, out var channelData) == true)
+            {
+                if (layer.Kind != LayerKind.Raster || pixels is null || channelData.Planes is not { Length: > 0 and <= 5 })
+                    throw new InvalidDataException("Invalid layer color channels.");
+                var plane = channelData.Planes[0];
+                var samples = channelData.Planes.Select((value, i) =>
+                {
+                    if (value.Width != plane.Width || value.Height != plane.Height)
+                        throw new InvalidDataException("Layer channel dimensions differ.");
+                    return ReadResource(value, $"channels/layers/{layer.Id}/{i}.bin", ChannelSamples.Bytes(channelData.Settings.Depth));
+                }).ToArray();
+                source = new(channelData.Settings, plane.Width, plane.Height, samples);
+                ChannelSamples.Validate(source);
+            }
+            return layer with { Pixels = pixels, Mask = mask, PixelShifts = shifts, SourceChannels = source,
+                Children = layer.Children.Select(Restore).ToArray() };
         }
-        var result = doc with { Layers = doc.Layers.Select(Restore).ToArray() };
+        var channelIds = new HashSet<string>();
+        var extra = (manifest.Channels ?? []).Select(channel =>
+        {
+            if (!Format.ValidId(channel.Info.Id) || !channelIds.Add(channel.Info.Id) || string.IsNullOrWhiteSpace(channel.Info.Name))
+                throw new InvalidDataException("Invalid document channel.");
+            var plane = channel.Plane;
+            return new ChannelPlane(channel.Info, plane.Width, plane.Height, channel.Depth,
+                ReadResource(plane, $"channels/document/{channel.Info.Id}.bin", ChannelSamples.Bytes(channel.Depth)));
+        }).ToArray();
+        var result = doc with { Channels = extra, Layers = doc.Layers.Select(Restore).ToArray() };
         if (manifest.Resources.Keys.Any(id => !ids.Contains(id)) || manifest.Masks?.Keys.Any(id => !ids.Contains(id)) == true ||
-            manifest.Shifts?.Keys.Any(id => !ids.Contains(id)) == true)
+            manifest.Shifts?.Keys.Any(id => !ids.Contains(id)) == true || manifest.LayerChannels?.Keys.Any(id => !ids.Contains(id)) == true)
             throw new InvalidDataException("Unreferenced raster resource.");
         return result;
     }
