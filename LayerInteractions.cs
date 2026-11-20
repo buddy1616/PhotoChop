@@ -236,7 +236,7 @@ public partial class MainWindow
     private static IEnumerable<LogEntry> DisplayLog(Session session)
     {
         if (!session.HistoryEdited) return session.Log;
-        var starts = session.Log.Where(entry => entry.Command.Name is "document.create" or "document.open" or "document.importImage");
+        var starts = session.Log.Where(entry => entry.Command.Name is "document.create" or "document.open" or "document.importImage" or "document.importPsd");
         var timeline = session.Engine.History.Where(entry => entry.Command is not null).Select(entry =>
         {
             var record = session.Log.FirstOrDefault(log => ReferenceEquals(log.Command, entry.Command));

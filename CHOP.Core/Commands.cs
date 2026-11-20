@@ -53,6 +53,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         doc.Height != saved.Height || doc.PixelsPerInch != saved.PixelsPerInch || !ReferenceEquals(doc.Layers, saved.Layers) ||
         !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides) || doc.GuidesLocked != saved.GuidesLocked || doc.Floating != saved.Floating || doc.ImageOrientation != saved.ImageOrientation ||
         doc.ImageFlip != saved.ImageFlip || doc.Color != saved.Color || !ReferenceEquals(doc.Channels, saved.Channels));
+    public IReadOnlyList<string> LastImportWarnings { get; private set; } = [];
     public string? Path { get; private set; }
     public int Cursor => cursor;
     public IReadOnlyList<HistoryEntry> History => history;
@@ -66,6 +67,7 @@ public sealed class CommandEngine(IRasterBackend backend)
     public Document? Execute(Command command)
     {
         string? documentId = Current?.Id;
+        LastImportWarnings = [];
         try
         {
             command = CaptureFileInputs(command);
@@ -84,6 +86,11 @@ public sealed class CommandEngine(IRasterBackend backend)
     {
         switch (command.Name)
         {
+            case "document.importPsd":
+                var psd = command.Read<PsdImportArgs>();
+                if (psd is { Data: null, Path: { } psdPath })
+                    return Command.Of(command.Name, psd with { Path = null, Data = PsdImport.ReadFile(psdPath) }, command.Target);
+                break;
             case "layer.createChop":
                 var create = command.Read<CreateChopArgs>();
                 if (create.Snapshot is { Png: null, Native: null } source)
@@ -154,6 +161,14 @@ public sealed class CommandEngine(IRasterBackend backend)
                     }] };
                 }
                 Reset(doc, null);
+                return;
+            case "document.importPsd":
+                var psd = command.Read<PsdImportArgs>();
+                if (psd.Data is null || psd.Path is not null)
+                    throw new InvalidDataException("PSD import requires either embedded PSD bytes or a file path.");
+                var importedPsd = PsdImport.Read(psd.Data, psd.Id, psd.Flattened);
+                Reset(importedPsd.Document, null);
+                LastImportWarnings = importedPsd.Warnings;
                 return;
             case "document.importImage":
                 var startImage = command.Read<ImageImportArgs>();
@@ -298,6 +313,14 @@ public sealed class CommandEngine(IRasterBackend backend)
         if (snapshot.Png is null && snapshot.Native is null) snapshot = CaptureChopSnapshot(snapshot.SourcePath);
         var pixels = snapshot.Native is { } native ? PixelBuffer.FromNative(native) : backend.DecodePng(snapshot.Png!);
         return layer with { ChopSource = snapshot.SourcePath, Pixels = pixels, Width = pixels.Width, Height = pixels.Height };
+    }
+
+    internal static void CheckVectorMask(VectorMask mask)
+    {
+        CheckContours(mask.Contours);
+        if (mask.Operations is { } operations && (operations.Length != mask.Contours.Length ||
+            operations.Any(value => !Enum.IsDefined(value))))
+            throw new InvalidDataException("Invalid vector mask path operations.");
     }
 
     internal static void CheckContours(PathContour[] contours)
@@ -580,13 +603,14 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return Edit(layer => layer.Clipped == clipped ? layer : layer with { Clipped = clipped });
             case "vectorMask.add":
                 var vectorMask = command.Read<VectorMask>();
-                CheckContours(vectorMask.Contours);
+                CheckVectorMask(vectorMask);
                 return Edit(layer => layer with { VectorMask = vectorMask });
             case "vectorMask.path":
                 var newMaskContours = command.Read<PathContour[]>();
                 CheckContours(newMaskContours);
                 return Edit(layer => layer.VectorMask is { } currentMask
-                    ? layer with { VectorMask = currentMask with { Contours = newMaskContours } } : layer);
+                    ? layer with { VectorMask = currentMask with { Contours = newMaskContours,
+                        Operations = currentMask.Operations is { } operations && operations.Length == newMaskContours.Length ? operations : null } } : layer);
             case "vectorMask.enabled":
                 var vectorEnabled = command.Read<bool>();
                 return Edit(layer => layer.VectorMask is { } currentMask
@@ -696,7 +720,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                         .. pieces.Where(nodes => nodes.Length != 0).Select(nodes => new PathContour(nodes)),
                         .. contours[(cut.Contour + 1)..]];
                     CheckContours(updated);
-                    return cut.VectorMask ? layer with { VectorMask = layer.VectorMask! with { Contours = updated } } :
+                    return cut.VectorMask ? layer with { VectorMask = layer.VectorMask! with { Contours = updated, Operations = null } } :
                         layer with { Contours = updated };
                 });
             case "layer.path":
@@ -833,6 +857,10 @@ public sealed class CommandEngine(IRasterBackend backend)
                 CheckParent(ParentOf(layers, Wanted().Id));
                 return Edit(layer => layer with { Locked = command.Read<bool>() }, false);
             case "layer.opacity": return Edit(layer => layer with { Opacity = Range(command.Read<double>(), 0, 1) });
+            case "layer.passThrough":
+                var passThrough = command.Read<bool>();
+                return Edit(layer => layer.Kind == LayerKind.Group ? layer with { PassThrough = passThrough } :
+                    throw new InvalidDataException("Pass-through blending is available for groups."));
             case "layer.blend":
                 var blend = command.Read<Blend>();
                 if (!Enum.IsDefined(blend)) throw new InvalidDataException("Unknown blend mode.");

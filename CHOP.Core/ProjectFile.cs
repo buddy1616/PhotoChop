@@ -6,11 +6,13 @@ namespace Chop.Core;
 /// <summary>Versioned ZIP document with a JSON manifest and embedded RGBA resources.</summary>
 public static class ProjectFile
 {
+    private const int MaxProfileBytes = 16 * 1024 * 1024;
+    private const string ProfilePath = "color/source.icc";
     private const int MaxManifestBytes = 8_000_000;
     private const int MaxRasterBytes = 512 * 1024 * 1024;
     private sealed record Manifest(int Version, Document Document, Dictionary<string, Resource> Resources, Dictionary<string, Resource>? Masks = null,
         Dictionary<string, ShiftResource[]>? Shifts = null, Dictionary<string, ColorResource>? LayerChannels = null,
-        ExtraChannelResource[]? Channels = null);
+        ExtraChannelResource[]? Channels = null, bool HasIccProfile = false);
     private sealed record ColorResource(ColorSettings Settings, Resource[] Planes);
     private sealed record ExtraChannelResource(ChannelInfo Info, ChannelDepth Depth, Resource Plane);
     private sealed record ShiftResource(Area Source, int Dx, int Dy, string? Map, bool Clear = false, string? Patch = null, Resource? NativePatch = null);
@@ -94,7 +96,14 @@ public static class ProjectFile
                     return new ExtraChannelResource(channel.Info, channel.Depth, WritePlane(
                         $"channels/document/{channel.Info.Id}.bin", channel.Width, channel.Height, channel.Samples));
                 }).ToArray();
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(11, document, resources, masks, shifts, layerChannels, extraChannels), Format.Json);
+                if (document.IccProfile is { } profile)
+                {
+                    if (profile.Length is 0 or > MaxProfileBytes) throw new InvalidDataException("Invalid ICC profile size.");
+                    using var output = archive.CreateEntry(ProfilePath).Open();
+                    output.Write(profile);
+                }
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(12, document, resources, masks, shifts, layerChannels,
+                    extraChannels, document.IccProfile is not null), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -121,7 +130,7 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 11)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 11 or 12)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
@@ -188,7 +197,9 @@ public static class ProjectFile
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
                 throw new InvalidDataException("Invalid layer metadata.");
             CommandEngine.CheckTransform(layer.Transform);
-            if (layer.VectorMask is { } vectorMask) CommandEngine.CheckContours(vectorMask.Contours);
+            if (layer.VectorMask is { } vectorMask) CommandEngine.CheckVectorMask(vectorMask);
+            if (layer.PassThrough && layer.Kind != LayerKind.Group)
+                throw new InvalidDataException("Only groups can use pass-through blending.");
             CommandEngine.CheckContours(layer.Contours);
             if (layer.Kind != LayerKind.Path && layer.Contours.Length != 0)
                 throw new InvalidDataException("Only Path layers can contain vector paths.");
@@ -300,7 +311,17 @@ public static class ProjectFile
             return new ChannelPlane(channel.Info, plane.Width, plane.Height, channel.Depth,
                 ReadResource(plane, $"channels/document/{channel.Info.Id}.bin", ChannelSamples.Bytes(channel.Depth)));
         }).ToArray();
-        var result = doc with { Channels = extra, Layers = doc.Layers.Select(Restore).ToArray() };
+        byte[]? profile = null;
+        if (manifest.HasIccProfile)
+        {
+            var profileEntry = archive.GetEntry(ProfilePath);
+            if (profileEntry is null || profileEntry.Length is 0 or > MaxProfileBytes)
+                throw new InvalidDataException("Missing or invalid ICC profile.");
+            using var profileData = profileEntry.Open();
+            profile = new byte[(int)profileEntry.Length];
+            profileData.ReadExactly(profile);
+        }
+        var result = doc with { Channels = extra, Layers = doc.Layers.Select(Restore).ToArray(), IccProfile = profile };
         if (manifest.Resources.Keys.Any(id => !ids.Contains(id)) || manifest.Masks?.Keys.Any(id => !ids.Contains(id)) == true ||
             manifest.Shifts?.Keys.Any(id => !ids.Contains(id)) == true || manifest.LayerChannels?.Keys.Any(id => !ids.Contains(id)) == true)
             throw new InvalidDataException("Unreferenced raster resource.");

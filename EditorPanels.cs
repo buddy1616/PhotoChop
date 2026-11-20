@@ -488,6 +488,13 @@ public partial class MainWindow
         modes.SelectionChanged += (_, _) => { if (modes.SelectedItem is Blend blend) RunLayer("layer.blend", blend); };
         Caption("Blend mode");
         properties.Children.Add(modes);
+        if (layer.Kind == LayerKind.Group)
+        {
+            var pass = new CheckBox { Content = "Pass through", IsChecked = layer.PassThrough, Margin = new Thickness(2),
+                ToolTip = "Blend the group's children through to layers below when the group has no masks or effects and is fully opaque." };
+            pass.Click += (_, _) => RunLayer("layer.passThrough", pass.IsChecked == true);
+            properties.Children.Add(pass);
+        }
 
         Caption($"Opacity  {layer.Opacity:P0}");
         var opacity = new Slider { Minimum = 0, Maximum = 1, Value = layer.Opacity, TickFrequency = .01, IsSnapToTickEnabled = true };
