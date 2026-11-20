@@ -17,12 +17,214 @@ public sealed class EditorTests : IDisposable
     private CommandEngine NewEngine(int width = 32, int height = 24)
     {
         var engine = new CommandEngine(renderer);
-        engine.Execute(Command.Of("document.create", new NewArgs("test", width, height)));
+        engine.Execute(Command.Of("document.create", new NewArgs("test", width, height, Color: new())));
         return engine;
     }
 
     private static void Layer(CommandEngine engine, LayerArgs args) => engine.Execute(Command.Of("layer.create", args));
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
+
+    [Fact]
+    public void DefaultSixteenBitGradientAndBrushRetainPrecisionInNativePatchResources()
+    {
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("precision", 5, 2,
+            "#FF000000", StarterLayers: true)));
+        Assert.Equal(ChannelDepth.Bit16, engine.Current!.Color.Depth);
+        const string id = "precision-layer";
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(.5, .5), new(4.5, .5),
+            "#FF000000", "#FFFFFFFF"), id));
+        var raster = renderer.ResolveRaster(engine.Current.AllLayers().Single(layer => layer.Id == id))!;
+        Assert.Equal(16384, System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(raster.Pixels.Native!.Planes[0].AsSpan(2)));
+        Assert.Equal(64, raster.Pixels.Rgba[4]);
+        engine.Execute(Command.Of("layer.paintStroke", new StrokeArgs([new(.5, 1.5)], 1, 1, .001,
+            "#FFFFFFFF", false), id));
+        var edited = renderer.ResolveRaster(engine.Current.AllLayers().Single(layer => layer.Id == id))!;
+        Assert.InRange(PixelBuffer.Get(edited.Pixels, 5).R, .00098, .00103);
+        Assert.Equal(0, edited.Pixels.Rgba[5 * 4]);
+
+        string path = Path.Combine(folder, "precision.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        using (var zip = ZipFile.OpenRead(path))
+        {
+            Assert.NotNull(zip.GetEntry("pixels/precision-layer.planes"));
+            Assert.NotNull(zip.GetEntry("shifts/precision-layer/0.planes"));
+            Assert.Null(zip.GetEntry("pixels/precision-layer.rgba"));
+        }
+        var reopened = ProjectFile.Open(path);
+        var restored = renderer.ResolveRaster(reopened.AllLayers().Single(layer => layer.Id == id))!;
+        Assert.Equal(edited.Pixels.Native!.Planes.SelectMany(bytes => bytes), restored.Pixels.Native!.Planes.SelectMany(bytes => bytes));
+    }
+
+    [Fact]
+    public void FloatSamplesSurviveSelectionMovesClipboardAndFlatten()
+    {
+        var engine = new CommandEngine(renderer);
+        var settings = new ColorSettings(ChannelColorMode.Rgb, ChannelDepth.Bit32);
+        engine.Execute(Command.Of("document.create", new NewArgs("float-edit", 6, 3, Color: settings)));
+        Layer(engine, new("float-raster", "Float", LayerKind.Raster));
+        var native = new PixelBuffer(3, 1, settings);
+        native.Set(0, new(.1234567, .2, 1.25, 1));
+        engine.Execute(Command.Of("layer.channels", native.Finish().Native!, "float-raster"));
+        engine.Execute(Command.Of("document.selection", new Area(0, 0, 1, 1)));
+        engine.Execute(Command.Of("layer.moveSelection", new PointD(1, 0), "float-raster"));
+        engine.Execute(Command.Of<Area?>("document.selection", null));
+        var current = renderer.ResolveRaster(engine.Current!.Layers[0])!;
+        var point = PixelBuffer.Get(current.Pixels, 1);
+        Assert.Equal(.1234567, point.R, 6);
+        Assert.Equal(1.25, point.B, 6);
+        engine.Execute(Command.Of("document.selection", new Area(1, 0, 1, 1)));
+        var copied = renderer.CopyPixels(engine.Current!, "float-raster")!;
+        engine.Execute(Command.Of("layer.pastePixels", new PastePixelsArgs("copy", "Copy", [], X: 4, Native: copied.Pixels.Native)));
+        engine.Execute(Command.Of("document.flatten", "flattened"));
+        var flattened = Assert.Single(engine.Current!.Layers).Pixels!;
+        Assert.Equal(.1234567, PixelBuffer.Get(flattened, 4).R, 6);
+        Assert.Equal(1.25, PixelBuffer.Get(flattened, 4).B, 6);
+    }
+
+    [Fact]
+    public void DocumentSettingsConvertRasterModeAndDepthAndCanBeUndone()
+    {
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("settings", 5, 2)));
+        Layer(engine, new("art", "Art", LayerKind.Raster));
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(.5, .5), new(4.5, .5),
+            "#FF000000", "#FFFFFFFF"), "art"));
+        var original = engine.Current!;
+        var grayscale = new ColorSettings(ChannelColorMode.Grayscale, ChannelDepth.Bit16);
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(grayscale, 300)));
+        Assert.Equal(300, engine.Current!.PixelsPerInch);
+        Assert.Equal(2, Assert.Single(engine.Current.Layers).Pixels!.Native!.Planes.Length);
+        var cmyk = new ColorSettings(ChannelColorMode.Cmyk, ChannelDepth.Bit32);
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(cmyk, 300)));
+        string cmykPath = Path.Combine(folder, "cmyk.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(cmykPath)));
+        var reopened = ProjectFile.Open(cmykPath);
+        Assert.Equal(cmyk, reopened.Color);
+        Assert.Equal(5, Assert.Single(reopened.Layers).Pixels!.Native!.Planes.Length);
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(new(), 72)));
+        Assert.Null(Assert.Single(engine.Current!.Layers).Pixels!.Native);
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(.5, .5), new(4.5, .5),
+            "#FF000000", "#FFFFFFFF"), "art"));
+        Assert.Null(renderer.ResolveRaster(Assert.Single(engine.Current!.Layers))!.Pixels.Native);
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Same(original, engine.Current);
+    }
+
+    [Fact]
+    public void GpuPreviewEligibilityKeepsBackdropEffectsClippingAndGroupMasksOnCpu()
+    {
+        var first = new Layer("one", "One", LayerKind.Rectangle);
+        var second = new Layer("two", "Two", LayerKind.Ellipse)
+            { Effects = [new Effect("blur", EffectKind.GaussianBlur, A: 2)] };
+        var group = new Layer("group", "Group", LayerKind.Group)
+            { Children = [first, second], Transform = new(20, 10, 1.2, 1, 9) };
+        var document = new Document("gpu", 1280, 960) { Layers = [group] };
+        Assert.True(SkiaRenderer.CanCompositeOnGpu(document));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Width = 600 }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [first] }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [first, second with { Clipped = true }] }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [group,
+            new Layer("effect", "Adjustment", LayerKind.Effect)] }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [group with
+            { Mask = new AlphaMask(1, 1, [128]) }] }));
+        Assert.True(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [group with
+            { Mask = new AlphaMask(1, 1, [128]), MaskEnabled = false }] }));
+    }
+
+    [Fact]
+    public void CpuCompositorReusesUnchangedSourcesAndRendersReplacementPixels()
+    {
+        var engine = NewEngine(4, 2);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("pixels", "Raster",
+            renderer.EncodePng(new Pixels(1, 1, [255, 0, 0, 255])))));
+        var original = engine.Current!;
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, renderer.Composite(original).Rgba[..4]);
+        engine.Execute(Command.Of("layer.transform", new Transform(1, 0), "pixels"));
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, Composite(engine)[4..8]);
+        engine.Execute(Command.Of("layer.fillPixels", "#FF0000FF", "pixels"));
+        Assert.Equal(new byte[] { 0, 0, 255, 255 }, Composite(engine)[4..8]);
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, renderer.Composite(original).Rgba[..4]);
+    }
+
+    [Fact]
+    public void NativeCmykAndFloatAlphaChannelsRoundTripWithoutQuantizingSamples()
+    {
+        var engine = NewEngine(4, 3);
+        var settings = new ColorSettings(ChannelColorMode.Cmyk, ChannelDepth.Bit16);
+        engine.Execute(Command.Of("document.color", settings));
+        Layer(engine, new("native", "CMYK", LayerKind.Raster));
+        byte[][] planes = [[0, 0], [255, 255], [255, 255], [1, 0], [255, 255]];
+        engine.Execute(Command.Of("layer.channels", new ColorPlanes(settings, 1, 1, planes), "native"));
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, Composite(engine)[..4]);
+        byte[] alpha = new byte[8];
+        ChannelSamples.Write(alpha, ChannelDepth.Bit32, 0, .31234567f);
+        ChannelSamples.Write(alpha, ChannelDepth.Bit32, 1, 1.5f);
+        var channel = new ChannelPlane(new("alpha", "Spot", 1, 1, true), 2, 1, ChannelDepth.Bit32, alpha);
+        engine.Execute(Command.Of("channel.set", channel));
+        engine.Execute(Command.Of("channel.select", "alpha"));
+        Assert.Equal(new Area(2, 1, 1, 1), engine.Current!.Selection);
+        string path = Path.Combine(folder, "channels.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        var restored = ProjectFile.Open(path);
+        Assert.Equal(settings, restored.Color);
+        var source = Assert.Single(restored.Layers).SourceChannels!;
+        Assert.Equal(planes.SelectMany(plane => plane), source.Planes.SelectMany(plane => plane));
+        var restoredChannel = Assert.Single(restored.Channels);
+        Assert.Equal(channel.Info, restoredChannel.Info);
+        Assert.Equal(alpha, restoredChannel.Samples);
+        Assert.Equal(1.5f, ChannelSamples.Read(restoredChannel.Samples, ChannelDepth.Bit32, 1));
+        engine.Execute(Command.Of("document.orient", OrientationAction.FlipHorizontal));
+        var flipped = Assert.Single(engine.Current!.Channels);
+        Assert.Equal(alpha[4..].Concat(alpha[..4]), flipped.Samples);
+        engine.Execute(Command.Of("document.color", new ColorSettings(ChannelColorMode.Grayscale, ChannelDepth.Bit32)));
+        Assert.Equal(54, Composite(engine)[3 * 4]);
+    }
+
+    [Fact]
+    public void ClippingStackKeepsBaseAlphaAndCombinesRasterAndVectorMasksAcrossReopen()
+    {
+        var engine = NewEngine(8, 5);
+        Layer(engine, new("base", "Base", LayerKind.Group));
+        Layer(engine, new("shape", "Shape", LayerKind.Rectangle, Parent: "base",
+            Width: 8, Height: 5, Color: "#FF0000FF"));
+        engine.Execute(Command.Of("mask.paste", new AlphaMask(3, 4, Enumerable.Repeat((byte)128, 12).ToArray(), 2, 0, 0), "base"));
+        var contour = new PathContour([new(new(0, 1)), new(new(8, 1)), new(new(8, 4)), new(new(0, 4))], true);
+        engine.Execute(Command.Of("vectorMask.add", new VectorMask([contour]), "base"));
+        Layer(engine, new("clip", "Clipped", LayerKind.Rectangle, Width: 8, Height: 5, Color: "#FFFF0000"));
+        engine.Execute(Command.Of("layer.clipping", true, "clip"));
+        byte[] pixels = Composite(engine);
+        Assert.Equal(new byte[] { 255, 0, 0, 128 }, pixels[((2 * 8 + 3) * 4)..((2 * 8 + 3) * 4 + 4)]);
+        Assert.Equal(0, pixels[(2 * 8 + 1) * 4 + 3]);
+        Assert.Equal(0, pixels[3 * 4 + 3]);
+        string path = Path.Combine(folder, "masks.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        Assert.Equal(pixels, renderer.Composite(ProjectFile.Open(path)).Rgba);
+        engine.Execute(Command.Of("vectorMask.enabled", false, "base"));
+        Assert.Equal(128, Composite(engine)[3 * 4 + 3]);
+    }
+
+    [Fact]
+    public void GradientPreservesUnselectedPixelsAndSamplesAlongTheDrag()
+    {
+        var engine = NewEngine(6, 3);
+        Layer(engine, new("raster", "Raster", LayerKind.Raster, Width: 6, Height: 3));
+        engine.Execute(Command.Of("document.selection", new Area(1, 1, 4, 1)));
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(1.5, 1.5), new(4.5, 1.5),
+            "#FF000000", "#FFFFFFFF"), "raster"));
+        byte[] pixels = Composite(engine);
+        int pixel(int x) => (6 + x) * 4;
+        Assert.Equal(0, pixels[pixel(1)]);
+        Assert.Equal(85, pixels[pixel(2)]);
+        Assert.Equal(170, pixels[pixel(3)]);
+        Assert.Equal(255, pixels[pixel(4)]);
+        Assert.Equal(255, pixels[pixel(1) + 3]);
+        Assert.Equal(0, pixels[pixel(0) + 3]);
+        Assert.Equal(0, pixels[pixel(5) + 3]);
+    }
 
     [Fact]
     public void ResetRotationAndResetFlipKeepTheOtherComponentAcrossSaveAndOpen()
@@ -1345,6 +1547,60 @@ public sealed class EditorTests : IDisposable
         using (var output = new StreamWriter(archive.CreateEntry("manifest.json").Open()))
             output.Write("""{"version":999,"document":null,"resources":{}}""");
         Assert.Contains("Unsupported CHOP version", Assert.Throws<InvalidDataException>(() => ProjectFile.Open(path)).Message);
+    }
+
+    [Fact]
+    public async Task CliReplaysFileOperationsAndPortableRecordedOutputs()
+    {
+        var source = NewEngine(8, 6);
+        Layer(source, new("source-shape", "Source", LayerKind.Rectangle, Width: 4, Height: 4, Color: "#FF8C2ACA"));
+        string link = Path.Combine(folder, "source.chop");
+        ProjectFile.Save(link, source.Current!);
+        string input = Path.Combine(folder, "input.webp");
+        File.WriteAllBytes(input, renderer.ExportImage(source.Current!, ImageExportFormat.WebP));
+        var engine = new CommandEngine(renderer);
+        var recorded = new List<LogEntry>();
+        engine.Executed += recorded.Add;
+        engine.Execute(Command.Of("document.importImage", new ImageImportArgs("background", "Background", Data: File.ReadAllBytes(input))));
+        engine.Execute(Command.Of("layer.importImage", new ImageImportArgs("texture", "Texture", Path: input)));
+        engine.Execute(Command.Of("layer.createChop", new CreateChopArgs("linked", "Linked", new(link))));
+        engine.Execute(Command.Of("layer.pastePixels", new PastePixelsArgs("pasted", "Pasted", X: 1, Path: input)));
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(new(ChannelColorMode.Rgb, ChannelDepth.Bit32), 144)));
+        engine.Execute(Command.Of("layer.clipping", true, "pasted"));
+        File.Delete(input);
+        File.Delete(link);
+        engine.Execute(Command.Of("history.change", new HistoryChange(1, Enabled: false)));
+        engine.Execute(Command.Of("history.change", new HistoryChange(1, Enabled: true)));
+
+        string reference = Path.Combine(folder, "reference.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(reference)));
+        var formats = new[] { ImageExportFormat.Png, ImageExportFormat.Jpeg, ImageExportFormat.WebP, ImageExportFormat.Svg };
+        foreach (var format in formats)
+            engine.Execute(Command.Of("document.export", new ExportArgs(Path.Combine(folder, "reference." + format.ToString().ToLowerInvariant()), format)));
+
+        var portable = Scripts.FromRecording(recorded, includeOutputs: true);
+        string script = Path.Combine(folder, "portable.json");
+        await File.WriteAllTextAsync(script, portable.ToJsonString(Format.Json));
+        var paths = new[] { Path.Combine(folder, "replay.chop") }.Concat(formats.Select(format =>
+            Path.Combine(folder, "replay." + format.ToString().ToLowerInvariant()))).ToArray();
+        var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+            { RedirectStandardError = true, UseShellExecute = false };
+        foreach (var argument in new[] { Path.Combine(AppContext.BaseDirectory, "cli", "CHOP.CLI.dll"), "run", script })
+            start.ArgumentList.Add(argument);
+        for (int index = 0; index < paths.Length; index++)
+            start.ArgumentList.Add($"output{index + 1}=" + JsonSerializer.Serialize(paths[index]));
+        using var process = Process.Start(start)!;
+        var errors = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        Assert.True(process.ExitCode == 0, await errors);
+
+        var replay = ProjectFile.Open(paths[0]);
+        Assert.Equal(engine.Current!.Color, replay.Color);
+        Assert.Equal(144, replay.PixelsPerInch);
+        Assert.Equal(engine.Current.AllLayers().Select(layer => layer.Id), replay.AllLayers().Select(layer => layer.Id));
+        for (int index = 0; index < formats.Length; index++)
+            Assert.Equal(renderer.ExportImage(engine.Current, formats[index]), await File.ReadAllBytesAsync(paths[index + 1]));
+        Assert.DoesNotContain(Scripts.FromRecording(recorded, includeOutputs: false), node => node?["name"]?.ToString() == "document.export");
     }
 
     [Fact]

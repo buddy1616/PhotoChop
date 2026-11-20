@@ -9,9 +9,12 @@ public static class ProjectFile
     private const int MaxManifestBytes = 8_000_000;
     private const int MaxRasterBytes = 512 * 1024 * 1024;
     private sealed record Manifest(int Version, Document Document, Dictionary<string, Resource> Resources, Dictionary<string, Resource>? Masks = null,
-        Dictionary<string, ShiftResource[]>? Shifts = null);
-    private sealed record ShiftResource(Area Source, int Dx, int Dy, string? Map, bool Clear = false, string? Patch = null);
-    private sealed record Resource(string Path, int Width, int Height);
+        Dictionary<string, ShiftResource[]>? Shifts = null, Dictionary<string, ColorResource>? LayerChannels = null,
+        ExtraChannelResource[]? Channels = null);
+    private sealed record ColorResource(ColorSettings Settings, Resource[] Planes);
+    private sealed record ExtraChannelResource(ChannelInfo Info, ChannelDepth Depth, Resource Plane);
+    private sealed record ShiftResource(Area Source, int Dx, int Dy, string? Map, bool Clear = false, string? Patch = null, Resource? NativePatch = null);
+    private sealed record Resource(string Path, int Width, int Height, int X = 0, int Y = 0, byte Outside = 255, ColorSettings? Color = null, int Planes = 0);
 
     public static void Save(string path, Document document)
     {
@@ -25,6 +28,7 @@ public static class ProjectFile
                 var resources = new Dictionary<string, Resource>();
                 var masks = new Dictionary<string, Resource>();
                 var shifts = new Dictionary<string, ShiftResource[]>();
+                var layerChannels = new Dictionary<string, ColorResource>();
                 long rasterBytes = 0;
                 void WriteResource(Dictionary<string, Resource> map, string id, Resource resource, byte[] bytes)
                 {
@@ -34,12 +38,38 @@ public static class ProjectFile
                     using var output = archive.CreateEntry(resource.Path).Open();
                     output.Write(bytes);
                 }
+                Resource WritePlane(string name, int width, int height, byte[] bytes)
+                {
+                    rasterBytes += bytes.LongLength;
+                    if (rasterBytes > MaxRasterBytes) throw new InvalidDataException("Image resources exceed the supported size.");
+                    using var output = archive.CreateEntry(name).Open();
+                    output.Write(bytes);
+                    return new(name, width, height);
+                }
+                Resource WritePixels(string name, Pixels source)
+                {
+                    var pixels = PixelBuffer.Convert(source, document.Color);
+                    if (pixels.Native is not { } native) return WritePlane(name + ".rgba", pixels.Width, pixels.Height, pixels.Rgba);
+                    ChannelSamples.Validate(native);
+                    rasterBytes += native.Planes.Sum(plane => plane.LongLength);
+                    if (rasterBytes > MaxRasterBytes) throw new InvalidDataException("Image resources exceed the supported size.");
+                    string path = name + ".planes";
+                    using var target = archive.CreateEntry(path).Open();
+                    foreach (var plane in native.Planes) target.Write(plane);
+                    return new(path, pixels.Width, pixels.Height, Color: native.Settings, Planes: native.Planes.Length);
+                }
                 foreach (var layer in document.AllLayers())
                 {
                     if (layer.Pixels is { } pixels)
-                        WriteResource(resources, layer.Id, new($"pixels/{layer.Id}.rgba", pixels.Width, pixels.Height), pixels.Rgba);
+                        resources.Add(layer.Id, WritePixels($"pixels/{layer.Id}", pixels));
+                    if (layer.SourceChannels is { } source)
+                    {
+                        ChannelSamples.Validate(source);
+                        layerChannels.Add(layer.Id, new(source.Settings, source.Planes.Select((samples, i) =>
+                            WritePlane($"channels/layers/{layer.Id}/{i}.bin", source.Width, source.Height, samples)).ToArray()));
+                    }
                     if (layer.Mask is { } mask)
-                        WriteResource(masks, layer.Id, new($"masks/{layer.Id}.alpha", mask.Width, mask.Height), mask.Alpha);
+                        WriteResource(masks, layer.Id, new($"masks/{layer.Id}.alpha", mask.Width, mask.Height, mask.X, mask.Y, mask.Outside), mask.Alpha);
                     if (layer.PixelShifts.Length != 0)
                         shifts[layer.Id] = layer.PixelShifts.Select((shift, i) =>
                         {
@@ -52,19 +82,19 @@ public static class ProjectFile
                                 using var output = archive.CreateEntry(map).Open();
                                 output.Write(shift.Bits);
                             }
-                            string? patchPath = null;
-                            if (shift.Patch is { } patch)
-                            {
-                                patchPath = $"shifts/{layer.Id}/{i}.rgba";
-                                rasterBytes += patch.Rgba.LongLength;
-                                if (rasterBytes > MaxRasterBytes) throw new InvalidDataException("Image resources exceed the supported size.");
-                                using var output = archive.CreateEntry(patchPath).Open();
-                                output.Write(patch.Rgba);
-                            }
-                            return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear, patchPath);
+                            Resource? patchResource = shift.Patch is { } patch ? WritePixels($"shifts/{layer.Id}/{i}", patch) : null;
+                            return new ShiftResource(shift.Source, shift.Dx, shift.Dy, map, shift.Clear,
+                                patchResource is { Color: null } ? patchResource.Path : null,
+                                patchResource?.Color is null ? null : patchResource);
                         }).ToArray();
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(9, document, resources, masks, shifts), Format.Json);
+                var extraChannels = document.Channels.Select(channel =>
+                {
+                    ChannelSamples.Validate(channel.Width, channel.Height, channel.Depth, channel.Samples);
+                    return new ExtraChannelResource(channel.Info, channel.Depth, WritePlane(
+                        $"channels/document/{channel.Info.Id}.bin", channel.Width, channel.Height, channel.Samples));
+                }).ToArray();
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(11, document, resources, masks, shifts, layerChannels, extraChannels), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
                 manifest.Write(json);
@@ -91,7 +121,7 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 11)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
@@ -99,6 +129,7 @@ public static class ProjectFile
         Format.Dimensions(doc.Width, doc.Height);
         doc.ImageOrientation?.Inverse();
         doc.ImageFlip?.Inverse();
+        ChannelSamples.Validate(doc.Color);
         if (doc.Guides is null || doc.Guides.Any(guide => guide is null || !Format.ValidId(guide.Id) ||
             !Enum.IsDefined(guide.Axis) || guide.Position < 0 || guide.Position > (guide.Axis == GuideAxis.Vertical ? doc.Width : doc.Height)) ||
             doc.Guides.Select(guide => guide.Id).Distinct().Count() != doc.Guides.Length)
@@ -119,6 +150,31 @@ public static class ProjectFile
             source.ReadExactly(bytes);
             return bytes;
         }
+        Pixels ReadPixels(Resource resource, string stem)
+        {
+            if (resource.Color is not { } settings)
+                return new(resource.Width, resource.Height, ReadResource(resource, stem + ".rgba", 4));
+            ChannelSamples.Validate(settings);
+            Format.Dimensions(resource.Width, resource.Height);
+            int components = ChannelSamples.ComponentCount(settings.Mode);
+            int length = checked(resource.Width * resource.Height * ChannelSamples.Bytes(settings.Depth));
+            long total = (long)length * resource.Planes;
+            string expected = stem + ".planes";
+            var imageEntry = resource.Path == expected ? archive.GetEntry(expected) : null;
+            if (settings != doc.Color || resource.Planes < components || resource.Planes > components + 1 ||
+                total > MaxRasterBytes || imageEntry?.Length != total)
+                throw new InvalidDataException("Missing or invalid native pixel resource.");
+            totalBytes += total;
+            if (totalBytes > MaxRasterBytes) throw new InvalidDataException("Image resources exceed the supported size.");
+            using var source = imageEntry.Open();
+            var planes = new byte[resource.Planes][];
+            for (int i = 0; i < planes.Length; i++)
+            {
+                planes[i] = new byte[length];
+                source.ReadExactly(planes[i]);
+            }
+            return PixelBuffer.FromNative(new(settings, resource.Width, resource.Height, planes));
+        }
         Layer Restore(Layer layer)
         {
             if (layer is null || !Format.ValidId(layer.Id) || !ids.Add(layer.Id) ||
@@ -132,6 +188,7 @@ public static class ProjectFile
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
                 throw new InvalidDataException("Invalid layer metadata.");
             CommandEngine.CheckTransform(layer.Transform);
+            if (layer.VectorMask is { } vectorMask) CommandEngine.CheckContours(vectorMask.Contours);
             CommandEngine.CheckContours(layer.Contours);
             if (layer.Kind != LayerKind.Path && layer.Contours.Length != 0)
                 throw new InvalidDataException("Only Path layers can contain vector paths.");
@@ -170,15 +227,14 @@ public static class ProjectFile
             if (manifest.Resources.TryGetValue(layer.Id, out var resource))
             {
                 if (layer.Kind is not (LayerKind.Raster or LayerKind.Chop)) throw new InvalidDataException("Unexpected raster resource.");
-                var bytes = ReadResource(resource, $"pixels/{layer.Id}.rgba", 4);
-                pixels = new Pixels(resource.Width, resource.Height, bytes);
+                pixels = PixelBuffer.Convert(ReadPixels(resource, $"pixels/{layer.Id}"), doc.Color);
             }
             if (layer.Kind == LayerKind.Chop && pixels is null) throw new InvalidDataException("Missing Chop Layer snapshot.");
             AlphaMask? mask = null;
             if (manifest.Masks?.TryGetValue(layer.Id, out var alpha) == true)
             {
                 var bytes = ReadResource(alpha, $"masks/{layer.Id}.alpha", 1);
-                mask = new AlphaMask(alpha.Width, alpha.Height, bytes);
+                mask = new AlphaMask(alpha.Width, alpha.Height, bytes, alpha.X, alpha.Y, alpha.Outside);
             }
             PixelShift[] shifts = [];
             if (manifest.Shifts?.TryGetValue(layer.Id, out var moves) == true)
@@ -188,11 +244,15 @@ public static class ProjectFile
                 shifts = moves.Select((move, i) =>
                 {
                     var area = move.Source;
-                    if (area.Width <= 0 || area.Height <= 0 || move.Patch is null && (area.X < left || area.Y < top ||
+                    bool hasPatch = move.Patch is not null || move.NativePatch is not null;
+                    if (area.Width <= 0 || area.Height <= 0 || !hasPatch && (area.X < left || area.Y < top ||
                         (long)area.X + area.Width > right || (long)area.Y + area.Height > bottom))
                         throw new InvalidDataException("Invalid pixel offset area.");
-                    if ((move.Clear || move.Patch is not null) && (move.Dx != 0 || move.Dy != 0) ||
-                        (move.Patch is not null && (move.Clear || move.Map is not null)))
+                    if ((move.Clear || hasPatch) && (move.Dx != 0 || move.Dy != 0) ||
+                        (hasPatch && (move.Clear || move.Map is not null)) ||
+                        (move.Patch is not null && move.NativePatch is not null) ||
+                        (move.NativePatch is { } nativePatch && (nativePatch.Color is null ||
+                            nativePatch.Width != area.Width || nativePatch.Height != area.Height)))
                         throw new InvalidDataException("Invalid raster edit resource.");
                     int x = checked(area.X + move.Dx), y = checked(area.Y + move.Dy);
                     left = Math.Min(left, x);
@@ -201,16 +261,48 @@ public static class ProjectFile
                     bottom = Math.Max(bottom, checked(y + area.Height));
                     Format.Dimensions(checked(right - left), checked(bottom - top));
                     byte[] bits = move.Map is null ? [] : ReadResource(new(move.Map, area.Width, area.Height), $"shifts/{layer.Id}/{i}.bits", 1);
-                    Pixels? patch = move.Patch is null ? null : new Pixels(area.Width, area.Height,
-                        ReadResource(new(move.Patch, area.Width, area.Height), $"shifts/{layer.Id}/{i}.rgba", 4));
+                    var patchResource = move.NativePatch ?? (move.Patch is { } path ? new Resource(path, area.Width, area.Height) : null);
+                    Pixels? patch = patchResource is null ? null :
+                        PixelBuffer.Convert(ReadPixels(patchResource, $"shifts/{layer.Id}/{i}"), doc.Color);
                     return new PixelShift(area, bits, move.Dx, move.Dy, move.Clear, patch);
                 }).ToArray();
             }
-            return layer with { Pixels = pixels, Mask = mask, PixelShifts = shifts, Children = layer.Children.Select(Restore).ToArray() };
+            ColorPlanes? source = null;
+            if (manifest.LayerChannels?.TryGetValue(layer.Id, out var channelData) == true)
+            {
+                if (layer.Kind != LayerKind.Raster || pixels is null || channelData.Planes is not { Length: > 0 and <= 5 })
+                    throw new InvalidDataException("Invalid layer color channels.");
+                var plane = channelData.Planes[0];
+                var samples = channelData.Planes.Select((value, i) =>
+                {
+                    if (value.Width != plane.Width || value.Height != plane.Height)
+                        throw new InvalidDataException("Layer channel dimensions differ.");
+                    return ReadResource(value, $"channels/layers/{layer.Id}/{i}.bin", ChannelSamples.Bytes(channelData.Settings.Depth));
+                }).ToArray();
+                source = new(channelData.Settings, plane.Width, plane.Height, samples);
+                ChannelSamples.Validate(source);
+                if (manifest.Version <= 10 && source.Settings == doc.Color && pixels is not null &&
+                    source.Width == pixels.Width && source.Height == pixels.Height)
+                {
+                    var originalProxy = PixelBuffer.FromNative(source);
+                    if (originalProxy.Rgba.AsSpan().SequenceEqual(pixels.Rgba)) pixels = originalProxy;
+                }
+            }
+            return layer with { Pixels = pixels, Mask = mask, PixelShifts = shifts, SourceChannels = source,
+                Children = layer.Children.Select(Restore).ToArray() };
         }
-        var result = doc with { Layers = doc.Layers.Select(Restore).ToArray() };
+        var channelIds = new HashSet<string>();
+        var extra = (manifest.Channels ?? []).Select(channel =>
+        {
+            if (!Format.ValidId(channel.Info.Id) || !channelIds.Add(channel.Info.Id) || string.IsNullOrWhiteSpace(channel.Info.Name))
+                throw new InvalidDataException("Invalid document channel.");
+            var plane = channel.Plane;
+            return new ChannelPlane(channel.Info, plane.Width, plane.Height, channel.Depth,
+                ReadResource(plane, $"channels/document/{channel.Info.Id}.bin", ChannelSamples.Bytes(channel.Depth)));
+        }).ToArray();
+        var result = doc with { Channels = extra, Layers = doc.Layers.Select(Restore).ToArray() };
         if (manifest.Resources.Keys.Any(id => !ids.Contains(id)) || manifest.Masks?.Keys.Any(id => !ids.Contains(id)) == true ||
-            manifest.Shifts?.Keys.Any(id => !ids.Contains(id)) == true)
+            manifest.Shifts?.Keys.Any(id => !ids.Contains(id)) == true || manifest.LayerChannels?.Keys.Any(id => !ids.Contains(id)) == true)
             throw new InvalidDataException("Unreferenced raster resource.");
         return result;
     }

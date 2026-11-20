@@ -25,8 +25,18 @@ public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, dou
     double Size = 0, double Spread = 0, double Opacity = 1);
 
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
-public sealed record Pixels(int Width, int Height, byte[] Rgba);
-public sealed record AlphaMask(int Width, int Height, byte[] Alpha);
+public sealed record Pixels(int Width, int Height, byte[] Rgba, ColorPlanes? Native = null)
+{
+    public long StorageBytes => Rgba.LongLength + (Native?.Planes.Sum(plane => plane.LongLength) ?? 0);
+}
+public sealed record AlphaMask(int Width, int Height, byte[] Alpha, int X = 0, int Y = 0, byte Outside = 255)
+{
+    public byte At(int x, int y)
+    {
+        long sx = (long)x - X, sy = (long)y - Y;
+        return sx >= 0 && sx < Width && sy >= 0 && sy < Height ? Alpha[(int)(sy * Width + sx)] : Outside;
+    }
+}
 public sealed record RasterEdit(Pixels Pixels, int X, int Y, PixelShift? Shift = null);
 public sealed record PixelShift(Area Source, byte[] Bits, int Dx, int Dy, bool Clear = false, Pixels? Patch = null);
 
@@ -48,6 +58,9 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public bool TransformsEnabled { get; init; } = true;
     [JsonIgnore] public Transform ActiveTransform => TransformsEnabled ? Transform : new();
     public bool MaskEnabled { get; init; } = true;
+    public bool Clipped { get; init; }
+    public VectorMask? VectorMask { get; init; }
+    [JsonIgnore] public ColorPlanes? SourceChannels { get; init; }
     public Projective? RasterGrid { get; init; }
     public int RasterX { get; init; }
     public int RasterY { get; init; }
@@ -81,6 +94,8 @@ public sealed record Document(string Id, int Width, int Height)
 {
     public double PixelsPerInch { get; init; } = 72;
     public string ColorSpace { get; init; } = "sRGB";
+    public ColorSettings Color { get; init; } = new();
+    [JsonIgnore] public ChannelPlane[] Channels { get; init; } = [];
     public Dictionary<string, string> Metadata { get; init; } = [];
     public Layer[] Layers { get; init; } = [];
     public Projective? ImageOrientation { get; init; }
@@ -134,14 +149,18 @@ public static class Format
 public interface IRasterBackend
 {
     Pixels DecodePng(byte[] data);
+    Pixels DecodeImage(byte[] data);
+    byte[] ExportImage(Document document, ImageExportFormat format);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
+    Pixels CompositeForStorage(Document document);
     Document ResolveFloating(Document document);
     RasterEdit? CopyPixels(Document document, string layerId);
     AlphaMask ReprojectMask(Document document, Layer layer);
     Layer BakeStroke(Layer layer, OutlineArgs outline);
     Layer CrushSelection(Document document, Layer layer, int size);
     RasterEdit PaintArea(Document document, Layer layer, Area bounds, Func<int, int, bool> contains, uint color);
+    RasterEdit PaintGradient(Document document, Layer layer, Area bounds, GradientArgs gradient);
     RasterEdit RasterizeLayer(Document document, Layer layer);
     RasterEdit? ResolveRaster(Layer layer);
     Projective ParentCoordinates(Document document, Layer layer);

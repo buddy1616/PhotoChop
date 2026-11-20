@@ -11,7 +11,6 @@ using AvalonDock.Layout.Serialization;
 using Chop.Core;
 using Chop.Rendering;
 using Microsoft.Win32;
-using SkiaSharp;
 
 namespace PhotoChop;
 
@@ -23,6 +22,8 @@ public partial class MainWindow : Window
         public EditorCanvas View => Viewport.Canvas;
         public LayoutDocument? Tab { get; set; }
         public string? MaskOnly { get; set; }
+        public string? VectorMaskTarget { get; set; }
+        public string? ChannelView { get; set; }
         public CommandEngine Engine { get; } = engine;
         public List<LogEntry> Log { get; } = [];
         public int LogStart { get; set; }
@@ -34,6 +35,7 @@ public partial class MainWindow : Window
         public double Zoom { get; set; } = 1;
         public Point Offset { get; set; }
         public Pixels? Composite { get; set; }
+        public string? RenderBackend { get; set; }
         public System.Windows.Media.Imaging.BitmapSource? Frame { get; set; }
         public Document? Rendered { get; set; }
         public bool NeedsFit { get; set; } = true;
@@ -52,6 +54,7 @@ public partial class MainWindow : Window
         public string MaskBackground { get; set; } = "#FFFFFFFF";
         public bool CenterHorizontal { get; set; }
         public bool CenterVertical { get; set; }
+        public bool ExperimentalGpu { get; set; }
         public bool ShowRulers { get; set; } = true;
         public bool ShowGuides { get; set; } = true;
         public string GuideColor { get; set; } = "#FF48CDE9";
@@ -62,6 +65,7 @@ public partial class MainWindow : Window
     }
 
     private readonly SkiaRenderer renderer = new();
+    private WindowsGpuCompositor? gpu;
     private readonly List<Session> sessions = [];
     private readonly EditorCanvas emptyCanvas = new();
     private EditorCanvas canvas => active?.View ?? emptyCanvas;
@@ -117,6 +121,7 @@ public partial class MainWindow : Window
             }
         };
         preferences = LoadPreferences();
+        Closed += (_, _) => gpu?.Dispose();
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         if (WindowPlacement.TryConstrain(preferences.WindowPosition, out var placement))
         {
@@ -175,6 +180,9 @@ public partial class MainWindow : Window
             if (documentPane is null) ResetLayout();
             else if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Tools"))
                 Dock.Layout.RootPanel.Children.Insert(0, CreateToolDocks());
+            if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Channels") &&
+                Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Layers")?.Parent is LayoutAnchorablePane rightPane)
+                rightPane.Children.Insert(rightPane.Children.IndexOf(rightPane.Children.First(panel => panel.ContentId == "Layers")) + 1, NewPanel("Channels"));
         }
         catch (Exception error) { ResetLayout(); Say($"Workspace reset. {error.Message}"); }
     }
@@ -219,7 +227,7 @@ public partial class MainWindow : Window
             center.Children.Add(session.Tab);
         }
         var right = new LayoutAnchorablePane { DockHeight = new GridLength(3, GridUnitType.Star) };
-        foreach (string title in new[] { "Layers", "History", "Command Log" }) right.Children.Add(NewPanel(title));
+        foreach (string title in new[] { "Layers", "Channels", "History", "Command Log" }) right.Children.Add(NewPanel(title));
         var upper = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
         upper.Children.Add(NewPanel("Navigation"));
         var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
@@ -312,12 +320,13 @@ public partial class MainWindow : Window
         var export = new MenuItem { Header = "_Export" };
         file.Items.Add(export);
         Item(export, "PNG", ExportPng, "Ctrl+Shift+E");
-        Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", SKEncodedImageFormat.Jpeg));
-        Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", SKEncodedImageFormat.Webp));
-        Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", null));
+        Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", ImageExportFormat.Jpeg));
+        Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", ImageExportFormat.WebP));
+        Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", ImageExportFormat.Svg));
         Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
 
         var edit = Menu("Edit");
+        Item(edit, "Document Settings…", EditDocumentSettings);
         Item(edit, "Undo", () => Run("history.undo", 0), "Ctrl+Z");
         Item(edit, "Redo", () => Run("history.redo", 0), "Ctrl+Y");
         Item(edit, "Copy Pixels", CopyPixels, "Ctrl+C");
@@ -350,6 +359,7 @@ public partial class MainWindow : Window
         foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity })
             Item(adjustments, EffectName(kind), () => AddEffect(kind));
 
+        AddColorModeMenu(image);
         Item(image, "Canvas Size…", () => ResizeDocument(canvasOnly: true));
         Item(image, "Image Size…", () => ResizeDocument(canvasOnly: false));
         var orientation = new MenuItem { Header = "Image Rotation" };
@@ -371,6 +381,9 @@ public partial class MainWindow : Window
         Item(image, "Default document size…", SetDefaults);
 
         var layer = Menu("Layer");
+        var addLayerItem = new MenuItem { Header = "Add" };
+        layer.Items.Add(addLayerItem);
+        Item(addLayerItem, "Vector Mask", AddVectorMask);
         var newLayer = new MenuItem { Header = "New" };
         layer.Items.Add(newLayer);
         Item(newLayer, "Raster Layer", () => CreateLayer(LayerKind.Raster));
@@ -405,13 +418,31 @@ public partial class MainWindow : Window
         foreach (var kind in new[] { EffectKind.GaussianBlur, EffectKind.MotionBlur })
             Item(blur, EffectName(kind), () => AddEffect(kind));
         var view = Menu("View");
+        var acceleration = new MenuItem { Header = "Experimental GPU Compositing", IsCheckable = true,
+            IsChecked = preferences.ExperimentalGpu, ToolTip = "Use Skia OpenGL for eligible canvas previews" };
+        acceleration.Click += (_, _) =>
+        {
+            preferences.ExperimentalGpu = acceleration.IsChecked;
+            if (!preferences.ExperimentalGpu)
+            {
+                gpu?.Dispose();
+                gpu = null;
+            }
+            foreach (var session in sessions) session.Rendered = null;
+            GpuStatus.Visibility = preferences.ExperimentalGpu ? Visibility.Visible : Visibility.Collapsed;
+            GpuStatus.Content = "CPU";
+            UpdateCanvas();
+        };
+        view.Items.Add(acceleration);
+        GpuStatus.Visibility = preferences.ExperimentalGpu ? Visibility.Visible : Visibility.Collapsed;
+        GpuStatus.Content = "CPU";
         BuildGuideMenus(view);
         Item(view, "Zoom in", () => ZoomBy(1.25), "Ctrl++");
         Item(view, "Zoom out", () => ZoomBy(.8), "Ctrl+-");
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", "More Tools", "Navigation", "Layers", "History", "Command Log" })
+        foreach (string title in new[] { "Tools", "More Tools", "Navigation", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -627,44 +658,32 @@ public partial class MainWindow : Window
         if (picker.ShowDialog(this) != true) return;
         Guard(() =>
         {
-            byte[] source = File.ReadAllBytes(picker.FileName);
-            var image = renderer.DecodeImage(source);
-            if (!string.Equals(Path.GetExtension(picker.FileName), ".png", StringComparison.OrdinalIgnoreCase))
-                source = renderer.EncodePng(image);
-            var name = Path.GetFileNameWithoutExtension(picker.FileName);
-            string id = Format.Id();
+            var input = new ImageImportArgs(Format.Id(), Path.GetFileNameWithoutExtension(picker.FileName),
+                Data: File.ReadAllBytes(picker.FileName));
             if (active is null)
             {
                 var session = NewSession();
-                session.Engine.Execute(Command.Of("document.create", new NewArgs(Format.Id(), image.Width, image.Height)));
-                session.Engine.Execute(Command.Of("layer.importPng", new ImportArgs(id, name, source)));
-                session.ActiveId = id;
+                session.Engine.Execute(Command.Of("document.importImage", input with { DocumentId = Format.Id() }));
+                session.ActiveId = input.Id;
                 AddSession(session);
             }
             else
             {
                 string? parent = DestinationGroup();
                 if (parent is not null) active.Collapsed.Remove(parent);
-                if (!Run("layer.importPng", new ImportArgs(id, name, source, parent), selectId: id)) return;
+                if (!Run("layer.importImage", input with { Parent = parent }, selectId: input.Id)) return;
             }
             Say($"Imported {Path.GetFileName(picker.FileName)}");
         });
     }
 
-    private void ExportPng()
+    private void ExportPng() => ExportImage("PNG", ".png", "*.png", ImageExportFormat.Png);
+
+    private void ExportImage(string label, string extension, string pattern, ImageExportFormat format)
     {
         if (active is null) return;
-        var picker = new SaveFileDialog { Filter = "PNG images (*.png)|*.png", DefaultExt = ".png", AddExtension = true };
-        if (picker.ShowDialog(this) == true) Run("document.export", new PathArgs(picker.FileName));
-    }
-
-    private void ExportImage(string label, string extension, string pattern, SKEncodedImageFormat? format)
-    {
-        if (active?.Engine.Current is not { } document) return;
         var picker = new SaveFileDialog { Filter = $"{label} images ({pattern})|{pattern}", DefaultExt = extension, AddExtension = true };
-        if (picker.ShowDialog(EditorOwner) != true) return;
-        Guard(() => File.WriteAllBytes(picker.FileName, format is { } raster
-            ? renderer.EncodeImage(document, raster) : renderer.EncodeSvg(document)));
+        if (picker.ShowDialog(EditorOwner) == true) Run("document.export", new ExportArgs(picker.FileName, format));
     }
 
     private bool CanClose(Session session)
@@ -721,6 +740,9 @@ public partial class MainWindow : Window
             if (session.MaskOnly is { } mask && session.Engine.Current?.AllLayers().Any(layer => layer.Id == mask && layer.Mask is not null) != true)
                 session.MaskOnly = null;
             if (selectId is not null) session.ActiveId = selectId;
+            if (session.VectorMaskTarget != session.ActiveId || session.Engine.Current?.AllLayers()
+                .Any(layer => layer.Id == session.VectorMaskTarget && layer.VectorMask is not null) != true)
+                session.VectorMaskTarget = null;
         });
         Refresh();
         return ok;
@@ -749,6 +771,7 @@ public partial class MainWindow : Window
             foreach (var item in sessions)
                 if (item.Tab is { } tab) tab.Title = item.Title;
             RefreshLayers();
+            RefreshChannels();
             history.ItemsSource = active?.Engine.History.Select(item => item.Name +
                 (!item.Enabled ? " (disabled)" : item.Error is { } error ? $" (skipped: {error})" : "")).ToArray();
             history.SelectedIndex = active?.Engine.Cursor ?? -1;
@@ -800,29 +823,38 @@ public partial class MainWindow : Window
                 var target = preview ?? snapshot;
                 var shift = selectionDragDelta;
                 string? targetId = moveId;
+                var selectedLayer = ActiveLayer();
+                var channel = (channelList.SelectedItem as ChannelRow) is { Key: not "composite" } component ? component : null;
                 bool isPreview = preview is not null || shift is not null;
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
-                bool cached = !isPreview && maskLayer is null && session.Rendered is { } prior &&
-                    ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height;
-                var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!) : await Task.Run(() =>
+                bool cached = !isPreview && maskLayer is null && channel is null && session.Rendered is { } prior &&
+                    ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color;
+                bool gpuRequested = preferences.ExperimentalGpu;
+                var accelerator = !cached && gpuRequested && channel is null && maskLayer is null &&
+                    SkiaRenderer.CanCompositeOnGpu(target) ? gpu ??= new WindowsGpuCompositor() : null;
+                var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!, Backend: session.RenderBackend) : await Task.Run(() =>
                 {
                     if (shift is { } offset && snapshot.Selection is { } area && targetId is not null &&
                         snapshot.AllLayers().FirstOrDefault(layer => layer.Id == targetId) is { Pixels: not null } layer)
                     {
                         target = session.Engine.Preview(snapshot, Command.Of("layer.moveSelection", offset, targetId));
                     }
-                    var pixels = maskLayer is null ? renderer.Composite(target) : renderer.MaskView(target, maskLayer);
-                    return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels));
+                    var (accelerated, backend) = accelerator?.TryComposite(renderer, target) ??
+                        (null, gpuRequested ? "CPU · preview not eligible for GPU" : "CPU");
+                    var pixels = accelerated ?? (maskLayer is null ? RenderChannel(target, channel, selectedLayer) : renderer.MaskView(target, maskLayer));
+                    return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels), Backend: (string?)backend);
                 });
-                if (!ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
+                if (gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
                     (isPreview && preview is null && selectionDragDelta is null)) continue;
-                if (!isPreview && maskLayer is null)
+                if (!isPreview && maskLayer is null && channel is null)
                 {
                     session.Rendered = snapshot;
+                    session.RenderBackend = frame.Backend;
                     session.Composite = frame.Pixels;
                     session.Frame = frame.Frame;
                 }
+                if (frame.Backend is { } backend) GpuStatus.Content = backend;
                 session.View.Frame = frame.Frame;
                 if (!isPreview) session.View.PendingPaint.Clear();
                 session.View.InvalidateVisual();

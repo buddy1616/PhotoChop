@@ -34,11 +34,7 @@ public partial class MainWindow
     private ChopSnapshotArgs? BakeLinkedFile(string file)
     {
         string path = Path.GetFullPath(file);
-        if (string.Equals(active?.Engine.Path, path, StringComparison.OrdinalIgnoreCase))
-        {
-            MessageBox.Show(effectDialog ?? EditorOwner, "Choose another document. A document cannot link to itself.", "Chop Layer");
-            return null;
-        }
+        if (active?.Engine is not { } engine) return null;
 
         var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = "Baking Chop Layer", Width = 365,
             SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false,
@@ -55,11 +51,7 @@ public partial class MainWindow
         {
             try
             {
-                snapshot = await Task.Run(() =>
-                {
-                    var document = ProjectFile.Open(path);
-                    return new ChopSnapshotArgs(path, renderer.EncodePng(renderer.Composite(document), document.PixelsPerInch));
-                });
+                snapshot = await Task.Run(() => engine.CaptureChopSnapshot(path));
             }
             catch (Exception error) { failure = error; }
             finally

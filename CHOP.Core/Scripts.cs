@@ -24,6 +24,23 @@ public static class Scripts
         }
     }
 
+    /// <summary>Turns recorded output paths into required arguments to prevent replay from overwriting the originals.</summary>
+    public static JsonArray FromRecording(IEnumerable<LogEntry> entries, bool includeOutputs)
+    {
+        var script = new JsonArray();
+        int output = 0;
+        foreach (var entry in entries)
+        {
+            if (!entry.Success) continue;
+            bool writesFile = entry.Command.Name is "document.save" or "document.export";
+            if (writesFile && !includeOutputs) continue;
+            var node = JsonSerializer.SerializeToNode(entry.Command, Format.Json)!.AsObject();
+            if (writesFile) node["args"]!.AsObject()["path"] = new JsonObject { ["$param"] = $"output{++output}" };
+            script.Add(node);
+        }
+        return script;
+    }
+
     private static JsonNode? Expand(JsonNode? node, IReadOnlyDictionary<string, string> parameters)
     {
         if (node is JsonObject obj)

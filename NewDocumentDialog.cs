@@ -69,6 +69,16 @@ internal static class NewDocumentDialog
         PreserveValueOnUnitChange(height, PixelScale);
         PreserveValueOnUnitChange(resolution, unit => unit == 1 ? 2.54 : 1);
 
+        var modes = new ComboBox { ItemsSource = new[] { "RGB", "Grayscale", "CMYK" }, SelectedIndex = 0 };
+        var depths = new ComboBox { ItemsSource = new[] { "8 Bits/Channel", "16 Bits/Channel", "32 Bits/Channel (Float)" }, SelectedIndex = 1 };
+        panel.Children.Add(new Label { Content = "Color mode", Target = modes });
+        var colorRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+        DockPanel.SetDock(depths, Dock.Right);
+        depths.Margin = new Thickness(6, 0, 0, 0);
+        colorRow.Children.Add(depths);
+        colorRow.Children.Add(modes);
+        panel.Children.Add(colorRow);
+
         var transparent = new CheckBox { Content = "Transparent background", IsChecked = true, Margin = new Thickness(0, 6, 0, 4) };
         var color = new TextBox { Text = background, IsEnabled = false, ToolTip = "Background color, #AARRGGBB" };
         transparent.Click += (_, _) => color.IsEnabled = transparent.IsChecked != true;
@@ -88,7 +98,9 @@ internal static class NewDocumentDialog
                 var (w, h, ppi) = Dimensions();
                 string? fill = transparent.IsChecked == true ? null : color.Text.Trim();
                 if (fill is not null) Format.Color(fill);
-                settings = new NewArgs(Format.Id(), w, h, fill, ppi, StarterLayers: true);
+                var mode = modes.SelectedIndex switch { 1 => ChannelColorMode.Grayscale, 2 => ChannelColorMode.Cmyk, _ => ChannelColorMode.Rgb };
+                var depth = depths.SelectedIndex switch { 1 => ChannelDepth.Bit16, 2 => ChannelDepth.Bit32, _ => ChannelDepth.Bit8 };
+                settings = new NewArgs(Format.Id(), w, h, fill, ppi, StarterLayers: true, Color: new(mode, depth));
                 dialog.DialogResult = true;
             }
             catch (Exception error) when (error is FormatException or InvalidDataException or OverflowException)

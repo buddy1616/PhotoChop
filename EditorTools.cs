@@ -79,6 +79,10 @@ public partial class MainWindow
         view.MouseLeave += (_, _) => { if (gesture is null) { lastCursor = null; Say(); } };
     }
 
+    private bool gradientFill;
+    private string gradientStart = "#FF000000", gradientEnd = "#FFFFFFFF";
+    private GradientArgs GradientAt(Point end) => new(new(gestureStart.X, gestureStart.Y), new(end.X, end.Y), gradientStart, gradientEnd);
+
     private void CanvasDown(object sender, MouseButtonEventArgs e)
     {
         if (active?.Engine.Current is not { } doc || gesture is not null || guideDrag is not null) return;
@@ -141,6 +145,11 @@ public partial class MainWindow
                     canvas.InvalidateVisual();
                     e.Handled = true;
                     return;
+                case "Bucket" when gradientFill:
+                    if (ActiveLayer() is not { Kind: LayerKind.Raster } targetRaster || !Editable(doc, targetRaster.Id))
+                    { Say("Select an unlocked raster layer to apply a gradient."); return; }
+                    canvas.GradientGuide = GradientAt(point);
+                    break;
                 case "Bucket":
                     RunLayer("layer.bucket", new BucketArgs(new PointD(point.X, point.Y), foreground, bucketTolerance));
                     return;
@@ -197,7 +206,7 @@ public partial class MainWindow
                     canvas.Erasing = tool == "Eraser";
                     break;
             }
-            gesture = tool;
+            gesture = tool == "Bucket" && gradientFill ? "Gradient" : tool;
         }
         else return;
         canvas.CaptureMouse();
@@ -230,6 +239,10 @@ public partial class MainWindow
         lastCursor = point;
         switch (gesture)
         {
+            case "Gradient":
+                canvas.GradientGuide = GradientAt(point);
+                canvas.InvalidateVisual();
+                break;
             case "Pan":
                 active.Offset = panOrigin + (view - gestureStart);
                 UpdateView();
@@ -309,6 +322,7 @@ public partial class MainWindow
         var original = moveOriginal;
         string? id = moveId;
         var motion = end - gestureStart;
+        var gradient = completed == "Gradient" ? GradientAt(end) : null;
         var originalSelection = selectionOrigin;
         var mode = selectionMode;
         var moveSelection = new PointD(Math.Round(motion.X), Math.Round(motion.Y));
@@ -316,6 +330,9 @@ public partial class MainWindow
         CancelGesture();
         switch (completed)
         {
+            case "Gradient":
+                if (gradient is not null && motion.LengthSquared > .01) RunLayer("layer.gradient", gradient);
+                break;
             case "Lasso":
                 if (lasso.Length >= 3) Run("selection.lasso", new LassoArgs(lasso, mode));
                 break;
@@ -400,6 +417,7 @@ public partial class MainWindow
 
     private void CancelGesture()
     {
+        canvas.GradientGuide = null;
         if (guideDrag is not null) CancelGuide();
         gesture = null;
         if (selectionOrigin is not null && active?.Engine.Current is { } document)
@@ -503,6 +521,7 @@ public partial class MainWindow
         CancelPathEditing();
         CancelGesture();
         tool = name;
+        if (active is not null && name is not ("Pen" or "Path Select")) active.VectorMaskTarget = null;
         foreach (var session in sessions)
             session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(name);
         RefreshTools();
@@ -539,7 +558,7 @@ public partial class MainWindow
         var visible = preferences.Tools ?? ToolNames;
         foreach (var name in OrderedTools().Where(visible.Contains))
         {
-            var button = Button(name, () => SetTool(name));
+            var button = Button(name == "Bucket" ? "Fill" : name, () => SetTool(name));
             button.HorizontalContentAlignment = HorizontalAlignment.Left;
             if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
             (UpperTools.Contains(name) ? toolsPanel : secondaryTools).Children.Add(button);
@@ -551,8 +570,26 @@ public partial class MainWindow
         toolColors.Children.Add(Button("⇄  Swap (X)", SwapColors, "Swap foreground and background colors"));
         ToolOptions.Children.Clear();
         if (interactiveTransform is { } transform) { TransformOptions(transform); return; }
-        OptionLabel(tool);
-        if (tool == "Bucket") SliderOption("Tolerance", 0, 255, bucketTolerance, value => bucketTolerance = (int)value);
+        OptionLabel(tool == "Bucket" ? "Fill" : tool);
+        if (active?.VectorMaskTarget is not null && (tool is "Pen" or "Path Select"))
+            ToolOptions.Children.Add(Button("Finish Vector Mask Editing", FinishVectorMaskEditing));
+        if (tool == "Bucket")
+        {
+            var fillModes = new ComboBox { ItemsSource = new[] { "Paint Bucket", "Gradient" }, SelectedIndex = gradientFill ? 1 : 0 };
+            fillModes.SelectionChanged += (_, _) =>
+            {
+                CancelGesture();
+                gradientFill = fillModes.SelectedIndex == 1;
+                RefreshTools();
+            };
+            ToolOptions.Children.Add(fillModes);
+            if (gradientFill)
+            {
+                ToolOptions.Children.Add(ColorButton("Start", gradientStart, color => gradientStart = color));
+                ToolOptions.Children.Add(ColorButton("End", gradientEnd, color => gradientEnd = color));
+            }
+            else SliderOption("Tolerance", 0, 255, bucketTolerance, value => bucketTolerance = (int)value);
+        }
         if (tool == "Magic Wand") SliderOption("Tolerance", 0, 255, wandTolerance, value => wandTolerance = (int)value);
         if (tool == "Lasso")
         {
@@ -743,7 +780,7 @@ public partial class MainWindow
         if (e.OriginalSource is TextBoxBase or PasswordBox) return;
         var modifiers = Keyboard.Modifiers;
         if (canvas.IsKeyboardFocusWithin && pathDrag is null && (tool is "Pen" or "Path Select") &&
-            ActiveLayer() is { Kind: LayerKind.Path } path)
+            EditablePathLayer() is { Kind: LayerKind.Path } path)
         {
             if (e.Key == Key.A && modifiers == ModifierKeys.Control)
             {

@@ -11,12 +11,16 @@ public sealed record Command(string Name, string? Target, JsonElement Args)
     public T Read<T>() => Args.Deserialize<T>(Format.Json) ?? throw new InvalidDataException($"Missing arguments for {Name}.");
 }
 
-public sealed record NewArgs(string Id, int Width, int Height, string? Background = null, double PixelsPerInch = 72, bool StarterLayers = false);
+public sealed record NewArgs(string Id, int Width, int Height, string? Background = null, double PixelsPerInch = 72, bool StarterLayers = false, ColorSettings? Color = null);
 public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? Parent = null,
     Transform? Transform = null, string Text = "Text", string Font = "Liberation Sans", double Size = 48,
     string Color = "#FFFFFFFF", int Width = 100, int Height = 100);
 public sealed record ImportArgs(string Id, string Name, byte[]? Png = null, string? Parent = null, string? Path = null);
 public sealed record PathArgs(string Path);
+public enum ImageExportFormat { Png, Jpeg, WebP, Svg }
+public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExportFormat.Png);
+public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null, string? Path = null,
+    string? Parent = null, string? DocumentId = null);
 public sealed record OpenArgs(string Path, byte[]? Data = null);
 public sealed record TextArgs(string Text, string Font, double Size, string Color);
 public sealed record ShapeArgs(int Width, int Height, string Color);
@@ -28,6 +32,7 @@ public sealed record EffectOrder(string Id, int Index);
 public sealed record LogEntry(DateTimeOffset Timestamp, string? DocumentId, Command Command, bool Success, string? Error);
 public sealed record HistoryEntry(string Name, Document Document, Command? Command = null,
     bool Enabled = true, string? Error = null);
+public sealed record DocumentSettingsArgs(ColorSettings Color, double PixelsPerInch);
 public sealed record ResizeImageArgs(int Width, int Height, double? PixelsPerInch = null);
 public sealed record ResizeCanvasArgs(int Width, int Height, int AnchorX = 1, int AnchorY = 1);
 public enum StrokeAlignment { Inside, Center, Outside }
@@ -46,7 +51,8 @@ public sealed class CommandEngine(IRasterBackend backend)
     public Document? Current => history.Count == 0 ? null : history[cursor].Document;
     public bool Dirty => Current is { } doc && !ReferenceEquals(doc, savedFloating) && (saved is null || doc.Width != saved.Width ||
         doc.Height != saved.Height || doc.PixelsPerInch != saved.PixelsPerInch || !ReferenceEquals(doc.Layers, saved.Layers) ||
-        !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides) || doc.GuidesLocked != saved.GuidesLocked || doc.Floating != saved.Floating || doc.ImageOrientation != saved.ImageOrientation);
+        !ReferenceEquals(doc.Metadata, saved.Metadata) || !ReferenceEquals(doc.Guides, saved.Guides) || doc.GuidesLocked != saved.GuidesLocked || doc.Floating != saved.Floating || doc.ImageOrientation != saved.ImageOrientation ||
+        doc.ImageFlip != saved.ImageFlip || doc.Color != saved.Color || !ReferenceEquals(doc.Channels, saved.Channels));
     public string? Path { get; private set; }
     public int Cursor => cursor;
     public IReadOnlyList<HistoryEntry> History => history;
@@ -62,6 +68,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         string? documentId = Current?.Id;
         try
         {
+            command = CaptureFileInputs(command);
             Dispatch(command);
         }
         catch (Exception error)
@@ -73,6 +80,42 @@ public sealed class CommandEngine(IRasterBackend backend)
         return Current;
     }
 
+    private Command CaptureFileInputs(Command command)
+    {
+        switch (command.Name)
+        {
+            case "layer.createChop":
+                var create = command.Read<CreateChopArgs>();
+                if (create.Snapshot is { Png: null, Native: null } source)
+                    return Command.Of(command.Name, create with { Snapshot = CaptureChopSnapshot(source.SourcePath) }, command.Target);
+                break;
+            case "layer.rebakeChop":
+                var snapshot = command.Read<ChopSnapshotArgs>();
+                if (snapshot.Png is null && snapshot.Native is null)
+                    return Command.Of(command.Name, CaptureChopSnapshot(snapshot.SourcePath), command.Target);
+                break;
+            case "layer.importImage":
+                var image = command.Read<ImageImportArgs>();
+                if (image is { Path: { } path, Data: null })
+                    return Command.Of(command.Name, image with { Path = null, Data = File.ReadAllBytes(path) }, command.Target);
+                break;
+            case "layer.importPng":
+                var png = command.Read<ImportArgs>();
+                if (png is { Path: { } pngPath, Png: null })
+                    return Command.Of(command.Name, png with { Path = null, Png = File.ReadAllBytes(pngPath) }, command.Target);
+                break;
+            case "layer.pastePixels":
+                var paste = command.Read<PastePixelsArgs>();
+                if (paste is { Path: { } pastePath, Png: null, Native: null })
+                {
+                    var pixels = backend.DecodeImage(File.ReadAllBytes(pastePath));
+                    return Command.Of(command.Name, paste with { Path = null, Png = backend.EncodePng(pixels) }, command.Target);
+                }
+                break;
+        }
+        return command;
+    }
+
     private void Dispatch(Command command)
     {
         switch (command.Name)
@@ -81,7 +124,10 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var args = command.Read<NewArgs>();
                 Format.Dimensions(args.Width, args.Height);
                 CheckId(args.Id);
-                var doc = new Document(args.Id, args.Width, args.Height) { PixelsPerInch = Range(args.PixelsPerInch, 1, 100000) };
+                var settings = args.Color ?? new ColorSettings(Depth: ChannelDepth.Bit16);
+                ChannelSamples.Validate(settings);
+                var doc = new Document(args.Id, args.Width, args.Height)
+                    { PixelsPerInch = Range(args.PixelsPerInch, 1, 100000), Color = settings };
                 if (args.Background is { } color)
                 {
                     Format.Color(color);
@@ -103,11 +149,23 @@ public sealed class CommandEngine(IRasterBackend backend)
                         Children = [new Layer(layerId, "Layer 1", LayerKind.Raster)
                         {
                             Width = args.Width, Height = args.Height,
-                            Pixels = args.Background is { } fill ? SolidPixels(args.Width, args.Height, Format.Color(fill)) : null
+                            Pixels = args.Background is { } fill ? PixelBuffer.Convert(SolidPixels(args.Width, args.Height, Format.Color(fill)), settings) : null
                         }]
                     }] };
                 }
                 Reset(doc, null);
+                return;
+            case "document.importImage":
+                var startImage = command.Read<ImageImportArgs>();
+                CheckId(startImage.Id);
+                CheckId(startImage.DocumentId ?? startImage.Id + "-document");
+                if (startImage.Parent is not null) throw new InvalidDataException("A new image document starts at the root.");
+                var imported = ReadImage(startImage);
+                var imageColor = new ColorSettings(Depth: ChannelDepth.Bit16);
+                var imageLayer = new Layer(startImage.Id, Name(startImage.Name), LayerKind.Raster)
+                    { Width = imported.Width, Height = imported.Height, Pixels = PixelBuffer.Convert(imported, imageColor) };
+                Reset(new Document(startImage.DocumentId ?? startImage.Id + "-document", imported.Width, imported.Height)
+                    { Color = imageColor, Layers = [imageLayer] }, null);
                 return;
             case "document.open":
                 var open = command.Read<OpenArgs>();
@@ -128,7 +186,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                 savedFloating = current.Floating is null ? null : current;
                 return;
             case "document.export":
-                File.WriteAllBytes(command.Read<PathArgs>().Path, backend.EncodePng(backend.Composite(current), current.PixelsPerInch));
+                var output = command.Read<ExportArgs>();
+                if (!Enum.IsDefined(output.Format)) throw new InvalidDataException("Unknown export format.");
+                WriteExport(output.Path, backend.ExportImage(current, output.Format));
                 return;
             case "history.undo": cursor = Math.Max(0, cursor - 1); return;
             case "history.redo": cursor = Math.Min(history.Count - 1, cursor + 1); return;
@@ -173,6 +233,16 @@ public sealed class CommandEngine(IRasterBackend backend)
         "selection.lasso" => "Lasso Selection",
         "mask.maskerStroke" => "Masker Stroke",
         "layer.flip" => command.Read<FlipArgs>().Horizontal ? "Flip horizontal" : "Flip vertical",
+        "document.color" or "document.settings" => "Change Document Settings",
+        "channel.set" => "Update Channel",
+        "channel.remove" => "Delete Channel",
+        "channel.select" => "Load Channel as Selection",
+        "layer.channels" => "Set Layer Color Planes",
+        "layer.clipping" => "Toggle Clipping",
+        "vectorMask.add" => "Add Vector Mask",
+        "vectorMask.path" => "Edit Vector Mask",
+        "vectorMask.remove" => "Delete Vector Mask",
+        "layer.gradient" => "Apply Gradient",
         "layers.move" => "Move Layers",
         "layers.delete" => "Delete Layers",
         "layers.duplicate" => "Duplicate Layers",
@@ -184,12 +254,48 @@ public sealed class CommandEngine(IRasterBackend backend)
         _ => command.Name
     };
 
+    private static void WriteExport(string path, byte[] data)
+    {
+        string target = System.IO.Path.GetFullPath(path);
+        string temporary = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(target)!, $".{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporary, data);
+            File.Move(temporary, target, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private Pixels ReadImage(ImageImportArgs import)
+    {
+        if ((import.Data is null) == (import.Path is null))
+            throw new InvalidDataException("Import requires either embedded image bytes or an image file path.");
+        return backend.DecodeImage(import.Data ?? File.ReadAllBytes(import.Path!));
+    }
+
+    public ChopSnapshotArgs CaptureChopSnapshot(string file)
+    {
+        string path = System.IO.Path.GetFullPath(file);
+        if (!string.Equals(System.IO.Path.GetExtension(path), ".chop", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Choose a source .chop file.");
+        if (Path is { } project && string.Equals(System.IO.Path.GetFullPath(project), path, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("A document cannot link to itself.");
+        var document = ProjectFile.Open(path);
+        var pixels = backend.CompositeForStorage(document);
+        return pixels.Native is { } native ? new(path, Native: native) :
+            new(path, backend.EncodePng(pixels, document.PixelsPerInch));
+    }
+
     private Layer WithChopSnapshot(Layer layer, ChopSnapshotArgs snapshot)
     {
         if (layer.Kind != LayerKind.Chop || string.IsNullOrWhiteSpace(snapshot.SourcePath) ||
-            !string.Equals(System.IO.Path.GetExtension(snapshot.SourcePath), ".chop", StringComparison.OrdinalIgnoreCase) ||
-            snapshot.Png is null) throw new InvalidDataException("A Chop Layer requires a source .chop file and a raster snapshot.");
-        var pixels = backend.DecodePng(snapshot.Png);
+            !string.Equals(System.IO.Path.GetExtension(snapshot.SourcePath), ".chop", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("A Chop Layer requires a source .chop file.");
+        if (snapshot.Png is null && snapshot.Native is null) snapshot = CaptureChopSnapshot(snapshot.SourcePath);
+        var pixels = snapshot.Native is { } native ? PixelBuffer.FromNative(native) : backend.DecodePng(snapshot.Png!);
         return layer with { ChopSource = snapshot.SourcePath, Pixels = pixels, Width = pixels.Width, Height = pixels.Height };
     }
 
@@ -223,9 +329,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                     return layer with { ImagePlacement = null, Mask = layer.Mask is null ? null : backend.ReprojectMask(doc, layer) };
                 var raster = backend.RasterizeLayer(doc, layer with { Opacity = 1, Visible = true, Blend = Blend.Normal,
                     Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() });
-                return new Layer(layer.Id, layer.Name, LayerKind.Raster) { Pixels = raster.Pixels,
+                return new Layer(layer.Id, layer.Name, LayerKind.Raster) { Pixels = PixelBuffer.Convert(raster.Pixels, doc.Color),
                     RasterX = raster.X, RasterY = raster.Y, Visible = layer.Visible, Locked = layer.Locked,
-                    Opacity = layer.Opacity, Blend = layer.TransformsEnabled ? EffectiveBlend(layer) : layer.Blend };
+                    Opacity = layer.Opacity, Blend = layer.TransformsEnabled ? EffectiveBlend(layer) : layer.Blend, Clipped = layer.Clipped };
             }).ToArray();
             return doc with { ImageOrientation = null, ImageFlip = null, Layers = baked };
         }
@@ -258,6 +364,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             .Then(unit).Then(Projective.Anchored(width, height, 0, 0));
         var inverse = matrix.Inverse();
         var result = doc with { Width = width, Height = height,
+            Channels = TransformChannels(doc, matrix, inverse),
             ImageOrientation = orientation == Projective.Identity ? null : orientation,
             ImageFlip = flip == Projective.Identity ? null : flip,
             Layers = doc.Layers.Select(layer =>
@@ -331,12 +438,12 @@ public sealed class CommandEngine(IRasterBackend backend)
                 size += selection.Bits.LongLength;
             foreach (var layer in history[i].Document.AllLayers())
             {
-                if (layer.Pixels is { } pixels && seen.Add(pixels)) size += pixels.Rgba.LongLength;
+                if (layer.Pixels is { } pixels && seen.Add(pixels)) size += pixels.StorageBytes;
                 if (layer.Mask is { } mask && seenMasks.Add(mask)) size += mask.Alpha.LongLength;
                 foreach (var shift in layer.PixelShifts)
                 {
                     if (seenMaps.Add(shift.Bits)) size += shift.Bits.LongLength;
-                    if (shift.Patch is { } patch && seen.Add(patch)) size += patch.Rgba.LongLength;
+                    if (shift.Patch is { } patch && seen.Add(patch)) size += patch.StorageBytes;
                 }
             }
             if (i == history.Count - 1 || (size <= limit && history.Count - i <= 250)) continue;
@@ -364,7 +471,18 @@ public sealed class CommandEngine(IRasterBackend backend)
         var layers = doc.Layers;
         Layer Wanted() => doc.AllLayers().FirstOrDefault(layer => layer.Id == command.Target)
             ?? throw new InvalidDataException("The target layer does not exist.");
-        Document With(Layer[] value) => doc with { Layers = value };
+        Document With(Layer[] value)
+        {
+            Layer Normalize(Layer layer)
+            {
+                var pixels = layer.Pixels is { } source ? PixelBuffer.Convert(source, doc.Color) : null;
+                var children = layer.Children.Select(Normalize).ToArray();
+                if (ReferenceEquals(pixels, layer.Pixels) && children.SequenceEqual(layer.Children, ReferenceEqualityComparer.Instance))
+                    return layer;
+                return layer with { Pixels = pixels, Children = children };
+            }
+            return doc with { Layers = value.Select(Normalize).ToArray() };
+        }
         Document Edit(Func<Layer, Layer> edit, bool checkLock = true)
         {
             var layer = Wanted();
@@ -415,6 +533,64 @@ public sealed class CommandEngine(IRasterBackend backend)
 
         switch (command.Name)
         {
+            case "document.color":
+                var colorSettings = command.Read<ColorSettings>();
+                return ChangeSettings(doc, new(colorSettings, doc.PixelsPerInch));
+            case "document.settings":
+                return ChangeSettings(doc, command.Read<DocumentSettingsArgs>());
+            case "channel.set":
+                var channel = command.Read<ChannelPlane>();
+                CheckId(channel.Info.Id);
+                Name(channel.Info.Name);
+                ChannelSamples.Validate(channel.Width, channel.Height, channel.Depth, channel.Samples);
+                var channelList = doc.Channels.ToList();
+                int existingChannel = channelList.FindIndex(item => item.Info.Id == channel.Info.Id);
+                if (existingChannel < 0) channelList.Add(channel);
+                else channelList[existingChannel] = channel;
+                return doc with { Channels = channelList.ToArray() };
+            case "channel.remove":
+                var removeChannel = command.Read<string>();
+                return doc.Channels.Any(item => item.Info.Id == removeChannel)
+                    ? doc with { Channels = doc.Channels.Where(item => item.Info.Id != removeChannel).ToArray() } : doc;
+            case "channel.select":
+                var loadChannel = command.Read<string>();
+                var selectionPlane = doc.Channels.FirstOrDefault(item => item.Info.Id == loadChannel)
+                    ?? throw new InvalidDataException("The channel no longer exists.");
+                return SelectPixels(doc, (x, y) =>
+                {
+                    long sx = (long)x - selectionPlane.Info.X, sy = (long)y - selectionPlane.Info.Y;
+                    return sx >= 0 && sy >= 0 && sx < selectionPlane.Width && sy < selectionPlane.Height &&
+                        ChannelSamples.Read(selectionPlane.Samples, selectionPlane.Depth, (int)(sy * selectionPlane.Width + sx)) >= .5;
+                });
+            case "layer.channels":
+                var sourceChannels = command.Read<ColorPlanes>();
+                var proxy = PixelBuffer.Convert(PixelBuffer.FromNative(sourceChannels), doc.Color);
+                return Edit(layer => layer.Kind == LayerKind.Raster
+                    ? layer with { SourceChannels = sourceChannels, Pixels = proxy, Width = proxy.Width, Height = proxy.Height, PixelShifts = [] }
+                    : throw new InvalidDataException("Select a raster layer for color channels."));
+            case "layer.clipping":
+                var clippedLayer = Wanted();
+                bool clipped = command.Read<bool>();
+                var clippingParent = ParentOf(layers, clippedLayer.Id);
+                var tier = clippingParent is null ? layers : doc.AllLayers().Single(item => item.Id == clippingParent).Children;
+                if (clipped && Array.FindIndex(tier, item => item.Id == clippedLayer.Id) <= 0)
+                    throw new InvalidDataException("A clipping layer needs a base layer below it.");
+                return Edit(layer => layer.Clipped == clipped ? layer : layer with { Clipped = clipped });
+            case "vectorMask.add":
+                var vectorMask = command.Read<VectorMask>();
+                CheckContours(vectorMask.Contours);
+                return Edit(layer => layer with { VectorMask = vectorMask });
+            case "vectorMask.path":
+                var newMaskContours = command.Read<PathContour[]>();
+                CheckContours(newMaskContours);
+                return Edit(layer => layer.VectorMask is { } currentMask
+                    ? layer with { VectorMask = currentMask with { Contours = newMaskContours } } : layer);
+            case "vectorMask.enabled":
+                var vectorEnabled = command.Read<bool>();
+                return Edit(layer => layer.VectorMask is { } currentMask
+                    ? layer with { VectorMask = currentMask with { Enabled = vectorEnabled } } : layer);
+            case "vectorMask.remove":
+                return Edit(layer => layer with { VectorMask = null });
             case "selection.commitFloating": return doc;
             case "document.selection":
                 var selection = command.Args.Deserialize<Area?>(Format.Json);
@@ -535,6 +711,13 @@ public sealed class CommandEngine(IRasterBackend backend)
                 { Transform = create.Transform ?? new(), Text = create.Text, Font = create.Font, Size = create.Size,
                     Color = create.Color, Width = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Width : create.Width,
                     Height = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Height : create.Height }));
+            case "layer.importImage":
+                var genericImport = command.Read<ImageImportArgs>();
+                NewId(genericImport.Id);
+                CheckParent(genericImport.Parent);
+                var asset = ReadImage(genericImport);
+                return With(Insert(layers, genericImport.Parent, null, new(genericImport.Id, Name(genericImport.Name), LayerKind.Raster)
+                    { Pixels = asset, Width = asset.Width, Height = asset.Height }));
             case "layer.importPng":
                 var import = command.Read<ImportArgs>();
                 NewId(import.Id);
@@ -548,7 +731,12 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var paste = command.Read<PastePixelsArgs>();
                 NewId(paste.Id);
                 CheckParent(paste.Parent);
-                var pastedPixels = backend.DecodePng(paste.Png);
+                if (paste.Path is not null && (paste.Png is { Length: > 0 } || paste.Native is not null))
+                    throw new InvalidDataException("Paste requires either a path or embedded pixels.");
+                var pasteSource = paste.Native is { } nativePaste ? PixelBuffer.FromNative(nativePaste) :
+                    paste.Path is { } pastePath ? backend.DecodeImage(File.ReadAllBytes(pastePath)) :
+                    backend.DecodePng(paste.Png ?? throw new InvalidDataException("Paste requires an image."));
+                var pastedPixels = PixelBuffer.Convert(pasteSource, doc.Color);
                 var pasteLayer = new Layer(paste.Id, Name(paste.Name), LayerKind.Raster)
                     { Pixels = pastedPixels, Width = pastedPixels.Width, Height = pastedPixels.Height };
                 var pastedDoc = With(Insert(layers, paste.Parent, null, pasteLayer));
@@ -689,6 +877,17 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return ApplySpatial(Projective.FromQuad(warp.Source, warp.Corners));
             case "layer.resetTransform":
                 return Edit(layer => layer with { Transform = new Transform() });
+            case "layer.gradient":
+                var gradient = command.Read<GradientArgs>();
+                Format.Color(gradient.StartColor);
+                Format.Color(gradient.EndColor);
+                static bool Finite(PointD point) => double.IsFinite(point.X) && double.IsFinite(point.Y) &&
+                    Math.Abs(point.X) <= 1_000_000 && Math.Abs(point.Y) <= 1_000_000;
+                if (!Finite(gradient.Start) || !Finite(gradient.End) || gradient.Start == gradient.End)
+                    throw new InvalidDataException("Drag between two points to set the gradient direction.");
+                return Edit(layer => layer.Kind == LayerKind.Raster
+                    ? ApplyPatch(layer, backend.PaintGradient(doc, layer, doc.Selection ?? new(0, 0, doc.Width, doc.Height), gradient))
+                    : throw new InvalidDataException("Select a raster layer to apply a gradient."));
             case "layer.bucket":
                 var bucket = command.Read<BucketArgs>();
                 Range(bucket.Tolerance, 0, 255);
@@ -781,7 +980,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var mergedLayer = new Layer(lower.Id, lower.Name, LayerKind.Raster)
                 {
                     Pixels = merged.Pixels, RasterX = merged.X, RasterY = merged.Y,
-                    Width = merged.Pixels.Width, Height = merged.Pixels.Height
+                    Width = merged.Pixels.Width, Height = merged.Pixels.Height, Clipped = lower.Clipped
                 };
                 return With(ReplaceItems(layers, downParent, [lower, upper], [mergedLayer]));
             case "layer.bake":
@@ -803,7 +1002,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                     return new Layer(layer.Id, layer.Name, LayerKind.Raster)
                     {
                         Pixels = baked.Pixels, RasterX = baked.X, RasterY = baked.Y, Visible = layer.Visible,
-                        Opacity = layer.Opacity, Blend = activeBlend, Width = baked.Pixels.Width, Height = baked.Pixels.Height
+                        Opacity = layer.Opacity, Blend = activeBlend, Clipped = layer.Clipped, Width = baked.Pixels.Width, Height = baked.Pixels.Height
                     };
                 });
             case "mask.paintStroke":
@@ -867,12 +1066,12 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (indexes.Length < 2 || indexes[^1] - indexes[0] + 1 != indexes.Length)
                     throw new InvalidDataException("Select at least two adjacent sibling layers to merge.");
                 return With(ReplaceItems(layers, mergeParent, selected, [new(merge.Id, Name(merge.Name), LayerKind.Raster)
-                    { Pixels = backend.Composite(doc with { Layers = selected }) }]));
+                    { Pixels = backend.CompositeForStorage(doc with { Layers = selected }) }]));
             case "document.flatten":
                 var flat = command.Read<string>();
                 NewId(flat);
                 RequireEditableSubtree(layers, layers);
-                return With([new(flat, "Flattened", LayerKind.Raster) { Pixels = backend.Composite(doc) }]);
+                return With([new(flat, "Flattened", LayerKind.Raster) { Pixels = backend.CompositeForStorage(doc) }]);
             case "effect.add":
                 var effect = command.Read<Effect>();
                 CheckEffect(effect);
@@ -923,6 +1122,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         var result = doc with
         {
             Width = width, Height = height,
+            Channels = TransformChannels(doc, framing, inverse),
             Guides = doc.Guides.Select(guide => guide with { Position = (int)Math.Round(
                 guide.Axis == GuideAxis.Vertical ? guide.Position * sx + x : guide.Position * sy + y) })
                 .Where(guide => guide.Position >= 0 && guide.Position <= (guide.Axis == GuideAxis.Vertical ? width : height)).ToArray(),
@@ -936,6 +1136,65 @@ public sealed class CommandEngine(IRasterBackend backend)
         if (doc.Selection is null) return result;
         return SelectPixels(result, (px, py) => doc.Selected((int)Math.Floor((px - x + .5) / sx),
             (int)Math.Floor((py - y + .5) / sy)));
+    }
+
+    private static Document ChangeSettings(Document doc, DocumentSettingsArgs settings)
+    {
+        ChannelSamples.Validate(settings.Color);
+        double resolution = Range(settings.PixelsPerInch, 1, 100000);
+        if (doc.Color == settings.Color)
+            return resolution == doc.PixelsPerInch ? doc : doc with { PixelsPerInch = resolution };
+        Layer Convert(Layer layer) => layer with
+        {
+            Pixels = layer.Pixels is { } source ? PixelBuffer.Convert(source, settings.Color) : null,
+            PixelShifts = layer.PixelShifts.Select(shift => shift.Patch is { } patch
+                ? shift with { Patch = PixelBuffer.Convert(patch, settings.Color) } : shift).ToArray(),
+            Children = layer.Children.Select(Convert).ToArray()
+        };
+        ChannelPlane ConvertChannel(ChannelPlane channel)
+        {
+            if (channel.Depth == settings.Color.Depth) return channel;
+            int count = checked(channel.Width * channel.Height);
+            var samples = new byte[checked(count * ChannelSamples.Bytes(settings.Color.Depth))];
+            for (int i = 0; i < count; i++)
+                ChannelSamples.Write(samples, settings.Color.Depth, i, ChannelSamples.Read(channel.Samples, channel.Depth, i));
+            return channel with { Depth = settings.Color.Depth, Samples = samples };
+        }
+        return doc with
+        {
+            Color = settings.Color, PixelsPerInch = resolution, Layers = doc.Layers.Select(Convert).ToArray(),
+            Channels = doc.Color.Depth == settings.Color.Depth ? doc.Channels : doc.Channels.Select(ConvertChannel).ToArray()
+        };
+    }
+
+    private static ChannelPlane[] TransformChannels(Document doc, Projective transform, Projective inverse)
+    {
+        if (doc.Channels.Length == 0 || transform == Projective.Identity) return doc.Channels;
+        return doc.Channels.Select(plane =>
+        {
+            var corners = new[]
+            {
+                transform.Map(plane.Info.X, plane.Info.Y), transform.Map((double)plane.Info.X + plane.Width, plane.Info.Y),
+                transform.Map(plane.Info.X, (double)plane.Info.Y + plane.Height),
+                transform.Map((double)plane.Info.X + plane.Width, (double)plane.Info.Y + plane.Height)
+            };
+            int x = checked((int)Math.Round(corners.Min(p => p.X))), y = checked((int)Math.Round(corners.Min(p => p.Y)));
+            int width = Math.Max(1, checked((int)Math.Round(corners.Max(p => p.X)) - x));
+            int height = Math.Max(1, checked((int)Math.Round(corners.Max(p => p.Y)) - y));
+            Format.Dimensions(width, height);
+            int sampleSize = ChannelSamples.Bytes(plane.Depth);
+            var samples = new byte[checked(width * height * sampleSize)];
+            for (int dy = 0; dy < height; dy++)
+            for (int dx = 0; dx < width; dx++)
+            {
+                var point = inverse.Map(x + dx + .5, y + dy + .5);
+                int sx = (int)Math.Floor(point.X - plane.Info.X), sy = (int)Math.Floor(point.Y - plane.Info.Y);
+                if (sx < 0 || sx >= plane.Width || sy < 0 || sy >= plane.Height) continue;
+                plane.Samples.AsSpan((sy * plane.Width + sx) * sampleSize, sampleSize)
+                    .CopyTo(samples.AsSpan((dy * width + dx) * sampleSize, sampleSize));
+            }
+            return plane with { Info = plane.Info with { X = x, Y = y }, Width = width, Height = height, Samples = samples };
+        }).ToArray();
     }
 
     private Document TransformSelected(Document doc, Layer layer, Area area, Projective transform)
@@ -990,11 +1249,13 @@ public sealed class CommandEngine(IRasterBackend backend)
     private Layer ApplyInk(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, uint color)
     {
         if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Select a raster layer to fill or stroke pixels.");
-        var edit = backend.PaintArea(doc, layer, bounds, contains, color);
-        return edit.Shift is null ? layer : layer.Pixels is null
+        return ApplyPatch(layer, backend.PaintArea(doc, layer, bounds, contains, color));
+    }
+
+    private static Layer ApplyPatch(Layer layer, RasterEdit edit) =>
+        edit.Shift is null ? layer : layer.Pixels is null
             ? layer with { Pixels = edit.Pixels, RasterX = edit.X, RasterY = edit.Y }
             : layer with { PixelShifts = [.. layer.PixelShifts, edit.Shift] };
-    }
 
     public static Blend EffectiveBlend(Layer layer) =>
         layer.Effects.LastOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.BlendMode)?.Mode ?? layer.Blend;
@@ -1004,13 +1265,13 @@ public sealed class CommandEngine(IRasterBackend backend)
         var pixels = backend.Stroke(doc, layer, stroke);
         if (layer.PixelShifts.Length == 0) return layer with { Pixels = pixels };
         var effective = backend.ResolveRaster(layer)!;
-        var prior = effective.Pixels.Rgba;
+        var prior = effective.Pixels;
         int left = pixels.Width, top = pixels.Height, right = -1, bottom = -1;
         for (int y = 0; y < pixels.Height; y++)
         for (int x = 0; x < pixels.Width; x++)
         {
-            int i = (y * pixels.Width + x) * 4;
-            if (prior.AsSpan(i, 4).SequenceEqual(pixels.Rgba.AsSpan(i, 4))) continue;
+            int i = y * pixels.Width + x;
+            if (PixelBuffer.Get(prior, i) == PixelBuffer.Get(pixels, i)) continue;
             left = Math.Min(left, x);
             top = Math.Min(top, y);
             right = Math.Max(right, x);
@@ -1018,10 +1279,10 @@ public sealed class CommandEngine(IRasterBackend backend)
         }
         if (right < left) return layer;
         int width = right - left + 1, height = bottom - top + 1;
-        var rgba = new byte[width * height * 4];
+        var buffer = new PixelBuffer(width, height, doc.Color);
         for (int y = 0; y < height; y++)
-            Array.Copy(pixels.Rgba, ((top + y) * pixels.Width + left) * 4, rgba, y * width * 4, width * 4);
-        var patch = new Pixels(width, height, rgba);
+            buffer.Copy(pixels, (top + y) * pixels.Width + left, y * width, width);
+        var patch = buffer.Finish();
         var area = new Area(effective.X + left, effective.Y + top, width, height);
         return layer with { PixelShifts = [.. layer.PixelShifts, new(area, [], 0, 0, Patch: patch)] };
     }

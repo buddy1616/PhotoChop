@@ -52,6 +52,15 @@ public partial class MainWindow
             if (layer is null) { e.Handled = true; return; }
             string kind = layer.Kind == LayerKind.Group ? "Group" : "Layer";
             Item(menu, "Properties…", () => { SelectLayer(layer.Id); Rename(); });
+            Item(menu, layer.Clipped ? "Release Clipping Mask" : "Create Clipping Mask",
+                () => Run("layer.clipping", !layer.Clipped, layer.Id, layer.Id));
+            if (layer.VectorMask is { } vector)
+            {
+                Item(menu, "Edit Vector Mask", () => EditVectorMask(layer.Id));
+                Item(menu, vector.Enabled ? "Disable Vector Mask" : "Enable Vector Mask",
+                    () => Run("vectorMask.enabled", !vector.Enabled, layer.Id, layer.Id));
+                Item(menu, "Delete Vector Mask", () => Run("vectorMask.remove", 0, layer.Id, layer.Id));
+            }
             if (layer.Kind == LayerKind.Text) Item(menu, "Edit Text…", () => EditText(layer));
             Item(menu, "Duplicate", () => Duplicate(layer.Id));
             Item(menu, $"Bake {kind}…", () =>
@@ -75,6 +84,7 @@ public partial class MainWindow
             active.Collapsed.Remove(parent.Id);
             child = parent.Id;
         }
+        if (active.VectorMaskTarget != id) active.VectorMaskTarget = null;
         active.ActiveId = id;
         active.MaskTarget = active.MaskOnly = null;
         Refresh();
@@ -226,7 +236,7 @@ public partial class MainWindow
     private static IEnumerable<LogEntry> DisplayLog(Session session)
     {
         if (!session.HistoryEdited) return session.Log;
-        var starts = session.Log.Where(entry => entry.Command.Name is "document.create" or "document.open");
+        var starts = session.Log.Where(entry => entry.Command.Name is "document.create" or "document.open" or "document.importImage");
         var timeline = session.Engine.History.Where(entry => entry.Command is not null).Select(entry =>
         {
             var record = session.Log.FirstOrDefault(log => ReferenceEquals(log.Command, entry.Command));

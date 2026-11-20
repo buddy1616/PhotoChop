@@ -38,6 +38,9 @@ public partial class MainWindow
             (byte)(Format.Color(Layer.Color) >> 24), (byte)(Format.Color(Layer.Color) >> 16),
             (byte)(Format.Color(Layer.Color) >> 8), (byte)Format.Color(Layer.Color))) : null;
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
+        public Visibility ClippingVisibility => Layer.Clipped ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility VectorMaskVisibility => Layer.VectorMask is null ? Visibility.Collapsed : Visibility.Visible;
+        public double VectorMaskOpacity => Layer.VectorMask?.Enabled == true ? 1 : .4;
         public Thickness NameIndent => Layer.Kind == LayerKind.Group ? new(2, 0, 0, 0) : new(Depth * 13 + 16, 0, 0, 0);
     }
     private StackPanel? effectEditor;
@@ -106,6 +109,9 @@ public partial class MainWindow
             CancelTransform();
             CancelPathEditing();
             active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
+            if (active.VectorMaskTarget != active.ActiveId) active.VectorMaskTarget = null;
+            RefreshChannels();
+            if (active.ChannelView != "composite") UpdateCanvas();
             if (active.Engine.Current?.Floating is { } floating && floating.LayerId != active.ActiveId)
             {
                 Run("selection.commitFloating", 0);
@@ -128,6 +134,7 @@ public partial class MainWindow
         };
         layers.PreviewMouseLeftButtonDown += (_, e) =>
         {
+            if (TryToggleClipping(e)) { layerDrag = null; e.Handled = true; return; }
             layerDragStart = layers.PointToScreen(e.GetPosition(layers));
             layerDrag = IsButton(e.OriginalSource) || RowAt(e.OriginalSource) is not { } row ? null :
                 layers.SelectedItems.Contains(row) ? DragRoots(layers.SelectedItems.OfType<LayerRow>()) : [row];
@@ -180,6 +187,8 @@ public partial class MainWindow
         var logActions = new WrapPanel { Margin = new Thickness(5) };
         logActions.Children.Add(Button("Copy selected", () => ExportLog(true, true)));
         logActions.Children.Add(Button("Export script", () => ExportLog(false, false)));
+        logActions.Children.Add(Button("Export script with outputs", () => ExportLog(false, false, includeOutputs: true),
+            "Use output1, output2, and so on to supply new paths when replaying"));
         logActions.Children.Add(Button("Clear display", () =>
         {
             if (active is null) return;
@@ -202,6 +211,7 @@ public partial class MainWindow
         panelContent.Add("More Tools", toolDock);
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Layers", layersPanel);
+        panelContent.Add("Channels", BuildChannels());
         panelContent.Add("History", history);
         panelContent.Add("Command Log", logPanel);
     }
@@ -709,13 +719,12 @@ public partial class MainWindow
         recording.IsChecked = active?.Recording == true;
     }
 
-    private void ExportLog(bool selection, bool clipboard)
+    private void ExportLog(bool selection, bool clipboard, bool includeOutputs = false)
     {
         if (active is null) return;
         var entries = selection ? commandLog.SelectedItems.OfType<LogRow>().Select(row => row.Entry) : active.Log;
-        var commands = entries.Where(entry => entry.Success && entry.Command.Name is not ("document.save" or "document.export"))
-            .Select(entry => entry.Command).ToArray();
-        if (commands.Length == 0) { Say("There are no editing commands to copy or export."); return; }
+        var commands = Scripts.FromRecording(entries, includeOutputs);
+        if (commands.Count == 0) { Say("There are no editing commands to copy or export."); return; }
         Guard(() =>
         {
             if (clipboard) Clipboard.SetText(JsonSerializer.Serialize(commands, Format.Json));

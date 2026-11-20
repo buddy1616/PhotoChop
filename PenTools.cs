@@ -65,12 +65,12 @@ public partial class MainWindow
 
     private void CloseCurrentPath(string layerId, int contour)
     {
-        var layer = active?.Engine.Current?.AllLayers().FirstOrDefault(item => item.Id == layerId);
+        var layer = EditablePathLayer(active?.Engine.Current?.AllLayers().FirstOrDefault(item => item.Id == layerId));
         if (layer is null || contour < 0 || contour >= layer.Contours.Length || layer.Contours[contour].Nodes.Length < 2) return;
         var updated = layer.Contours.ToArray();
         updated[contour] = updated[contour] with { Closed = true };
         EndCurrentPath();
-        Run("layer.path", updated, layerId, layerId);
+        RunPathGeometry(updated, layerId);
     }
 
     private static PointD MapPath(SKMatrix matrix, PointD p)
@@ -99,7 +99,7 @@ public partial class MainWindow
 
     private void RefreshPathOverlay()
     {
-        if (tool is not ("Pen" or "Path Select") || active?.Engine.Current is not { } doc || ActiveLayer() is not { Kind: LayerKind.Path } layer)
+        if (tool is not ("Pen" or "Path Select") || active?.Engine.Current is not { } doc || EditablePathLayer() is not { Kind: LayerKind.Path } layer)
         {
             canvas.PathOverlay = null;
             canvas.SelectedPathNodes = [];
@@ -138,7 +138,8 @@ public partial class MainWindow
                 foreach (var child in VisiblePaths(item.Children)) yield return child;
             }
         }
-        var candidates = VisiblePaths(doc.Layers).OrderByDescending(layer => layer.Id == active?.ActiveId);
+        IEnumerable<Layer> candidates = active?.VectorMaskTarget is not null && EditablePathLayer() is { Kind: LayerKind.Path } maskLayer
+            ? [maskLayer] : VisiblePaths(doc.Layers).OrderByDescending(layer => layer.Id == active?.ActiveId);
         foreach (var layer in candidates)
         {
             var world = PathMatrix(doc, layer);
@@ -207,7 +208,7 @@ public partial class MainWindow
             return true;
         }
 
-        if (penLayer is { } drawing && ActiveLayer() is { Kind: LayerKind.Path } drawingLayer && drawingLayer.Id == drawing &&
+        if (penLayer is { } drawing && EditablePathLayer() is { Kind: LayerKind.Path } drawingLayer && drawingLayer.Id == drawing &&
             penContour >= 0 && penContour < drawingLayer.Contours.Length && !drawingLayer.Contours[penContour].Closed)
         {
             if (hit is { Part: PathPart.Anchor, Node: 0 } closing && closing.Layer.Id == drawing && closing.Contour == penContour &&
@@ -241,8 +242,8 @@ public partial class MainWindow
         }
 
         if (point.X < 0 || point.Y < 0 || point.X >= doc.Width || point.Y >= doc.Height) return true;
-        if (ActiveLayer()?.Kind != LayerKind.Path && CreateNewPath(startTool: false) is null) return true;
-        if (ActiveLayer() is not { Kind: LayerKind.Path } layer || active?.Engine.Current is not { } current || !Editable(current, layer.Id)) return true;
+        if (EditablePathLayer()?.Kind != LayerKind.Path && CreateNewPath(startTool: false) is null) return true;
+        if (EditablePathLayer() is not { Kind: LayerKind.Path } layer || active?.Engine.Current is not { } current || !Editable(current, layer.Id)) return true;
         penLayer = layer.Id;
         penContour = layer.Contours.Length;
         StartPathDrag(current, layer, layer.Contours, penContour, -1, PathPart.Add, point);
@@ -349,10 +350,10 @@ public partial class MainWindow
         bool changed = drag.Pending.Length != drag.Original.Length ||
             drag.Pending.Zip(drag.Original).Any(pair =>
                 pair.First.Closed != pair.Second.Closed || !pair.First.Nodes.SequenceEqual(pair.Second.Nodes));
-        if (drag.Part == PathPart.Extend && active?.Engine.Current?.AllLayers().FirstOrDefault(l => l.Id == drag.Id) is { } existing)
+        if (drag.Part == PathPart.Extend && EditablePathLayer(active?.Engine.Current?.AllLayers().FirstOrDefault(l => l.Id == drag.Id)) is { } existing)
             changed |= !existing.Contours[drag.Contour].Nodes.SequenceEqual(drag.Pending[drag.Contour].Nodes);
         if (drag.Part == PathPart.Close) EndCurrentPath();
-        if (changed) Run("layer.path", drag.Pending, drag.Id, drag.Id);
+        if (changed) RunPathGeometry(drag.Pending, drag.Id);
         else RefreshPathOverlay();
         return true;
     }
@@ -360,7 +361,7 @@ public partial class MainWindow
     private void ShowPathContext(Document doc, PathHit? hit)
     {
         var menu = new ContextMenu { PlacementTarget = canvas, Placement = PlacementMode.MousePoint };
-        var target = hit?.Layer ?? ActiveLayer();
+        var target = hit?.Layer ?? EditablePathLayer();
         if (target?.Kind == LayerKind.Path)
         {
             var contour = hit?.Contour ?? (penLayer == target.Id ? penContour : Array.FindIndex(target.Contours, item => !item.Closed));
@@ -401,7 +402,7 @@ public partial class MainWindow
             return contour with { Nodes = remaining, Closed = contour.Closed && remaining.Length >= 2 };
         }).Where(contour => contour.Nodes.Length > 0).ToArray();
         CancelPathEditing();
-        Run("layer.path", contours, layer.Id, layer.Id);
+        RunPathGeometry(contours, layer.Id);
     }
 
     private void ChangePathHandles(PathHit hit, bool incoming, bool outgoing)
@@ -421,7 +422,7 @@ public partial class MainWindow
         nodes[hit.Node] = node with { Incoming = incoming ? Handle(-HandleLength(previous)) : null,
             Outgoing = outgoing ? Handle(HandleLength(next)) : null };
         contours[hit.Contour] = contour with { Nodes = nodes };
-        Run("layer.path", contours, hit.Layer.Id, hit.Layer.Id);
+        RunPathGeometry(contours, hit.Layer.Id);
     }
 
     private void ConvertSelectionToPaths()

@@ -34,6 +34,7 @@ internal sealed class EditorCanvas : FrameworkElement
     public PathContour[]? PathOverlay { get; set; }
     public HashSet<(int Contour, int Node)> SelectedPathNodes { get; set; } = [];
     public IReadOnlyList<PointD>? LassoPath { get; set; }
+    public GradientArgs? GradientGuide { get; set; }
     public PointD[]? TransformBox { get; set; }
     public PointD? TransformOrigin { get; set; }
     public bool ShowTransformEdges { get; set; }
@@ -100,6 +101,28 @@ internal sealed class EditorCanvas : FrameworkElement
         foreach (var guide in Guides)
             if (guide.Id != DraggedGuide) DrawGuide(dc, guide, imageArea, guidePen);
         if (GhostGuide is { } ghost) DrawGuide(dc, ghost, imageArea, ghostGuidePen);
+        if (GradientGuide is { } gradient)
+        {
+            var start = ToView(gradient.Start);
+            var end = ToView(gradient.End);
+            var line = end - start;
+            var steps = new LinearGradientBrush(ToColor(gradient.StartColor), ToColor(gradient.EndColor), 0);
+            if (line.Length > 0)
+            {
+                steps.MappingMode = BrushMappingMode.Absolute;
+                steps.StartPoint = start;
+                steps.EndPoint = end;
+                dc.DrawLine(new Pen(Brushes.Black, 7), start, end);
+                dc.DrawLine(new Pen(steps, 4), start, end);
+                for (int i = 0; i <= 4; i++)
+                {
+                    var point = start + line * (i / 4d);
+                    dc.DrawEllipse(i == 0 ? new SolidColorBrush(ToColor(gradient.StartColor)) :
+                        i == 4 ? new SolidColorBrush(ToColor(gradient.EndColor)) : Brushes.White,
+                        new Pen(Brushes.Black, 1), point, i is 0 or 4 ? 5 : 2, i is 0 or 4 ? 5 : 2);
+                }
+            }
+        }
         if (PathOverlay is { } paths) DrawVectorPaths(dc, paths);
         if (LassoPath is { Count: > 1 } lasso)
         {
@@ -128,6 +151,12 @@ internal sealed class EditorCanvas : FrameworkElement
 
     private static readonly Pen pathPen = Frozen(new Pen(Brushes.DeepSkyBlue, 1.25));
     private static readonly Pen pathHandlePen = Frozen(new Pen(Brushes.LightSkyBlue, 1));
+
+    private static Color ToColor(string value)
+    {
+        uint color = Format.Color(value);
+        return Color.FromArgb((byte)(color >> 24), (byte)(color >> 16), (byte)(color >> 8), (byte)color);
+    }
 
     private void DrawVectorPaths(DrawingContext dc, PathContour[] contours)
     {

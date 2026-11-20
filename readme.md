@@ -51,7 +51,7 @@ Open [the editable sample](examples/phase-one.chop) from the File menu to try te
 
 ## CLI and command replay
 
-Export the active document's recorded commands from **Command Log → Export script**. Use **Copy selected** to copy the commands for selected rows in execution order. A complete recording includes the initial document and its inputs, including imported PNGs. A selected range or a recording with gaps needs the corresponding starting state. Clear display hides earlier log entries. Export still includes those entries. The desktop omits Save and Export commands when extracting a script so a replay can specify its own output paths.
+Export the active document's recorded commands from **Command Log → Export script**. Use **Copy selected** to copy the commands for selected rows in execution order. A complete recording includes the initial document and its inputs, including imported PNGs. A selected range or a recording with gaps needs the corresponding starting state. Clear display hides earlier log entries. Export still includes those entries. **Export script with outputs** includes Save and Export as replayable commands and replaces their paths with required parameters named `output1`, `output2`, and so on. **Export script** records the edits without output commands.
 
 Run the checked-in [create](examples/create-sample.json) and [edit](examples/edit-sample.json) scripts from the repository root. The command lines below use a POSIX shell or PowerShell 7.3+.
 
@@ -62,9 +62,20 @@ dotnet run --project CHOP.CLI -- run examples/edit-sample.json 'input="examples/
 
 The script is a JSON array of command objects with `name`, optional `target` (a stable layer ID), and `args`. Replace a whole value with `{"$param":"name"}` and pass `name=JSON` as a CLI argument to reuse a macro with new inputs. A native file can be opened by path or embedded bytes. A PNG can be imported by passing `{"id":"photo","name":"Photo","path":"input.png"}` to `layer.importPng`. Use a base64 `png` value in place of the path for a self-contained script. A command error exits the CLI with its command number and an error message.
 
+| Action | Command and arguments |
+| --- | --- |
+| Import PNG, JPEG, or WebP as a document | `document.importImage` with `{ "id":"photo", "name":"Photo", "path":"input.webp" }` |
+| Import an image as a layer | `layer.importImage` with the same arguments and optional `parent` |
+| Paste an image file | `layer.pastePixels` with `{ "id":"paste", "name":"Pasted", "path":"input.png", "x":10, "y":20 }` |
+| Add a linked Chop Layer | `layer.createChop` with `{ "id":"linked", "name":"Linked", "snapshot":{ "sourcePath":"source.chop" } }` |
+| Re-bake or replace a linked Chop Layer | `layer.rebakeChop` with the layer ID as `target` and `{ "sourcePath":"source.chop" }` as its arguments |
+| Export PNG, JPEG, WebP, or SVG | `document.export` with `{ "path":"output.webp", "format":"webP" }`. Supported format values are `png`, `jpeg`, `webP`, and `svg`. Omitting `format` exports PNG. |
+
+The command log records changes made from mouse, keyboard, and menu commands. Clipboard edits record the image or mask payload, so a replay can use those pixels without an operating-system clipboard. For scripts written by hand, inputs can be paths or embedded bytes. Layer commands that read paths capture their inputs so history edits can replay them even if the source file has changed.
+
 ## Architecture and format
 
-- `CHOP.Core` owns documents, layer trees, effects, command validation, history, script execution, and native files. It has no Windows or GUI dependency.
+- `CHOP.Core` owns documents, layer trees, effects, command validation, history, script execution, and native files. It has no Windows or GUI dependency. Every desktop change to document state or generated document output must execute a shared command so it can be recorded and replayed by `chop run`.
 - `CHOP.Rendering` implements the raster backend with SkiaSharp. Immutable source buffers and cached effect nodes keep rendered pixels separate from editable content. An effect evaluation references its input node, and the UI evaluates composites on a worker and reuses them during viewport navigation.
 - `PhotoChop.csproj` builds the `CHOP.Desktop` WPF application. The desktop and `CHOP.CLI` share the command dispatcher and renderer.
 - `CHOP.Tests` covers command validation, editing, rendering, native persistence, and CLI replay.
