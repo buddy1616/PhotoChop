@@ -103,7 +103,7 @@ public sealed partial class SkiaRenderer
             return Bitmap(mixed);
         }
         var mode = basis.TransformsEnabled ? CommandEngine.EffectiveBlend(basis) : basis.Blend;
-        using var blender = mode == Blend.Add ? addBlend.Value.ToBlender() : null;
+        using var blender = CreateBlender(mode);
         using var paint = new SKPaint
         {
             BlendMode = ToSkiaBlend(mode)

@@ -102,7 +102,7 @@ public static class ProjectFile
                     using var output = archive.CreateEntry(ProfilePath).Open();
                     output.Write(profile);
                 }
-                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(13, document, resources, masks, shifts, layerChannels,
+                var json = JsonSerializer.SerializeToUtf8Bytes(new Manifest(14, document, resources, masks, shifts, layerChannels,
                     extraChannels, document.IccProfile is not null), Format.Json);
                 if (json.Length > MaxManifestBytes) throw new InvalidDataException("CHOP manifest exceeds the supported size.");
                 using var manifest = archive.CreateEntry("manifest.json").Open();
@@ -130,7 +130,7 @@ public static class ProjectFile
         using var stream = entry.Open();
         var manifest = JsonSerializer.Deserialize<Manifest>(stream, Format.Json)
             ?? throw new InvalidDataException("Invalid CHOP manifest.");
-        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 11 or 12 or 13)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
+        if (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 11 or 12 or 13 or 14)) throw new InvalidDataException($"Unsupported CHOP version {manifest.Version}.");
         var doc = manifest.Document ?? throw new InvalidDataException("Missing document.");
         if (manifest.Resources is null || doc.Layers is null || doc.Metadata is null ||
             !Format.ValidId(doc.Id) || doc.ColorSpace != "sRGB" || doc.PixelsPerInch is < 1 or > 100000)
@@ -193,7 +193,7 @@ public static class ProjectFile
                 !double.IsFinite(placement.X) || !double.IsFinite(placement.Y) ||
                 !double.IsFinite(placement.ScaleX) || !double.IsFinite(placement.ScaleY) ||
                 string.IsNullOrWhiteSpace(layer.Name) || layer.Font is null || layer.Text is null ||
-                layer.Opacity is < 0 or > 1 || layer.Size is < 1 or > 512 ||
+                layer.Opacity is < 0 or > 1 || layer.FillOpacity is < 0 or > 1 || !double.IsFinite(layer.FillOpacity) || layer.Size is < 1 or > 512 ||
                 (layer.Kind != LayerKind.Group && layer.Children.Length != 0))
                 throw new InvalidDataException("Invalid layer metadata.");
             CommandEngine.CheckTransform(layer.Transform);

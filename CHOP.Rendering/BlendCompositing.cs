@@ -5,6 +5,44 @@ namespace Chop.Rendering;
 
 public sealed partial class SkiaRenderer
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Blend, Lazy<SKRuntimeEffect>> ExtendedBlenders = new();
+
+    private static SKBlender? CreateBlender(Blend blend)
+    {
+        if (blend == Blend.Add) return addBlend.Value.ToBlender();
+        string? formula = blend switch
+        {
+            Blend.LinearBurn => "max(b + f - 1.0, 0.0)",
+            Blend.LinearLight => "clamp(b + 2.0 * f - 1.0, 0.0, 1.0)",
+            Blend.VividLight => "vivid(b, f)",
+            Blend.PinLight => "f < 0.5 ? min(b, 2.0 * f) : max(b, 2.0 * f - 1.0)",
+            Blend.HardMix => "step(0.5, vivid(b, f))",
+            Blend.Subtract => "max(b - f, 0.0)",
+            Blend.Divide => "f <= 0.0 ? 1.0 : min(b / f, 1.0)",
+            _ => null
+        };
+        if (formula is null) return null;
+        return ExtendedBlenders.GetOrAdd(blend, _ => new Lazy<SKRuntimeEffect>(() =>
+        {
+            string shader = $$"""
+                float vivid(float b, float f) {
+                    if (f < 0.5) return b >= 1.0 ? 1.0 : (f <= 0.0 ? 0.0 : max(1.0 - (1.0 - b) / (2.0 * f), 0.0));
+                    return b <= 0.0 ? 0.0 : (f >= 1.0 ? 1.0 : min(b / (2.0 - 2.0 * f), 1.0));
+                }
+                float channel(float b, float f) { return {{formula}}; }
+                half4 main(half4 src, half4 dst) {
+                    if (src.a == 0.0 || dst.a == 0.0) return src + dst;
+                    float3 f = src.rgb / src.a, b = dst.rgb / dst.a;
+                    float overlap = src.a * dst.a;
+                    float3 mixed = float3(channel(b.r, f.r), channel(b.g, f.g), channel(b.b, f.b));
+                    return half4(src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a) + mixed * overlap,
+                        src.a + dst.a - overlap);
+                }
+                """;
+            return SKRuntimeEffect.CreateBlender(shader, out var error) ?? throw new InvalidOperationException(error);
+        })).Value.ToBlender();
+    }
+
     private static SKBlendMode ToSkiaBlend(Blend blend) => blend switch
     {
         Blend.Multiply => SKBlendMode.Multiply,
@@ -27,7 +65,7 @@ public sealed partial class SkiaRenderer
     };
 
     private static bool IsPassThroughGroup(Layer layer) =>
-        layer.Kind == LayerKind.Group && layer.PassThrough && layer.Opacity == 1 && !layer.Clipped &&
+        layer.Kind == LayerKind.Group && layer.PassThrough && layer.Opacity == 1 && layer.FillOpacity == 1 && !layer.Clipped &&
         layer.Placement == new Placement() && SpatialMatrix(layer) == SKMatrix.Identity &&
         (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask) &&
         (!layer.TransformsEnabled || !layer.Effects.Any(ProcessesPixels)) &&
@@ -47,10 +85,21 @@ public sealed partial class SkiaRenderer
         Blend.SoftLight => foreground <= .5
             ? backdrop - (1 - 2 * foreground) * backdrop * (1 - backdrop)
             : backdrop + (2 * foreground - 1) * (SoftLightCurve(backdrop) - backdrop),
+        Blend.LinearBurn => Math.Max(0, backdrop + foreground - 1),
+        Blend.LinearLight => Math.Clamp(backdrop + 2 * foreground - 1, 0, 1),
+        Blend.VividLight => VividLight(backdrop, foreground),
+        Blend.PinLight => foreground < .5 ? Math.Min(backdrop, 2 * foreground) : Math.Max(backdrop, 2 * foreground - 1),
+        Blend.HardMix => VividLight(backdrop, foreground) >= .5 ? 1 : 0,
+        Blend.Subtract => Math.Max(0, backdrop - foreground),
+        Blend.Divide => foreground <= 0 ? 1 : Math.Min(1, backdrop / foreground),
         Blend.Difference => Math.Abs(backdrop - foreground),
         Blend.Exclusion => backdrop + foreground - 2 * backdrop * foreground,
         _ => foreground
     };
+
+    private static double VividLight(double backdrop, double foreground) => foreground < .5
+        ? BlendComponent(backdrop, foreground * 2, Blend.ColorBurn)
+        : BlendComponent(backdrop, foreground * 2 - 1, Blend.ColorDodge);
 
     private static double HardLight(double backdrop, double foreground) =>
         foreground <= .5 ? 2 * backdrop * foreground : 1 - 2 * (1 - backdrop) * (1 - foreground);

@@ -167,7 +167,7 @@ public sealed partial class SkiaRenderer
     private static bool Supported(Layer layer)
     {
         if (!layer.Visible || layer.Opacity == 0) return true;
-        if (layer.Kind == LayerKind.Effect || layer.Clipped || ActiveVectorMask(layer.VectorMask) || (layer.Mask is not null && layer.MaskEnabled) ||
+        if (layer.FillOpacity != 1 || layer.Kind == LayerKind.Effect || layer.Clipped || ActiveVectorMask(layer.VectorMask) || (layer.Mask is not null && layer.MaskEnabled) ||
             (layer.TransformsEnabled ? CommandEngine.EffectiveBlend(layer) : layer.Blend) != Blend.Normal)
             return false;
         var matrix = ExportMatrix(layer);

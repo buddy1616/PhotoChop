@@ -5,6 +5,8 @@ public enum TexturePreset { Checker, Grain, Weave }
 public sealed record LayerTexture(TexturePreset Preset = TexturePreset.Checker, byte[]? Png = null,
     double Scale = 1, double Depth = .5);
 
+public sealed record BevelLighting(string Highlight = "#FFFFFFFF", Blend HighlightMode = Blend.Normal, double HighlightOpacity = 1,
+    string Shadow = "#FF000000", Blend ShadowMode = Blend.Normal, double ShadowOpacity = 1, double Depth = 1, bool Down = false);
 public static class GradientRamp
 {
     public static GradientStop[] Stops(string first, string last, GradientStop[]? stops) =>

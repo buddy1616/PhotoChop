@@ -24,7 +24,7 @@ public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null
 public sealed record OpenArgs(string Path, byte[]? Data = null);
 public sealed record TextArgs(string Text, string Font, double Size, string Color);
 public sealed record ShapeArgs(int Width, int Height, string Color);
-public sealed record StrokeArgs(PointD[] Points, double Size, double Hardness, double Opacity, string Color, bool Erase);
+public sealed record StrokeArgs(PointD[] Points, double Size, double Hardness, double Opacity, string Color, bool Erase, bool Pencil = false);
 public sealed record ReorderArgs(string? Parent, string? Before);
 public sealed record GroupArgs(string Id, string Name, string[] Layers, string? Anchor = null);
 public sealed record MergeArgs(string Id, string Name, string[] Layers);
@@ -865,6 +865,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var passThrough = command.Read<bool>();
                 return Edit(layer => layer.Kind == LayerKind.Group ? layer with { PassThrough = passThrough } :
                     throw new InvalidDataException("Pass-through blending is available for groups."));
+            case "layer.fillOpacity":
+                return Edit(layer => layer with { FillOpacity = Range(command.Read<double>(), 0, 1) });
             case "layer.blend":
                 var blend = command.Read<Blend>();
                 if (!Enum.IsDefined(blend)) throw new InvalidDataException("Unknown blend mode.");
@@ -1564,6 +1566,16 @@ public sealed class CommandEngine(IRasterBackend backend)
                 goto case EffectKind.ColorOverlay;
             case EffectKind.BevelEmboss:
                 if (effect.Texture is { } bevelTexture) CheckTexture(bevelTexture);
+                if (effect.Lighting is { } light)
+                {
+                    Format.Color(light.Highlight);
+                    Format.Color(light.Shadow);
+                    Range(light.HighlightOpacity, 0, 1);
+                    Range(light.ShadowOpacity, 0, 1);
+                    Range(light.Depth, 0, 10);
+                    if (!Enum.IsDefined(light.HighlightMode) || !Enum.IsDefined(light.ShadowMode))
+                        throw new InvalidDataException("Unknown bevel blend mode.");
+                }
                 Range(effect.A, -360, 360);
                 Range(effect.B, 0, 90);
                 Range(effect.Size, 1, 100);
