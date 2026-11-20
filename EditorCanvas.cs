@@ -106,7 +106,10 @@ internal sealed class EditorCanvas : FrameworkElement
             var start = ToView(gradient.Start);
             var end = ToView(gradient.End);
             var line = end - start;
-            var steps = new LinearGradientBrush(ToColor(gradient.StartColor), ToColor(gradient.EndColor), 0);
+            var steps = new LinearGradientBrush();
+            var stops = GradientRamp.Stops(gradient.StartColor, gradient.EndColor, gradient.Stops);
+            foreach (var stop in stops)
+                steps.GradientStops.Add(new System.Windows.Media.GradientStop(ToColor(stop.Color), stop.Position));
             if (line.Length > 0)
             {
                 steps.MappingMode = BrushMappingMode.Absolute;
@@ -114,12 +117,10 @@ internal sealed class EditorCanvas : FrameworkElement
                 steps.EndPoint = end;
                 dc.DrawLine(new Pen(Brushes.Black, 7), start, end);
                 dc.DrawLine(new Pen(steps, 4), start, end);
-                for (int i = 0; i <= 4; i++)
+                foreach (var stop in stops)
                 {
-                    var point = start + line * (i / 4d);
-                    dc.DrawEllipse(i == 0 ? new SolidColorBrush(ToColor(gradient.StartColor)) :
-                        i == 4 ? new SolidColorBrush(ToColor(gradient.EndColor)) : Brushes.White,
-                        new Pen(Brushes.Black, 1), point, i is 0 or 4 ? 5 : 2, i is 0 or 4 ? 5 : 2);
+                    var point = start + line * stop.Position;
+                    dc.DrawEllipse(new SolidColorBrush(ToColor(stop.Color)), new Pen(Brushes.Black, 1), point, 4, 4);
                 }
             }
         }

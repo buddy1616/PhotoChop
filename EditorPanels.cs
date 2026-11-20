@@ -655,16 +655,20 @@ public partial class MainWindow
         if (ActiveLayer() is null) return;
         var effect = new Effect(Format.Id(), kind,
             A: kind switch { EffectKind.GaussianBlur => 2, EffectKind.MotionBlur => 12, EffectKind.BitCrush => 8,
-                EffectKind.Opacity => 1, EffectKind.Stroke => 2, EffectKind.DropShadow => 120, _ => 0 },
-            B: kind == EffectKind.DropShadow ? 5 : 0, Spatial: kind == EffectKind.Transform ? new() : null,
-            Ink: kind is EffectKind.Stroke or EffectKind.PathFill or EffectKind.ColorOverlay ? foreground : "#FF000000", Size: kind == EffectKind.DropShadow ? 4 : 0,
+                EffectKind.Opacity => 1, EffectKind.Stroke => 2, EffectKind.DropShadow or EffectKind.InnerShadow or EffectKind.BevelEmboss => 135, _ => 0 },
+            B: kind == EffectKind.BevelEmboss ? 30 : kind is EffectKind.DropShadow or EffectKind.InnerShadow ? 5 : 0, Spatial: kind == EffectKind.Transform ? new() : null,
+            Ink: kind is EffectKind.Stroke or EffectKind.PathFill or EffectKind.ColorOverlay ? foreground : "#FF000000", Size: kind is EffectKind.DropShadow or EffectKind.InnerShadow or EffectKind.BevelEmboss or EffectKind.Glow ? 4 : 0,
             Opacity: kind == EffectKind.DropShadow ? .7 : 1);
+        if (kind == EffectKind.Glow) effect = effect with { Ink = "#FFFFFFFF", Mode = Blend.Screen };
+        if (kind == EffectKind.BevelEmboss) effect = effect with { Alignment = StrokeAlignment.Inside };
         if (EffectForm(effect) is { } configured) RunLayer("effect.add", configured);
     }
 
     private Effect? EffectForm(Effect effect)
     {
         if (effect.Kind == EffectKind.Grayscale) return effect;
+        if (effect.Kind is EffectKind.Glow or EffectKind.InnerShadow or EffectKind.BevelEmboss or
+            EffectKind.GradientOverlay or EffectKind.PatternOverlay) return EditAdvancedStyle(effect);
         if (effect.Kind == EffectKind.PathFill)
             return ColorPickerDialog.Show(effectDialog ?? EditorOwner, "Path Fill Color", effect.Ink) is { } color
                 ? effect with { Ink = color } : null;

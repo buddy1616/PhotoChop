@@ -56,14 +56,13 @@ public sealed partial class SkiaRenderer
 
     public RasterEdit PaintGradient(Document document, Layer layer, Area bounds, GradientArgs gradient)
     {
-        var first = PixelValue.FromArgb(Format.Color(gradient.StartColor));
-        var last = PixelValue.FromArgb(Format.Color(gradient.EndColor));
+        var sample = GradientRamp.Sampler(GradientRamp.Stops(gradient.StartColor, gradient.EndColor, gradient.Stops));
         double dx = gradient.End.X - gradient.Start.X, dy = gradient.End.Y - gradient.Start.Y;
         double lengthSquared = dx * dx + dy * dy;
         return PaintArea(document, layer, bounds, (x, y) => document.Selection is null || document.Selected(x, y), (x, y) =>
         {
             double t = Math.Clamp(((x - gradient.Start.X) * dx + (y - gradient.Start.Y) * dy) / lengthSquared, 0, 1);
-            var blended = PixelValue.Lerp(first, last, t);
+            var blended = sample(t);
             if (document.Color.Depth != ChannelDepth.Bit8) return blended;
             static double Round(double value) => Math.Round(value * 255) / 255;
             return new(Round(blended.R), Round(blended.G), Round(blended.B), Round(blended.A));

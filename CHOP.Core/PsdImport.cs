@@ -178,6 +178,18 @@ public static class PsdImport
                 ? PsdSolidFill.Read(source) : null;
             if (fillColor is not null) pixels = null;
             WarnAboutTags(source, pixels is not null, fillColor is not null);
+            bool partial = false;
+            var effects = Array.Empty<Effect>();
+            if (source.Tags.TryGetValue("lfx2", out var styleData) || source.Tags.TryGetValue("lmfx", out styleData) ||
+                source.Tags.TryGetValue("lfxs", out styleData))
+                effects = PsdDescriptorStyles.Read(styleData, ReadBlend, out partial);
+            if (styleData.IsEmpty && source.Tags.TryGetValue("lrFX", out var legacy))
+            {
+                effects = PsdLegacyStyles.Read(legacy, ReadBlend, out bool legacyPartial);
+                partial |= legacyPartial;
+            }
+            if (partial)
+                Warn("Some Photoshop layer styles could only be approximated or were skipped. The saved composite preserves their rendered appearance.");
             var mask = ReadMask(source, out bool realMaskUsed, out bool maskEnabled);
             var vectorMask = realMaskUsed ? null : ReadVectorMask(source);
             if (passThrough && (source.Opacity != 255 || mask is not null && maskEnabled ||
@@ -189,7 +201,7 @@ public static class PsdImport
                 Color = fillColor ?? "#FFFFFFFF",
                 Width = pixels?.Width ?? file.Width, Height = pixels?.Height ?? file.Height,
                 RasterX = pixels is null ? 0 : source.X, RasterY = pixels is null ? 0 : source.Y,
-                Pixels = pixels, Children = children,
+                Pixels = pixels, Children = children, Effects = effects,
                 Visible = source.Visible, Locked = source.Locked, Opacity = source.Opacity / 255d,
                 Clipped = source.Clipped && hasBelow, PassThrough = passThrough, Blend = blend,
                 Mask = mask, MaskEnabled = maskEnabled, VectorMask = vectorMask
@@ -205,8 +217,6 @@ public static class PsdImport
                     tags.ContainsKey("vscg") || tags.ContainsKey("vogk"))))
                 Warn(hasPixels ? "Text, Smart Objects, and Photoshop-specific fills or shapes use their saved raster pixels." :
                     "Some Photoshop-specific layers had no editable raster and were kept as empty layers.");
-            if (tags.ContainsKey("lrFX") || tags.ContainsKey("lfx2") || tags.ContainsKey("lmfx") || tags.ContainsKey("lfxs"))
-                Warn("Photoshop layer styles were not translated. Import the saved composite for their rendered appearance.");
             if (tags.Keys.Any(key => key is "brit" or "levl" or "curv" or "expA" or "vibA" or "hue " or "hue2" or
                 "blnc" or "blwh" or "phfl" or "mixr" or "clrL" or "nvrt" or "post" or "thrs" or "grdm" or "selc"))
                 Warn("Photoshop adjustment layers were kept as placeholders. Import the saved composite for their rendered appearance.");

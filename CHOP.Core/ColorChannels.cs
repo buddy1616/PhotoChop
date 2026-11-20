@@ -10,7 +10,7 @@ public sealed record ColorSettings(ChannelColorMode Mode = ChannelColorMode.Rgb,
 public sealed record ChannelInfo(string Id, string Name, int X = 0, int Y = 0, bool Spot = false);
 public sealed record ChannelPlane(ChannelInfo Info, int Width, int Height, ChannelDepth Depth, byte[] Samples);
 public sealed record ColorPlanes(ColorSettings Settings, int Width, int Height, byte[][] Planes);
-public sealed record GradientArgs(PointD Start, PointD End, string StartColor, string EndColor);
+public sealed record GradientArgs(PointD Start, PointD End, string StartColor, string EndColor, GradientStop[]? Stops = null);
 public enum VectorMaskOperation { Continue = -1, Exclude = 0, Union = 1, Subtract = 2, Intersect = 3 }
 public sealed record VectorMask(PathContour[] Contours, bool Enabled = true, bool Inverted = false,
     VectorMaskOperation[]? Operations = null, bool InitialFill = false);
