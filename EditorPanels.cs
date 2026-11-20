@@ -76,7 +76,11 @@ public partial class MainWindow
     {
         var layerButtons = new WrapPanel { Margin = new Thickness(5) };
         var rasterButton = LayerIconButton("+", "New Raster Layer", () => CreateLayer(LayerKind.Raster), glyph: false);
-        var groupButton = LayerArtButton("New Group", () => CreateLayer(LayerKind.Group),
+        var groupButton = LayerArtButton("New Group", () =>
+        {
+            if (SelectedLayers().Length == 0) CreateLayer(LayerKind.Group);
+            else Group();
+        },
             "M 0,2 L 7,2 9,4 19,4 19,6 3,6 0,14 Z M 3.5,7 L 21,7 18,15 0,15 Z");
         var deleteButton = LayerIconButton("\uE74D", "Delete Layer or Group", DeleteLayer);
         layerButtons.Children.Add(rasterButton);
@@ -109,7 +113,11 @@ public partial class MainWindow
             CancelTransform();
             CancelPathEditing();
             active.ActiveId = (e.AddedItems.OfType<LayerRow>().LastOrDefault() ?? layers.SelectedItem as LayerRow)?.Layer.Id;
-            if (active.VectorMaskTarget != active.ActiveId) active.VectorMaskTarget = null;
+            if (active.VectorMaskTarget != active.ActiveId)
+            {
+                active.VectorMaskTarget = null;
+                active.VectorMaskOnly = false;
+            }
             RefreshChannels();
             if (active.ChannelView != "composite") UpdateCanvas();
             if (active.Engine.Current?.Floating is { } floating && floating.LayerId != active.ActiveId)
@@ -147,6 +155,12 @@ public partial class MainWindow
                 (layers.PointToScreen(e.GetPosition(layers)) - layerDragStart).Length < 8) return;
             layerDrag = null;
             DragLayer(row);
+        };
+        layers.QueryCursor += (_, e) =>
+        {
+            if (Keyboard.Modifiers != ModifierKeys.Alt || ClippingUpperAt(Mouse.GetPosition(layers)) is null) return;
+            e.Cursor = ToolCursors.Clipping;
+            e.Handled = true;
         };
         layers.DragOver += (_, e) =>
         {
@@ -248,6 +262,9 @@ public partial class MainWindow
     {
         if (active is null || sender is not FrameworkElement { DataContext: LayerRow row }) return;
         active.ActiveId = row.Layer.Id;
+        if (active.VectorMaskTarget is not null) CancelPathEditing();
+        active.VectorMaskTarget = null;
+        active.VectorMaskOnly = false;
         bool isolated = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
         if (isolated)
         {
@@ -266,6 +283,9 @@ public partial class MainWindow
     {
         if (active is null || ActiveLayer() is not { } layer) return;
         if (layer.Mask is null && !Run("mask.add", 0, layer.Id)) return;
+        if (active.VectorMaskTarget is not null) CancelPathEditing();
+        active.VectorMaskTarget = null;
+        active.VectorMaskOnly = false;
         active.MaskTarget = layer.Id;
         if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt))
             active.MaskOnly = active.MaskOnly == layer.Id ? null : layer.Id;
@@ -461,7 +481,9 @@ public partial class MainWindow
             return;
         }
 
-        Caption(layer.Name + (active?.MaskTarget == layer.Id ? " · Mask selected" : ""));
+        Caption(layer.Name + (active?.VectorMaskTarget == layer.Id
+            ? active.VectorMaskOnly ? " · Vector mask selected (mask only)" : " · Vector mask selected"
+            : active?.MaskTarget == layer.Id ? " · Mask selected" : ""));
         var modes = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = layer.Blend, Margin = new Thickness(2) };
         modes.SelectionChanged += (_, _) => { if (modes.SelectedItem is Blend blend) RunLayer("layer.blend", blend); };
         Caption("Blend mode");
@@ -628,7 +650,7 @@ public partial class MainWindow
             A: kind switch { EffectKind.GaussianBlur => 2, EffectKind.MotionBlur => 12, EffectKind.BitCrush => 8,
                 EffectKind.Opacity => 1, EffectKind.Stroke => 2, EffectKind.DropShadow => 120, _ => 0 },
             B: kind == EffectKind.DropShadow ? 5 : 0, Spatial: kind == EffectKind.Transform ? new() : null,
-            Ink: kind is EffectKind.Stroke or EffectKind.PathFill ? foreground : "#FF000000", Size: kind == EffectKind.DropShadow ? 4 : 0,
+            Ink: kind is EffectKind.Stroke or EffectKind.PathFill or EffectKind.ColorOverlay ? foreground : "#FF000000", Size: kind == EffectKind.DropShadow ? 4 : 0,
             Opacity: kind == EffectKind.DropShadow ? .7 : 1);
         if (EffectForm(effect) is { } configured) RunLayer("effect.add", configured);
     }
@@ -639,7 +661,7 @@ public partial class MainWindow
         if (effect.Kind == EffectKind.PathFill)
             return ColorPickerDialog.Show(effectDialog ?? EditorOwner, "Path Fill Color", effect.Ink) is { } color
                 ? effect with { Ink = color } : null;
-        if (effect.Kind is EffectKind.Stroke or EffectKind.DropShadow) return EditStyleEffect(effect);
+        if (effect.Kind is EffectKind.Stroke or EffectKind.DropShadow or EffectKind.ColorOverlay) return EditStyleEffect(effect);
         if (effect.Kind == EffectKind.Transform)
         {
             var t = effect.Spatial!;

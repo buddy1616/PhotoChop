@@ -25,6 +25,63 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void BreakPathRemovesAnchorWithoutJoiningItsNeighbors()
+    {
+        var engine = NewEngine();
+        PathNode[] nodes = [new(new(2, 2)), new(new(12, 2)), new(new(12, 12)), new(new(2, 12))];
+        engine.Execute(Command.Of("layer.createPath", new CreatePathArgs("outline", "Outline", [new(nodes, true)])));
+        engine.Execute(Command.Of("path.break", new BreakPathArgs(0, 1), "outline"));
+        var contour = Assert.Single(Assert.Single(engine.Current!.Layers).Contours);
+        Assert.False(contour.Closed);
+        Assert.Equal(new[] { nodes[2], nodes[3], nodes[0] }, contour.Nodes);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.True(Assert.Single(Assert.Single(engine.Current!.Layers).Contours).Closed);
+
+        engine.Execute(Command.Of("vectorMask.add", new VectorMask([new(nodes)]), "outline"));
+        engine.Execute(Command.Of("path.break", new BreakPathArgs(0, 1, VectorMask: true), "outline"));
+        var layer = Assert.Single(engine.Current!.Layers);
+        Assert.Equal(2, layer.VectorMask!.Contours.Length);
+        Assert.True(Assert.Single(layer.Contours).Closed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ClippingAGroupUsesTheAlphaOfTheSiblingBelowIt(bool groupBase)
+    {
+        var engine = NewEngine(8, 5);
+        if (groupBase) Layer(engine, new("base", "Base Group", LayerKind.Group));
+        Layer(engine, new(groupBase ? "base-child" : "base", "Base", LayerKind.Rectangle,
+            Parent: groupBase ? "base" : null, Width: 3, Height: 4, Color: "#880000FF"));
+        Layer(engine, new("upper", "Upper Group", LayerKind.Group));
+        Layer(engine, new("upper-child", "Upper Child", LayerKind.Rectangle, Parent: "upper",
+            Width: 8, Height: 5, Color: "#FFFF0000"));
+        engine.Execute(Command.Of("layer.clipping", true, "upper"));
+        var image = Composite(engine);
+        Assert.Equal(new byte[] { 255, 0, 0, 136 }, image[..4]);
+        Assert.Equal(0, image[4 * 4 + 3]);
+    }
+
+    [Fact]
+    public void ColorOverlayBlendsWithoutChangingAlphaAndReopensAsAnEffect()
+    {
+        var engine = NewEngine(6, 6);
+        Layer(engine, new("art", "Artwork", LayerKind.Rectangle, Width: 2, Height: 2, Color: "#80808080"));
+        var overlay = new Effect("overlay", EffectKind.ColorOverlay, Ink: "#FFFF0000", Mode: Blend.Multiply, Opacity: .5);
+        engine.Execute(Command.Of("effect.add", overlay, "art"));
+        var pixels = Composite(engine);
+        Assert.InRange(pixels[0], 127, 129);
+        Assert.InRange(pixels[1], 62, 66);
+        Assert.Equal(128, pixels[3]);
+        Assert.Equal(0, pixels[3 + 4 * 4]);
+        var path = Path.Combine(folder, "overlay.chop");
+        ProjectFile.Save(path, engine.Current!);
+        var reopened = ProjectFile.Open(path);
+        Assert.Equal(overlay, Assert.Single(Assert.Single(reopened.Layers).Effects));
+        Assert.Equal(pixels, renderer.Composite(reopened).Rgba);
+    }
+
+    [Fact]
     public void DefaultSixteenBitGradientAndBrushRetainPrecisionInNativePatchResources()
     {
         var engine = new CommandEngine(renderer);

@@ -521,7 +521,7 @@ public partial class MainWindow
         CancelPathEditing();
         CancelGesture();
         tool = name;
-        if (active is not null && name is not ("Pen" or "Path Select")) active.VectorMaskTarget = null;
+        if (active?.VectorMaskTarget is not null && name is not ("Pen" or "Path Select")) FinishVectorMaskEditing();
         foreach (var session in sessions)
             session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(name);
         RefreshTools();
@@ -751,6 +751,28 @@ public partial class MainWindow
         RefreshTools();
     }
 
+    private void WorkspaceShortcuts(object sender, PreProcessInputEventArgs args)
+    {
+        if (args.StagingItem.Input is not KeyEventArgs e) return;
+        if ((e.Key is Key.LeftAlt or Key.RightAlt || e.SystemKey is Key.LeftAlt or Key.RightAlt) &&
+            (e.RoutedEvent == Keyboard.PreviewKeyDownEvent || e.RoutedEvent == Keyboard.PreviewKeyUpEvent))
+            Dispatcher.BeginInvoke(new Action(Mouse.UpdateCursor), System.Windows.Threading.DispatcherPriority.Input);
+        if (e.RoutedEvent != Keyboard.PreviewKeyDownEvent || e.Handled || Keyboard.Modifiers != ModifierKeys.None)
+            return;
+        if (!IsActive && !Application.Current.Windows.OfType<AvalonDock.Controls.LayoutFloatingWindowControl>().Any(host => host.IsActive))
+            return;
+        if (Keyboard.FocusedElement is TextBoxBase or PasswordBox ||
+            Menus.Items.OfType<MenuItem>().Any(menu => menu.IsSubmenuOpen)) return;
+        string? shortcut = e.Key switch
+        {
+            Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection", Key.L => "Lasso",
+            Key.P => "Pen", Key.A => "Path Select", Key.G => "Bucket", Key.W => "Magic Wand", Key.I => "Eyedropper", Key.T => "Text", _ => null
+        };
+        if (shortcut is null) return;
+        e.Handled = true;
+        SetTool(shortcut);
+    }
+
     private void OnKey(object sender, KeyEventArgs e)
     {
         if ((tool is "Pen" or "Path Select") && (e.Key is Key.Escape or Key.Enter) && (pathDrag is not null || penLayer is not null))
@@ -816,12 +838,6 @@ public partial class MainWindow
         {
             if (e.Key == Key.X) action = SwapColors;
             if (e.Key == Key.Delete) action = () => RunLayer("layer.clearSelection", 0);
-            string? shortcut = e.Key switch
-            {
-                Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection", Key.L => "Lasso",
-                Key.P => "Pen", Key.A => "Path Select", Key.G => "Bucket", Key.W => "Magic Wand", Key.I => "Eyedropper", Key.T => "Text", _ => null
-            };
-            if (shortcut is not null) action = () => SetTool(shortcut);
         }
         if (action is null) return;
         action();

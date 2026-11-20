@@ -622,6 +622,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
         }
 
         var buffer = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
+        var ink = effect.Kind == EffectKind.ColorOverlay ? PixelValue.FromArgb(Format.Color(effect.Ink)) : default;
+        double amount = ink.A * effect.Opacity;
+        double Overlay(double original, double color) => original + (NativeBlend(original, color, effect.Mode) - original) * amount;
         float hueR = 0, hueG = 0, hueB = 0;
         if (effect.Kind == EffectKind.HueSaturation)
         {
@@ -636,6 +639,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
             double r = sample.R, g = sample.G, b = sample.B;
             switch (effect.Kind)
             {
+                case EffectKind.ColorOverlay:
+                    (r, g, b) = (Overlay(r, ink.R), Overlay(g, ink.G), Overlay(b, ink.B));
+                    break;
                 case EffectKind.BrightnessContrast:
                     double contrast = (1 + effect.B) / Math.Max(0.01, 1 - effect.B);
                     r = (r - 0.5) * contrast + 0.5 + effect.A;

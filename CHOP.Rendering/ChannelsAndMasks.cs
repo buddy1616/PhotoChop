@@ -117,6 +117,20 @@ public sealed partial class SkiaRenderer
         destination.DrawBitmap(corrected ?? surface, region.X, region.Y, paint);
     }
 
+    public Pixels VectorMaskView(Document document, Layer layer)
+    {
+        var region = new Area(0, 0, document.Width, document.Height);
+        var world = FindMatrix(document.Layers, layer.Id, SKMatrix.Identity, SKMatrix.Identity, false) ?? SKMatrix.Identity;
+        using var coverage = VectorCoverage(layer.VectorMask is { } mask ? mask with { Enabled = true } : null, region, world);
+        var bytes = coverage is null ? new byte[checked(region.Width * region.Height * 4)] : Read(coverage).Rgba;
+        for (int i = 0; i < bytes.Length; i += 4)
+        {
+            bytes[i] = bytes[i + 1] = bytes[i + 2] = coverage is null ? (byte)255 : bytes[i + 3];
+            bytes[i + 3] = 255;
+        }
+        return new(region.Width, region.Height, bytes);
+    }
+
     private static bool ActiveVectorMask(VectorMask? mask) =>
         mask is { Enabled: true } && mask.Contours.Any(contour => contour.Closed);
 

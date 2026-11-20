@@ -10,8 +10,8 @@ internal sealed class EditorCanvas : FrameworkElement
     private static readonly Brush workspace = Frozen(new SolidColorBrush(Color.FromRgb(23, 25, 30)));
     private static readonly Brush checker = CreateChecker();
     private static readonly Pen border = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(110, 119, 136)), 1));
-    private static readonly Pen selectionLight = Frozen(new Pen(Brushes.White, 1));
-    private static readonly Pen selectionDark = Frozen(new Pen(Brushes.Black, 1) { DashStyle = DashStyles.Dash });
+    private static readonly Pen selectionLight = Frozen(new Pen(Brushes.White, 3));
+    private static readonly Pen selectionDark = Frozen(new Pen(Brushes.Black, 2) { DashStyle = DashStyles.Dash });
     public BitmapSource? Frame { get; set; }
     public double Zoom { get; set; } = 1;
     public Point Offset { get; set; }
@@ -88,8 +88,8 @@ internal sealed class EditorCanvas : FrameworkElement
                     outline = BuildOutline(mask);
                 }
                 dc.PushTransform(new MatrixTransform(Zoom, 0, 0, Zoom, Offset.X + selection.X * Zoom, Offset.Y + selection.Y * Zoom));
-                var light = new Pen(Brushes.White, 1 / Zoom);
-                var dark = new Pen(Brushes.Black, 1 / Zoom) { DashStyle = DashStyles.Dash };
+                var light = new Pen(Brushes.White, 3 / Zoom);
+                var dark = new Pen(Brushes.Black, 2 / Zoom) { DashStyle = DashStyles.Dash };
                 dc.DrawGeometry(null, light, outline);
                 dc.DrawGeometry(null, dark, outline);
                 dc.Pop();
@@ -149,7 +149,8 @@ internal sealed class EditorCanvas : FrameworkElement
         }
     }
 
-    private static readonly Pen pathPen = Frozen(new Pen(Brushes.DeepSkyBlue, 1.25));
+    private static readonly Pen pathPen = Frozen(new Pen(Brushes.DeepSkyBlue, 2));
+    private static readonly Pen pathOutline = Frozen(new Pen(Brushes.Black, 4));
     private static readonly Pen pathHandlePen = Frozen(new Pen(Brushes.LightSkyBlue, 1));
 
     private static Color ToColor(string value)
@@ -178,6 +179,7 @@ internal sealed class EditorCanvas : FrameworkElement
                     else stream.BezierTo(ToView(a.Outgoing ?? a.Point), ToView(b.Incoming ?? b.Point), ToView(b.Point), true, false);
                 }
             }
+            dc.DrawGeometry(null, pathOutline, geometry);
             dc.DrawGeometry(null, pathPen, geometry);
             for (int n = 0; n < nodes.Length; n++)
             {
