@@ -25,6 +25,42 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void GpuPreviewEligibilityKeepsBackdropEffectsClippingAndGroupMasksOnCpu()
+    {
+        var first = new Layer("one", "One", LayerKind.Rectangle);
+        var second = new Layer("two", "Two", LayerKind.Ellipse)
+            { Effects = [new Effect("blur", EffectKind.GaussianBlur, A: 2)] };
+        var group = new Layer("group", "Group", LayerKind.Group)
+            { Children = [first, second], Transform = new(20, 10, 1.2, 1, 9) };
+        var document = new Document("gpu", 1280, 960) { Layers = [group] };
+        Assert.True(SkiaRenderer.CanCompositeOnGpu(document));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Width = 600 }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [first] }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [first, second with { Clipped = true }] }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [group,
+            new Layer("effect", "Adjustment", LayerKind.Effect)] }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [group with
+            { Mask = new AlphaMask(1, 1, [128]) }] }));
+        Assert.True(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [group with
+            { Mask = new AlphaMask(1, 1, [128]), MaskEnabled = false }] }));
+    }
+
+    [Fact]
+    public void CpuCompositorReusesUnchangedSourcesAndRendersReplacementPixels()
+    {
+        var engine = NewEngine(4, 2);
+        engine.Execute(Command.Of("layer.importPng", new ImportArgs("pixels", "Raster",
+            renderer.EncodePng(new Pixels(1, 1, [255, 0, 0, 255])))));
+        var original = engine.Current!;
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, renderer.Composite(original).Rgba[..4]);
+        engine.Execute(Command.Of("layer.transform", new Transform(1, 0), "pixels"));
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, Composite(engine)[4..8]);
+        engine.Execute(Command.Of("layer.fillPixels", "#FF0000FF", "pixels"));
+        Assert.Equal(new byte[] { 0, 0, 255, 255 }, Composite(engine)[4..8]);
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, renderer.Composite(original).Rgba[..4]);
+    }
+
+    [Fact]
     public void NativeCmykAndFloatAlphaChannelsRoundTripWithoutQuantizingSamples()
     {
         var engine = NewEngine(4, 3);

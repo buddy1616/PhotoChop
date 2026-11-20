@@ -56,6 +56,7 @@
                     <TextBlock Text="Rendering layers…" />
                 </StackPanel>
             </StatusBarItem>
+            <StatusBarItem x:Name="GpuStatus" Visibility="Collapsed" />
             <TextBlock x:Name="Status" Foreground="#D4D9E4" Margin="6,2" />
         </StatusBar>
         <Border DockPanel.Dock="Top" Background="#242730" Padding="8,4" Height="40">

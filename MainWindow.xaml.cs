@@ -36,6 +36,7 @@ public partial class MainWindow : Window
         public double Zoom { get; set; } = 1;
         public Point Offset { get; set; }
         public Pixels? Composite { get; set; }
+        public string? RenderBackend { get; set; }
         public System.Windows.Media.Imaging.BitmapSource? Frame { get; set; }
         public Document? Rendered { get; set; }
         public bool NeedsFit { get; set; } = true;
@@ -54,6 +55,7 @@ public partial class MainWindow : Window
         public string MaskBackground { get; set; } = "#FFFFFFFF";
         public bool CenterHorizontal { get; set; }
         public bool CenterVertical { get; set; }
+        public bool ExperimentalGpu { get; set; }
         public bool ShowRulers { get; set; } = true;
         public bool ShowGuides { get; set; } = true;
         public string GuideColor { get; set; } = "#FF48CDE9";
@@ -64,6 +66,7 @@ public partial class MainWindow : Window
     }
 
     private readonly SkiaRenderer renderer = new();
+    private WindowsGpuCompositor? gpu;
     private readonly List<Session> sessions = [];
     private readonly EditorCanvas emptyCanvas = new();
     private EditorCanvas canvas => active?.View ?? emptyCanvas;
@@ -119,6 +122,7 @@ public partial class MainWindow : Window
             }
         };
         preferences = LoadPreferences();
+        Closed += (_, _) => gpu?.Dispose();
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         if (WindowPlacement.TryConstrain(preferences.WindowPosition, out var placement))
         {
@@ -414,6 +418,24 @@ public partial class MainWindow : Window
         foreach (var kind in new[] { EffectKind.GaussianBlur, EffectKind.MotionBlur })
             Item(blur, EffectName(kind), () => AddEffect(kind));
         var view = Menu("View");
+        var acceleration = new MenuItem { Header = "Experimental GPU Compositing", IsCheckable = true,
+            IsChecked = preferences.ExperimentalGpu, ToolTip = "Use Skia OpenGL for eligible canvas previews" };
+        acceleration.Click += (_, _) =>
+        {
+            preferences.ExperimentalGpu = acceleration.IsChecked;
+            if (!preferences.ExperimentalGpu)
+            {
+                gpu?.Dispose();
+                gpu = null;
+            }
+            foreach (var session in sessions) session.Rendered = null;
+            GpuStatus.Visibility = preferences.ExperimentalGpu ? Visibility.Visible : Visibility.Collapsed;
+            GpuStatus.Content = "CPU";
+            UpdateCanvas();
+        };
+        view.Items.Add(acceleration);
+        GpuStatus.Visibility = preferences.ExperimentalGpu ? Visibility.Visible : Visibility.Collapsed;
+        GpuStatus.Content = "CPU";
         BuildGuideMenus(view);
         Item(view, "Zoom in", () => ZoomBy(1.25), "Ctrl++");
         Item(view, "Zoom out", () => ZoomBy(.8), "Ctrl+-");
@@ -820,24 +842,31 @@ public partial class MainWindow : Window
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
                 bool cached = !isPreview && maskLayer is null && channel is null && session.Rendered is { } prior &&
                     ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color;
-                var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!) : await Task.Run(() =>
+                bool gpuRequested = preferences.ExperimentalGpu;
+                var accelerator = !cached && gpuRequested && channel is null && maskLayer is null &&
+                    SkiaRenderer.CanCompositeOnGpu(target) ? gpu ??= new WindowsGpuCompositor() : null;
+                var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!, Backend: session.RenderBackend) : await Task.Run(() =>
                 {
                     if (shift is { } offset && snapshot.Selection is { } area && targetId is not null &&
                         snapshot.AllLayers().FirstOrDefault(layer => layer.Id == targetId) is { Pixels: not null } layer)
                     {
                         target = session.Engine.Preview(snapshot, Command.Of("layer.moveSelection", offset, targetId));
                     }
-                    var pixels = maskLayer is null ? RenderChannel(target, channel, selectedLayer) : renderer.MaskView(target, maskLayer);
-                    return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels));
+                    var (accelerated, backend) = accelerator?.TryComposite(renderer, target) ??
+                        (null, gpuRequested ? "CPU · preview not eligible for GPU" : "CPU");
+                    var pixels = accelerated ?? (maskLayer is null ? RenderChannel(target, channel, selectedLayer) : renderer.MaskView(target, maskLayer));
+                    return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels), Backend: (string?)backend);
                 });
-                if (!ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
+                if (gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
                     (isPreview && preview is null && selectionDragDelta is null)) continue;
                 if (!isPreview && maskLayer is null && channel is null)
                 {
                     session.Rendered = snapshot;
+                    session.RenderBackend = frame.Backend;
                     session.Composite = frame.Pixels;
                     session.Frame = frame.Frame;
                 }
+                if (frame.Backend is { } backend) GpuStatus.Content = backend;
                 session.View.Frame = frame.Frame;
                 if (!isPreview) session.View.PendingPaint.Clear();
                 session.View.InvalidateVisual();

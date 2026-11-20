@@ -174,7 +174,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
         });
     }
 
-    private void Draw(SKCanvas canvas, Layer layer, Area region, SKMatrix parent)
+    private void Draw(SKCanvas canvas, Layer layer, Area region, SKMatrix parent,
+        Action<SKCanvas, Frame, SKPaint?>? drawLeaf = null)
     {
         if (!layer.Visible || layer.Opacity == 0 || layer.Kind == LayerKind.Effect) return;
         bool bypass = !layer.TransformsEnabled;
@@ -204,7 +205,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 if (PrepareLayer(layer, effects) is not { } frame) return;
                 canvas.Save();
                 canvas.Concat(SKMatrix.Concat(projection, world));
-                DrawFrame(canvas, frame, paint);
+                (drawLeaf ?? DrawFrame)(canvas, frame, paint);
                 canvas.Restore();
                 return;
             }
@@ -289,7 +290,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (PrepareLayer(layer, effects) is not { } evaluated) return;
         canvas.Save();
         canvas.Concat(world);
-        DrawFrame(canvas, evaluated, paint);
+        (drawLeaf ?? DrawFrame)(canvas, evaluated, paint);
         canvas.Restore();
     }
 
@@ -349,12 +350,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
             Read(coverage).Rgba.Where((_, index) => index % 4 == 3).ToArray())) with { X = frame.X, Y = frame.Y };
     }
 
-    private static void DrawFrame(SKCanvas canvas, Frame frame, SKPaint? paint = null)
-    {
-        using var bitmap = Bitmap(frame.Pixels);
-        using var image = SKImage.FromBitmap(bitmap);
-        canvas.DrawImage(image, frame.X, frame.Y, new SKSamplingOptions(SKFilterMode.Linear), paint);
-    }
+    private readonly FrameImageCache frameImages = new(128L * 1024 * 1024);
+
+    private void DrawFrame(SKCanvas canvas, Frame frame, SKPaint? paint = null) =>
+        frameImages.Use(frame.Pixels, CreateFrameImage, image =>
+            canvas.DrawImage(image, frame.X, frame.Y, new SKSamplingOptions(SKFilterMode.Linear), paint));
 
     public RasterEdit RasterizeLayer(Document document, Layer layer)
     {
@@ -680,10 +680,12 @@ public sealed partial class SkiaRenderer : IRasterBackend
         using var canvas = new SKCanvas(output);
         canvas.Clear(SKColors.Transparent);
         canvas.Translate(-x, -y);
-        DrawFrame(canvas, bottom);
+        using var bottomImage = CreateFrameImage(bottom.Pixels);
+        canvas.DrawImage(bottomImage, bottom.X, bottom.Y, new SKSamplingOptions(SKFilterMode.Linear));
         using var paint = new SKPaint { BlendMode = mode switch { Blend.Multiply => SKBlendMode.Multiply,
             Blend.Screen => SKBlendMode.Screen, Blend.Overlay => SKBlendMode.Overlay, Blend.Add => SKBlendMode.Plus, _ => SKBlendMode.SrcOver } };
-        DrawFrame(canvas, top, paint);
+        using var topImage = CreateFrameImage(top.Pixels);
+        canvas.DrawImage(topImage, top.X, top.Y, new SKSamplingOptions(SKFilterMode.Linear), paint);
         canvas.Flush();
         return new(Unpremultiply(output), x, y);
     }
@@ -1421,10 +1423,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
     private static Pixels Unpremultiply(SKBitmap bitmap)
     {
-        using var straight = new SKBitmap(bitmap.Width, bitmap.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
         using var pixmap = bitmap.PeekPixels();
-        if (!pixmap.ReadPixels(straight.Info, straight.GetPixels(), straight.RowBytes))
-            throw new InvalidOperationException("Could not read the composited image.");
-        return Read(straight);
+        return ReadIntoArray(bitmap.Width, bitmap.Height, (info, address) =>
+            pixmap.ReadPixels(info, address, info.RowBytes));
     }
 }
