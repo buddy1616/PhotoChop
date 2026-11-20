@@ -38,6 +38,7 @@ public partial class MainWindow
             (byte)(Format.Color(Layer.Color) >> 24), (byte)(Format.Color(Layer.Color) >> 16),
             (byte)(Format.Color(Layer.Color) >> 8), (byte)Format.Color(Layer.Color))) : null;
         public Thickness Indent => new(Depth * 13, 0, 3, 0);
+        public Visibility EffectsVisibility => Layer.Effects.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         public Visibility ClippingVisibility => Layer.Clipped ? Visibility.Visible : Visibility.Collapsed;
         public Visibility VectorMaskVisibility => Layer.VectorMask is null ? Visibility.Collapsed : Visibility.Visible;
         public double VectorMaskOpacity => Layer.VectorMask?.Enabled == true ? 1 : .4;
@@ -217,12 +218,21 @@ public partial class MainWindow
         logPanel.Children.Add(logActions);
         commandLog.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
         logPanel.Children.Add(commandLog);
-        var toolDock = new DockPanel();
-        DockPanel.SetDock(toolColors, System.Windows.Controls.Dock.Bottom);
-        toolDock.Children.Add(toolColors);
-        toolDock.Children.Add(new ScrollViewer { Content = secondaryTools, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        panelContent.Add("Tools", new ScrollViewer { Content = toolsPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        panelContent.Add("More Tools", toolDock);
+        foreach (var section in ToolSections)
+        {
+            var tools = new StackPanel { Margin = new Thickness(6) };
+            toolPanes.Add(section.Title, tools);
+            var scroll = new ScrollViewer { Content = tools, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            if (section.Title == "Painting Tools")
+            {
+                var dock = new DockPanel();
+                DockPanel.SetDock(toolColors, System.Windows.Controls.Dock.Bottom);
+                dock.Children.Add(toolColors);
+                dock.Children.Add(scroll);
+                panelContent.Add(section.Title, dock);
+            }
+            else panelContent.Add(section.Title, scroll);
+        }
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("Channels", BuildChannels());
@@ -495,6 +505,12 @@ public partial class MainWindow
             pass.Click += (_, _) => RunLayer("layer.passThrough", pass.IsChecked == true);
             properties.Children.Add(pass);
         }
+
+        properties.Children.Add(Button($"Fill Opacity {layer.FillOpacity:P0}…", () =>
+        {
+            var values = Form("Fill Opacity", ("Fill opacity (%)", (layer.FillOpacity * 100).ToString("0.###")));
+            if (values is not null) Guard(() => RunLayer("layer.fillOpacity", Number(values[0]) / 100));
+        }));
 
         Caption($"Opacity  {layer.Opacity:P0}");
         var opacity = new Slider { Minimum = 0, Maximum = 1, Value = layer.Opacity, TickFrequency = .01, IsSnapToTickEnabled = true };

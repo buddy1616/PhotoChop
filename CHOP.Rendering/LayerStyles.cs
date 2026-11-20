@@ -44,6 +44,9 @@ public sealed partial class SkiaRenderer
         double angle = effect.A * Math.PI / 180, dx = Math.Cos(angle), dy = Math.Sin(angle);
         double extent = Math.Max(1, Math.Abs(dx) * (source.Width - 1) + Math.Abs(dy) * (source.Height - 1));
         double altitude = effect.B * Math.PI / 180;
+        var lighting = effect.Lighting;
+        var highlight = PixelValue.FromArgb(Format.Color(lighting?.Highlight ?? "#FFFFFFFF"));
+        var shade = PixelValue.FromArgb(Format.Color(lighting?.Shadow ?? "#FF000000"));
         double AlphaAt(int x, int y)
         {
             int sx = x + frame.X - coverage.X, sy = y + frame.Y - coverage.Y;
@@ -56,6 +59,7 @@ public sealed partial class SkiaRenderer
             var original = x >= 0 && y >= 0 && x < source.Width && y < source.Height
                 ? PixelBuffer.Get(source, y * source.Width + x) : default;
             var color = ink;
+            var mode = effect.Mode;
             double weight = 1;
             double outside = 0;
             if (effect.Kind == EffectKind.GradientOverlay)
@@ -78,12 +82,17 @@ public sealed partial class SkiaRenderer
                 }
                 double slope = (Height(x + 1, y) - Height(x - 1, y)) * dx +
                     (Height(x, y + 1) - Height(x, y - 1)) * dy;
-                double light = -slope * effect.Size * Math.Cos(altitude);
+                double light = -slope * effect.Size * Math.Cos(altitude) * (lighting?.Depth ?? 1) * (lighting?.Down == true ? -1 : 1);
                 weight = effect.Alignment == StrokeAlignment.Outside ? 0 : Math.Min(1, Math.Abs(light));
-                color = light < 0 ? new(0, 0, 0, 1) : new(1, 1, 1, 1);
-                if (effect.Alignment != StrokeAlignment.Inside) outside = Math.Min(1, Math.Abs(light)) * effect.Opacity;
+                color = light < 0 ? shade : highlight;
+                if (lighting is not null)
+                {
+                    mode = light < 0 ? lighting.ShadowMode : lighting.HighlightMode;
+                    color = color with { A = color.A * (light < 0 ? lighting.ShadowOpacity : lighting.HighlightOpacity) };
+                }
+                if (effect.Alignment != StrokeAlignment.Inside) outside = Math.Min(1, Math.Abs(light)) * effect.Opacity * color.A;
             }
-            var blended = BlendRgb(original, color, effect.Mode);
+            var blended = BlendRgb(original, color, mode);
             var result = PixelValue.Lerp(original, blended, weight * color.A * effect.Opacity) with { A = original.A };
             if (outside > 0) result = result.Over(color with { A = outside });
             output.Set((y + pad) * width + x + pad, result);

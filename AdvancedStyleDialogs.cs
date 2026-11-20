@@ -103,7 +103,12 @@ public partial class MainWindow
         {
             var box = new TextBox { Text = value.ToString("0.###") };
             NumericWheel.Enable(box, min, max);
-            Field(label, box);
+            if (label.StartsWith("Angle", StringComparison.Ordinal))
+            {
+                panel.Children.Add(new Label { Content = label, Target = box });
+                panel.Children.Add(AngleRow(box, signed: true));
+            }
+            else Field(label, box);
             return box;
         }
         var blend = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = effect.Mode };
@@ -196,6 +201,7 @@ public partial class MainWindow
         };
         foreach (var control in panel.Children.OfType<TextBox>()) control.TextChanged += (_, _) => refreshPreview();
         foreach (var control in panel.Children.OfType<ComboBox>()) control.SelectionChanged += (_, _) => refreshPreview();
+        if (angle is not null) angle.TextChanged += (_, _) => refreshPreview();
         live.Click += (_, _) => refreshPreview();
         dialog.Loaded += (_, _) => refreshPreview();
         dialog.Closed += (_, _) => { preview = null; UpdateCanvas(); };

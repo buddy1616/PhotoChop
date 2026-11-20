@@ -42,7 +42,11 @@
                           Data="{Binding TypeIcon}" Fill="{Binding TypeFill}" ToolTip="{Binding Layer.Kind}"
                           Visibility="{Binding TypeVisibility}"
                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" />
-                    <TextBlock Text="{Binding Layer.Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    <TextBlock TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                        <Run Text="{Binding Layer.Name, Mode=OneWay}" /><InlineUIContainer BaselineAlignment="Center">
+                            <TextBlock Text="ƒx" Margin="5,0,0,0" Visibility="{Binding EffectsVisibility}" ToolTip="Layer has effects" />
+                        </InlineUIContainer>
+                    </TextBlock>
                 </DockPanel>
             </DockPanel>
         </DataTemplate>

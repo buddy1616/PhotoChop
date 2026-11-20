@@ -73,8 +73,7 @@ public partial class MainWindow : Window
     private EditorCanvas canvas => active?.View ?? emptyCanvas;
     private LayoutDocumentPane? documentPane;
     private readonly StackPanel toolColors = new() { Margin = new Thickness(6) };
-    private readonly StackPanel secondaryTools = new() { Margin = new Thickness(6) };
-    private readonly StackPanel toolsPanel = new() { Margin = new Thickness(6) };
+    private readonly Dictionary<string, StackPanel> toolPanes = new();
     private readonly DockPanel layersPanel = new();
     private readonly ListBox layers = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended, AllowDrop = true };
     private readonly ListBox history = new();
@@ -174,6 +173,11 @@ public partial class MainWindow : Window
             var serializer = new XmlLayoutSerializer(Dock);
             serializer.LayoutSerializationCallback += (_, args) =>
             {
+                if (args.Model.ContentId is "Tools" or "More Tools")
+                {
+                    args.Model.ContentId = args.Model.ContentId == "Tools" ? "Painting Tools" : "Other Tools";
+                    args.Model.Title = args.Model.ContentId;
+                }
                 args.Content = args.Model.ContentId == "workspace" ? emptyCanvas
                     : panelContent.GetValueOrDefault(args.Model.ContentId ?? "");
                 args.Cancel = args.Content is null;
@@ -182,8 +186,23 @@ public partial class MainWindow : Window
             workspace = Dock.Layout.Descendents().OfType<LayoutDocument>().FirstOrDefault(item => item.ContentId == "workspace");
             documentPane = workspace?.Parent as LayoutDocumentPane ?? Dock.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault();
             if (documentPane is null) ResetLayout();
-            else if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Tools"))
-                Dock.Layout.RootPanel.Children.Insert(0, CreateToolDocks());
+            else
+            {
+                var existing = Dock.Layout.Descendents().OfType<LayoutAnchorable>().Select(panel => panel.ContentId).ToHashSet();
+                var missing = ToolSections.Where(section => !existing.Contains(section.Title)).Select(section => section.Title).ToArray();
+                if (missing.Length > 0)
+                {
+                    var newPanes = CreateToolDocks(missing);
+                    var pantry = Dock.Layout.Descendents().OfType<LayoutAnchorable>()
+                        .FirstOrDefault(panel => panel.ContentId == "Painting Tools")?.FindParent<LayoutAnchorablePaneGroup>();
+                    if (pantry is null) Dock.Layout.RootPanel.Children.Insert(0, newPanes);
+                    else foreach (var pane in newPanes.Children.ToArray())
+                    {
+                        newPanes.Children.Remove(pane);
+                        pantry.Children.Add(pane);
+                    }
+                }
+            }
             if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Channels") &&
                 Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Layers")?.Parent is LayoutAnchorablePane rightPane)
                 rightPane.Children.Insert(rightPane.Children.IndexOf(rightPane.Children.First(panel => panel.ContentId == "Layers")) + 1, NewPanel("Channels"));
@@ -247,16 +266,16 @@ public partial class MainWindow : Window
         if (active?.Tab is { } selected) selected.IsActive = true;
     }
 
-    private LayoutAnchorablePaneGroup CreateToolDocks()
+    private LayoutAnchorablePaneGroup CreateToolDocks(string[]? titles = null)
     {
-        var toolDock = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(134) };
-        var topTools = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
-        topTools.Children.Add(NewPanel("Tools"));
-        var bottomTools = new LayoutAnchorablePane { DockHeight = new GridLength(2, GridUnitType.Star) };
-        bottomTools.Children.Add(NewPanel("More Tools"));
-        toolDock.Children.Add(topTools);
-        toolDock.Children.Add(bottomTools);
-        return toolDock;
+        var group = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(156) };
+        foreach (string title in titles ?? ToolSections.Select(section => section.Title).ToArray())
+        {
+            var pane = new LayoutAnchorablePane();
+            pane.Children.Add(NewPanel(title));
+            group.Children.Add(pane);
+        }
+        return group;
     }
 
     private LayoutAnchorable NewPanel(string title) => new()
@@ -457,7 +476,7 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", "More Tools", "Navigation", "Layers", "Channels", "History", "Command Log" })
+        foreach (string title in new[] { "Painting Tools", "Selection Tools", "Vector Tools", "Other Tools", "Navigation", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -919,7 +938,10 @@ public partial class MainWindow : Window
             else if (double.TryParse(value, out _)) NumericWheel.Enable(box);
             var caption = new Label { Content = label, Target = box, Padding = new Thickness(0) };
             panel.Children.Add(caption);
-            if (ranges is not null)
+            bool rotary = label.Contains("Angle", StringComparison.OrdinalIgnoreCase) ||
+                label.Contains("Rotation", StringComparison.OrdinalIgnoreCase);
+            if (rotary) panel.Children.Add(AngleRow(box, signed: true));
+            else if (ranges is not null)
             {
                 var range = ranges[boxes.Count];
                 bool isHue = hueField == boxes.Count;
@@ -942,6 +964,9 @@ public partial class MainWindow : Window
                         VerticalAlignment = VerticalAlignment.Center, Value = (Number(value) + 360) % 360 };
                     hue.ValueChanged += (_, _) => Write(hue.Value > 180 ? hue.Value - 360 : hue.Value);
                     updateControl = number => hue.Value = (number + 360) % 360;
+                    var dial = LinkAngleDial(box, signed: true);
+                    DockPanel.SetDock(dial, System.Windows.Controls.Dock.Left);
+                    row.Children.Add(dial);
                     row.Children.Add(hue);
                 }
                 else

@@ -341,7 +341,7 @@ public partial class MainWindow
             case "Eraser":
                 if (points.Length > 0 && active.ActiveId is { } paintTarget)
                 {
-                    var paint = new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser");
+                    var paint = new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser", Pencil: completed == "Brush" && pencilMode);
                     var view = canvas;
                     var overlay = new EditorCanvas.PaintOverlay(paint, active.Engine.Current?.Selection);
                     view.PendingPaint.Add(overlay);
@@ -547,21 +547,27 @@ public partial class MainWindow
         "Transform" => Cursors.ScrollAll, _ => Cursors.Arrow
     };
 
-    private static readonly string[] UpperTools = ["Move", "Brush", "Eraser", "Bucket", "Chop"];
-    private IEnumerable<string> OrderedTools() => (preferences.ToolOrder ?? [.. UpperTools, .. ToolNames])
+    private bool pencilMode;
+    private static readonly (string Title, string[] Tools)[] ToolSections =
+    [
+        ("Painting Tools", ["Brush", "Eraser", "Masker", "Bucket", "Eyedropper"]),
+        ("Selection Tools", ["Selection", "Lasso", "Magic Wand"]),
+        ("Vector Tools", ["Pen", "Path Select", "Shape", "Text"]),
+        ("Other Tools", ["Move", "Transform", "Chop"])
+    ];
+    private IEnumerable<string> OrderedTools() => (preferences.ToolOrder ?? ToolSections.SelectMany(section => section.Tools).ToArray())
         .Concat(ToolNames).Where(ToolNames.Contains).Distinct();
 
     private void RefreshTools()
     {
-        toolsPanel.Children.Clear();
-        secondaryTools.Children.Clear();
+        foreach (var section in toolPanes.Values) section.Children.Clear();
         var visible = preferences.Tools ?? ToolNames;
         foreach (var name in OrderedTools().Where(visible.Contains))
         {
             var button = Button(name == "Bucket" ? "Fill" : name, () => SetTool(name));
             button.HorizontalContentAlignment = HorizontalAlignment.Left;
             if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
-            (UpperTools.Contains(name) ? toolsPanel : secondaryTools).Children.Add(button);
+            toolPanes[ToolSections.First(section => section.Tools.Contains(name)).Title].Children.Add(button);
         }
 
         toolColors.Children.Clear();
@@ -598,10 +604,17 @@ public partial class MainWindow
             modes.SelectionChanged += (_, _) => { CancelGesture(); polygonalLasso = modes.SelectedIndex == 1; };
             ToolOptions.Children.Add(modes);
         }
+        if (tool == "Brush")
+        {
+            OptionLabel("Mode");
+            var modes = new ComboBox { ItemsSource = new[] { "Brush", "Pencil" }, SelectedIndex = pencilMode ? 1 : 0 };
+            modes.SelectionChanged += (_, _) => { CancelGesture(); pencilMode = modes.SelectedIndex == 1; RefreshTools(); };
+            ToolOptions.Children.Add(modes);
+        }
         if (tool is "Brush" or "Eraser" or "Masker")
         {
             SliderOption("Size", 1, 512, brushSize, value => brushSize = value);
-            SliderOption("Hardness", 0, 1, hardness, value => hardness = value);
+            if (tool != "Brush" || !pencilMode) SliderOption("Hardness", 0, 1, hardness, value => hardness = value);
             SliderOption("Opacity", 0, 1, brushOpacity, value => brushOpacity = value);
         }
         if (tool == "Selection") AddMarqueeOptions();
@@ -695,12 +708,11 @@ public partial class MainWindow
 
     private void ConfigureTools()
     {
-        var dialog = new Window { Owner = this, Title = "Configure tools", Width = 475, SizeToContent = SizeToContent.Height,
+        var dialog = new Window { Owner = this, Title = "Configure tools", Width = 730, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
         var panel = new StackPanel { Margin = new Thickness(12) };
         var sections = new Grid();
-        sections.ColumnDefinitions.Add(new ColumnDefinition());
-        sections.ColumnDefinitions.Add(new ColumnDefinition());
+        foreach (var _ in ToolSections) sections.ColumnDefinitions.Add(new ColumnDefinition());
         var order = OrderedTools().ToArray();
         var visible = preferences.Tools ?? ToolNames;
         ListBox Section(int column, string title, IEnumerable<string> names)
@@ -734,8 +746,8 @@ public partial class MainWindow
             section.Children.Add(move);
             return items;
         }
-        var upper = Section(0, "Upper section", order.Where(UpperTools.Contains));
-        var lower = Section(1, "Lower section", order.Where(name => !UpperTools.Contains(name)));
+        var toolLists = ToolSections.Select((section, index) =>
+            Section(index, section.Title, order.Where(section.Tools.Contains))).ToArray();
         panel.Children.Add(sections);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var ok = Button("Apply", () => dialog.DialogResult = true);
@@ -745,7 +757,7 @@ public partial class MainWindow
         panel.Children.Add(buttons);
         dialog.Content = panel;
         if (dialog.ShowDialog() != true) return;
-        var checks = upper.Items.Cast<CheckBox>().Concat(lower.Items.Cast<CheckBox>()).ToArray();
+        var checks = toolLists.SelectMany(list => list.Items.Cast<CheckBox>()).ToArray();
         preferences.ToolOrder = checks.Select(check => (string)check.Content).ToArray();
         preferences.Tools = checks.Where(check => check.IsChecked == true).Select(check => (string)check.Content).ToArray();
         RefreshTools();

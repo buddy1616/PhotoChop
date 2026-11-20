@@ -203,6 +203,7 @@ public static class PsdImport
                 RasterX = pixels is null ? 0 : source.X, RasterY = pixels is null ? 0 : source.Y,
                 Pixels = pixels, Children = children, Effects = effects,
                 Visible = source.Visible, Locked = source.Locked, Opacity = source.Opacity / 255d,
+                FillOpacity = source.Tags.TryGetValue("iOpa", out var fillOpacity) && fillOpacity.Length > 0 ? fillOpacity.Span[0] / 255d : 1,
                 Clipped = source.Clipped && hasBelow, PassThrough = passThrough, Blend = blend,
                 Mask = mask, MaskEnabled = maskEnabled, VectorMask = vectorMask
             };
@@ -220,18 +221,21 @@ public static class PsdImport
             if (tags.Keys.Any(key => key is "brit" or "levl" or "curv" or "expA" or "vibA" or "hue " or "hue2" or
                 "blnc" or "blwh" or "phfl" or "mixr" or "clrL" or "nvrt" or "post" or "thrs" or "grdm" or "selc"))
                 Warn("Photoshop adjustment layers were kept as placeholders. Import the saved composite for their rendered appearance.");
-            if (tags.TryGetValue("iOpa", out var fill) && fill.Length > 0 && fill.Span[0] != 255)
-                Warn("Separate Photoshop fill opacity was not translated.");
+            if (tags.TryGetValue("iOpa", out var fill) && fill.Length > 0 && fill.Span[0] != 255 &&
+                tags.Keys.Any(key => key is "lrFX" or "lfx2" or "lmfx" or "lfxs"))
+                Warn("Fill opacity on styled layers is approximate.");
         }
 
         private Blend ReadBlend(string key) => key switch
         {
             "norm" or "pass" => Blend.Normal, "mul " => Blend.Multiply, "scrn" => Blend.Screen,
-            "over" => Blend.Overlay, "lddg" or "add " => Blend.Add, "dark" => Blend.Darken,
+            "over" => Blend.Overlay, "lddg" or "add " or "linearDodge" => Blend.Add, "dark" => Blend.Darken,
             "lite" => Blend.Lighten, "idiv" => Blend.ColorBurn, "div " => Blend.ColorDodge,
             "hLit" => Blend.HardLight, "sLit" => Blend.SoftLight, "diff" => Blend.Difference,
             "smud" => Blend.Exclusion, "hue " => Blend.Hue, "sat " => Blend.Saturation,
             "colr" => Blend.Color, "lum " => Blend.Luminosity,
+            "lbrn" or "linearBurn" => Blend.LinearBurn, "lLit" or "linearLight" => Blend.LinearLight, "vLit" or "vividLight" => Blend.VividLight,
+            "pLit" or "pinLight" => Blend.PinLight, "hMix" or "hardMix" => Blend.HardMix, "fsub" or "blendSubtraction" => Blend.Subtract, "fdiv" or "blendDivide" => Blend.Divide,
             _ => UnsupportedBlend()
         };
 

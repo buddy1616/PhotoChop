@@ -60,14 +60,25 @@ internal static class PsdDescriptorStyles
                         "FrFX" => style.Enum("Styl") switch { "InsF" => StrokeAlignment.Inside, "CtrF" => StrokeAlignment.Center, _ => StrokeAlignment.Outside },
                         _ => StrokeAlignment.Outside
                     };
-                    if (type == EffectKind.BevelEmboss) partial = true; // Separate highlight and shadow settings are approximated.
+                    BevelLighting? lighting = null;
+                    if (type == EffectKind.BevelEmboss)
+                    {
+                        lighting = new BevelLighting(ReadColor(style.Get("hglC") as Descriptor) ?? "#FFFFFFFF",
+                            style.Enum("hglM") is { } highlightBlend ? blend(highlightBlend) : Blend.Screen,
+                            Math.Clamp(style.Number("hglO", 100) / 100, 0, 1),
+                            ReadColor(style.Get("sdwC") as Descriptor) ?? "#FF000000",
+                            style.Enum("sdwM") is { } shadowBlend ? blend(shadowBlend) : Blend.Multiply,
+                            Math.Clamp(style.Number("sdwO", 100) / 100, 0, 1),
+                            Math.Clamp(style.Number("srgR", 100) / 100, 0, 10), style.Enum("bvlD") == "In  ");
+                        partial = true; // Adobe contours and techniques use a different height profile.
+                    }
                     effects.Add(new($"psd-style-{effects.Count + 1}", type.Value, Enabled: masterEnabled && style.Flag("enab"),
                         A: type == EffectKind.Stroke ? Math.Clamp(style.Number("Sz  ", 1), 1, 512) : angle,
                         B: type == EffectKind.BevelEmboss ? Math.Clamp(style.Number("Lald", 30), 0, 90) : Math.Clamp(style.Number("Dstn", 0), 0, 512),
                         Mode: style.Enum("Md  ") is { } mode ? blend(mode) : Blend.Normal, Ink: color ?? "#FFFFFFFF", Alignment: align,
                         Size: Math.Clamp(style.Number("blur", style.Number("Sz  ", 4)), type == EffectKind.BevelEmboss ? 1 : .1, 100),
                         Spread: Math.Clamp(style.Number("Ckmt", 0), 0, 100),
-                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops));
+                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops, Lighting: lighting));
                 }
             }
         }

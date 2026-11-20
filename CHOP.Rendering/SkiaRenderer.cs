@@ -139,7 +139,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             for (int y = 0; y < region.Height; y++)
             for (int x = 0; x < region.Width; x++)
             {
-                double mix = layer.Opacity * (vectorCoverage is null ? 1 : vectorCoverage.GetPixel(x, y).Alpha / 255d);
+                double mix = layer.Opacity * layer.FillOpacity * (vectorCoverage is null ? 1 : vectorCoverage.GetPixel(x, y).Alpha / 255d);
                 int wx = x + region.X, wy = y + region.Y;
                 if (layer.MaskEnabled && layer.Mask is { } mask)
                 {
@@ -191,13 +191,14 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (layer.RasterGrid is { } grid) world = SKMatrix.Concat(world, ToSkia(grid));
         var blend = bypass ? layer.Blend : CommandEngine.EffectiveBlend(layer);
         Effect[] effects = bypass ? [] : layer.Effects;
-        using var blender = blend == Blend.Add ? addBlend.Value.ToBlender() : null;
+        using var blender = CreateBlender(blend);
+        double opacity = layer.Opacity * (layer.Kind == LayerKind.Group ? layer.FillOpacity : 1);
         using var paint = new SKPaint
         {
-            Color = SKColors.White.WithAlpha(Byte(layer.Opacity)),
+            Color = SKColors.White.WithAlpha(Byte(opacity)),
             BlendMode = ToSkiaBlend(blend)
         };
-        if (precision is not null) paint.ColorF = new SKColorF(1, 1, 1, (float)layer.Opacity);
+        if (precision is not null) paint.ColorF = new SKColorF(1, 1, 1, (float)opacity);
         if (blender is not null) paint.Blender = blender;
         drawLeaf ??= precision is null ? DrawFrame : DrawNativeFrame;
 
@@ -216,7 +217,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 return;
             }
             if (!projection.TryInvert(out var inverse)) return;
-            var neutral = layer with { Transform = layer.Transform with { Warp = null }, ImagePlacement = null, Opacity = 1, Blend = Blend.Normal,
+            var neutral = layer with { Transform = layer.Transform with { Warp = null }, ImagePlacement = null, Opacity = 1, FillOpacity = 1, Blend = Blend.Normal,
                 Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() };
             var sourceBounds = SKRect.Create(region.X, region.Y, region.Width, region.Height);
             var visible = inverse.MapRect(SKRect.Create(region.X, region.Y, region.Width, region.Height));
@@ -310,7 +311,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         try { local = EnclosingPixels(inverse.MapRect(SKRect.Create(region.X, region.Y, region.Width, region.Height))); }
         catch (Exception error) when (error is InvalidDataException or OverflowException) { return false; }
 
-        var source = layer with { Placement = new(), Opacity = 1, Blend = Blend.Normal,
+        var source = layer with { Placement = new(), Opacity = 1, FillOpacity = 1, Blend = Blend.Normal,
             Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() };
         using var intermediate = Surface(local.Width, local.Height, precision);
         using var intermediateCanvas = new SKCanvas(intermediate);
@@ -349,6 +350,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             if (source is null) return null;
             frame = Evaluate(precision is null ? source : PixelBuffer.Convert(source, precision), effects, raster?.X ?? 0, raster?.Y ?? 0);
         }
+        if (layer.FillOpacity != 1)
+            frame = Evaluate(frame.Pixels, [new("fill-opacity", EffectKind.Opacity, A: layer.FillOpacity)], frame.X, frame.Y);
         if (layer.MaskEnabled && layer.Mask is { } mask) frame = ApplyMask(frame, mask);
         using var coverage = VectorCoverage(layer.VectorMask, new(frame.X, frame.Y, frame.Pixels.Width, frame.Pixels.Height), SKMatrix.Identity);
         if (coverage is null) return frame;
@@ -705,6 +708,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
         canvas.Translate(-x, -y);
         DrawNativeFrame(canvas, bottom, null);
         using var paint = new SKPaint { BlendMode = ToSkiaBlend(mode) };
+        using var blender = CreateBlender(mode);
+        if (blender is not null) paint.Blender = blender;
         DrawNativeFrame(canvas, top, paint);
         canvas.Flush();
         return new(Unpremultiply(output, precision), x, y);
@@ -1334,6 +1339,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
         void Stamp(PointD point)
         {
+            if (stroke.Pencil) point = new(Math.Floor(point.X) + .5, Math.Floor(point.Y) + .5);
             var bounds = inverse.MapRect(new SKRect((float)(point.X - radius), (float)(point.Y - radius),
                 (float)(point.X + radius), (float)(point.Y + radius)));
             int left = (int)Math.Clamp(Math.Floor(bounds.Left), firstX, lastX);
@@ -1349,7 +1355,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                     !doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y)))) continue;
                 double dx = p.X - point.X, dy = p.Y - point.Y;
                 double distance = Math.Sqrt(dx * dx + dy * dy);
-                double amount = Math.Clamp((radius - distance) / Math.Max(.5, radius * (1 - stroke.Hardness)), 0, 1);
+                double amount = stroke.Pencil ? (distance <= radius ? 1 : 0) : Math.Clamp((radius - distance) / Math.Max(.5, radius * (1 - stroke.Hardness)), 0, 1);
                 int i = (y - firstY) * stride + x - firstX;
                 coverage[i] = Math.Max(coverage[i], eightBit ? Byte(amount) : (float)amount);
             }

@@ -9,7 +9,7 @@ public sealed record LayerBatch(string[] Ids, ReorderArgs? Order = null, string[
 public enum Blend
 {
     Normal, Multiply, Screen, Overlay, Add, Darken, Lighten, ColorBurn, ColorDodge, HardLight, SoftLight,
-    Difference, Exclusion, Hue, Saturation, Color, Luminosity
+    Difference, Exclusion, Hue, Saturation, Color, Luminosity, LinearBurn, LinearLight, VividLight, PinLight, HardMix, Subtract, Divide
 }
 public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush, PathFill, ColorOverlay, Glow, InnerShadow, BevelEmboss, GradientOverlay, PatternOverlay }
 
@@ -26,7 +26,7 @@ public sealed record Transform(double X = 0, double Y = 0, double ScaleX = 1, do
 }
 public sealed record Placement(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1);
 public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal, string Ink = "#FF000000", StrokeAlignment Alignment = StrokeAlignment.Outside,
-    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null);
+    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null);
 
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
 public sealed record Pixels(int Width, int Height, byte[] Rgba, ColorPlanes? Native = null)
@@ -50,6 +50,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public bool Visible { get; init; } = true;
     public bool Locked { get; init; }
     public double Opacity { get; init; } = 1;
+    public double FillOpacity { get; init; } = 1;
     public Blend Blend { get; init; }
     public bool PassThrough { get; init; }
     [JsonIgnore] public Pixels? Pixels { get; init; }
