@@ -7,7 +7,7 @@ public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill, Effect, C
 public sealed record LayerBatch(string[] Ids, ReorderArgs? Order = null, string[]? CopyIds = null);
 
 public enum Blend { Normal, Multiply, Screen, Overlay, Add }
-public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush, PathFill }
+public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush, PathFill, ColorOverlay }
 
 public readonly record struct PointD(double X, double Y);
 public readonly record struct Area(int X, int Y, int Width, int Height);

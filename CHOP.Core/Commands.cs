@@ -221,6 +221,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         "layer.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase pixels" : "Brush stroke",
         "mask.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase mask" : "Paint mask",
         "layer.text" => "Edit text layer",
+        "path.break" => "Break Path",
         "effect.add" => $"Add {EffectLabel(command.Read<Effect>().Kind)}",
         "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
         "layer.scale" => "Scale",
@@ -394,6 +395,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         EffectKind.HueSaturation => "Hue / Saturation",
         EffectKind.GaussianBlur => "Gaussian Blur",
         EffectKind.MotionBlur => "Motion Blur",
+        EffectKind.ColorOverlay => "Color Overlay",
         EffectKind.PathFill => "Fill",
         EffectKind.DropShadow => "Drop Shadow",
         EffectKind.BitCrush => "Bit Crush",
@@ -677,6 +679,26 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var vector = PathLayerForCanvas(new Layer(path.Id, Name(path.Name), LayerKind.Path)
                     { Contours = path.Contours }, pathParent, pathBefore);
                 return With(Insert(layers, pathParent, pathBefore, vector));
+            case "path.break":
+                var cut = command.Read<BreakPathArgs>();
+                return Edit(layer =>
+                {
+                    var contours = cut.VectorMask ? layer.VectorMask?.Contours :
+                        layer.Kind == LayerKind.Path ? layer.Contours : null;
+                    if (contours is null || cut.Contour < 0 || cut.Contour >= contours.Length ||
+                        cut.Node < 0 || cut.Node >= contours[cut.Contour].Nodes.Length)
+                        throw new InvalidDataException("Select an existing anchor point to break the path.");
+                    var contour = contours[cut.Contour];
+                    var before = contour.Nodes[..cut.Node];
+                    var after = contour.Nodes[(cut.Node + 1)..];
+                    PathNode[][] pieces = contour.Closed ? [[.. after, .. before]] : [before, after];
+                    PathContour[] updated = [.. contours[..cut.Contour],
+                        .. pieces.Where(nodes => nodes.Length != 0).Select(nodes => new PathContour(nodes)),
+                        .. contours[(cut.Contour + 1)..]];
+                    CheckContours(updated);
+                    return cut.VectorMask ? layer with { VectorMask = layer.VectorMask! with { Contours = updated } } :
+                        layer with { Contours = updated };
+                });
             case "layer.path":
                 var contours = command.Read<PathContour[]>();
                 CheckContours(contours);
@@ -1500,6 +1522,11 @@ public sealed class CommandEngine(IRasterBackend backend)
             case EffectKind.GaussianBlur: Range(effect.A, 0, 100); break;
             case EffectKind.MotionBlur: Range(effect.A, 0, 200); Range(effect.B, -180, 180); break;
             case EffectKind.BitCrush: Range(effect.A, 1, 512); break;
+            case EffectKind.ColorOverlay:
+                Format.Color(effect.Ink);
+                Range(effect.Opacity, 0, 1);
+                if (!Enum.IsDefined(effect.Mode)) throw new InvalidDataException("Unknown blend mode.");
+                break;
             case EffectKind.PathFill: Format.Color(effect.Ink); break;
             case EffectKind.Stroke:
                 Range(effect.A, 1, 512);

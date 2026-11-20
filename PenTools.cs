@@ -371,6 +371,12 @@ public partial class MainWindow
             if (hit is { } node)
             {
                 bool editable = Editable(doc, node.Layer.Id);
+                Item(menu, "Break Path", () =>
+                {
+                    CancelPathEditing();
+                    Run("path.break", new BreakPathArgs(node.Contour, node.Node, active?.VectorMaskTarget == node.Layer.Id),
+                        node.Layer.Id, node.Layer.Id);
+                }).IsEnabled = editable;
                 Item(menu, "Delete Anchor Point", () => DeletePathNodes(node.Layer, [(node.Contour, node.Node)])).IsEnabled = editable;
                 Item(menu, "Make Sharp Corner", () => ChangePathHandles(node, false, false)).IsEnabled = editable;
                 Item(menu, "Make Smooth", () => ChangePathHandles(node, true, true)).IsEnabled = editable;

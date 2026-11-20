@@ -23,6 +23,7 @@ public partial class MainWindow : Window
         public LayoutDocument? Tab { get; set; }
         public string? MaskOnly { get; set; }
         public string? VectorMaskTarget { get; set; }
+        public bool VectorMaskOnly { get; set; }
         public string? ChannelView { get; set; }
         public CommandEngine Engine { get; } = engine;
         public List<LogEntry> Log { get; } = [];
@@ -110,6 +111,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
         PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
+        InputManager.Current.PreProcessInput += WorkspaceShortcuts;
+        Closed += (_, _) => InputManager.Current.PreProcessInput -= WorkspaceShortcuts;
         Dock.Theme = new AvalonDock.Themes.Vs2013DarkTheme();
         Dock.AllowMixedOrientation = true;
         Dock.LayoutFloatingWindowControlCreated += (_, e) =>
@@ -198,18 +201,24 @@ public partial class MainWindow : Window
         try
         {
             Directory.CreateDirectory(settingsFolder);
-            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v4.xml"));
             preferences.WindowPosition = WindowPlacement.Capture(this) ?? preferences.WindowPosition;
-            var settings = Path.Combine(settingsFolder, "settings.json");
-            var temporary = Path.Combine(settingsFolder, $".settings-{Guid.NewGuid():N}.tmp");
-            try
-            {
-                File.WriteAllText(temporary, JsonSerializer.Serialize(preferences, Format.Json));
-                File.Move(temporary, settings, overwrite: true);
-            }
-            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            SavePreferences();
+            new XmlLayoutSerializer(Dock).Serialize(Path.Combine(settingsFolder, "layout-v4.xml"));
         }
         catch (Exception error) { MessageBox.Show(this, error.Message, "CHOP settings"); }
+    }
+
+    private void SavePreferences()
+    {
+        Directory.CreateDirectory(settingsFolder);
+        var settings = Path.Combine(settingsFolder, "settings.json");
+        var temporary = Path.Combine(settingsFolder, $".settings-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(preferences, Format.Json));
+            File.Move(temporary, settings, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
     private void ResetLayout()
@@ -314,9 +323,11 @@ public partial class MainWindow : Window
         recentMenu = new MenuItem { Header = "Recent files" };
         file.Items.Add(recentMenu);
         UpdateRecent();
-        Item(file, "Import Image…", ImportImage);
         Item(file, "_Save", () => Save(active), "Ctrl+S");
         Item(file, "Save _As…", () => Save(active, true), "Ctrl+Shift+S");
+        var import = new MenuItem { Header = "_Import" };
+        file.Items.Add(import);
+        Item(import, "Image…", ImportImage);
         var export = new MenuItem { Header = "_Export" };
         file.Items.Add(export);
         Item(export, "PNG", ExportPng, "Ctrl+Shift+E");
@@ -423,6 +434,7 @@ public partial class MainWindow : Window
         acceleration.Click += (_, _) =>
         {
             preferences.ExperimentalGpu = acceleration.IsChecked;
+            Guard(SavePreferences);
             if (!preferences.ExperimentalGpu)
             {
                 gpu?.Dispose();
@@ -828,10 +840,12 @@ public partial class MainWindow : Window
                 bool isPreview = preview is not null || shift is not null;
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
-                bool cached = !isPreview && maskLayer is null && channel is null && session.Rendered is { } prior &&
+                var vectorLayer = session.VectorMaskOnly && session.VectorMaskTarget is { } vectorId
+                    ? target.AllLayers().FirstOrDefault(layer => layer.Id == vectorId && layer.VectorMask is not null) : null;
+                bool cached = !isPreview && maskLayer is null && vectorLayer is null && channel is null && session.Rendered is { } prior &&
                     ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color;
                 bool gpuRequested = preferences.ExperimentalGpu;
-                var accelerator = !cached && gpuRequested && channel is null && maskLayer is null &&
+                var accelerator = !cached && gpuRequested && channel is null && maskLayer is null && vectorLayer is null &&
                     SkiaRenderer.CanCompositeOnGpu(target) ? gpu ??= new WindowsGpuCompositor() : null;
                 var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!, Backend: session.RenderBackend) : await Task.Run(() =>
                 {
@@ -842,12 +856,13 @@ public partial class MainWindow : Window
                     }
                     var (accelerated, backend) = accelerator?.TryComposite(renderer, target) ??
                         (null, gpuRequested ? "CPU · preview not eligible for GPU" : "CPU");
-                    var pixels = accelerated ?? (maskLayer is null ? RenderChannel(target, channel, selectedLayer) : renderer.MaskView(target, maskLayer));
+                    var pixels = accelerated ?? (vectorLayer is not null ? renderer.VectorMaskView(target, vectorLayer) :
+                        maskLayer is not null ? renderer.MaskView(target, maskLayer) : RenderChannel(target, channel, selectedLayer));
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels), Backend: (string?)backend);
                 });
                 if (gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
                     (isPreview && preview is null && selectionDragDelta is null)) continue;
-                if (!isPreview && maskLayer is null && channel is null)
+                if (!isPreview && maskLayer is null && vectorLayer is null && channel is null)
                 {
                     session.Rendered = snapshot;
                     session.RenderBackend = frame.Backend;

@@ -12,6 +12,7 @@ public partial class MainWindow
     private Effect? EditStyleEffect(Effect effect)
     {
         bool shadow = effect.Kind == EffectKind.DropShadow;
+        bool overlay = effect.Kind == EffectKind.ColorOverlay;
         var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = EffectName(effect.Kind), Width = 420,
             SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false };
@@ -43,7 +44,7 @@ public partial class MainWindow
             return box;
         }
         var fields = new List<TextBox>();
-        ComboBox? alignment = null;
+        ComboBox? alignment = null, blend = null;
         AngleDial? dial = null;
         static double Opposite(double angle) => (angle + 180) % 360;
         if (shadow)
@@ -73,6 +74,13 @@ public partial class MainWindow
             fields.Add(Numeric("Spread (%)", effect.Spread, 0, 100));
             fields.Add(Numeric("Opacity (%)", effect.Opacity * 100, 0, 100));
         }
+        else if (overlay)
+        {
+            panel.Children.Add(new TextBlock { Text = "Blend mode", Margin = new Thickness(0, 6, 0, 3) });
+            blend = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = effect.Mode };
+            panel.Children.Add(blend);
+            fields.Add(Numeric("Opacity (%)", effect.Opacity * 100, 0, 100));
+        }
         else
         {
             fields.Add(Numeric("Thickness (px)", effect.A, 1, 512));
@@ -88,6 +96,7 @@ public partial class MainWindow
             var v = fields.Select(field => Number(field.Text)).ToArray();
             if (v.Any(value => !double.IsFinite(value))) throw new InvalidDataException("Enter finite values.");
             if (shadow && v[0] is < 0 or > 360) throw new InvalidDataException("Enter a light angle between 0 and 360.");
+            if (overlay) return effect with { Mode = (Blend)blend!.SelectedItem, Opacity = v[0] / 100, Ink = ink };
             return shadow ? effect with { A = Opposite(v[0]), B = v[1], Size = v[2], Spread = v[3], Opacity = v[4] / 100, Ink = ink }
                 : effect with { A = v[0], Alignment = (StrokeAlignment)alignment!.SelectedItem, Ink = ink };
         }
@@ -131,6 +140,7 @@ public partial class MainWindow
         panel.Children.Add(buttons);
         foreach (var field in fields) field.TextChanged += (_, _) => RefreshPreview();
         if (alignment is not null) alignment.SelectionChanged += (_, _) => RefreshPreview();
+        if (blend is not null) blend.SelectionChanged += (_, _) => RefreshPreview();
         live.Click += (_, _) => RefreshPreview();
         dialog.Loaded += (_, _) => RefreshPreview();
         dialog.Closed += (_, _) => { preview = null; UpdateCanvas(); };
