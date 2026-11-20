@@ -98,6 +98,7 @@ public static class ProjectFile
             throw new InvalidDataException("Invalid document metadata.");
         Format.Dimensions(doc.Width, doc.Height);
         doc.ImageOrientation?.Inverse();
+        doc.ImageFlip?.Inverse();
         if (doc.Guides is null || doc.Guides.Any(guide => guide is null || !Format.ValidId(guide.Id) ||
             !Enum.IsDefined(guide.Axis) || guide.Position < 0 || guide.Position > (guide.Axis == GuideAxis.Vertical ? doc.Width : doc.Height)) ||
             doc.Guides.Select(guide => guide.Id).Distinct().Count() != doc.Guides.Length)

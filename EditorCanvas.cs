@@ -32,6 +32,7 @@ internal sealed class EditorCanvas : FrameworkElement
     }
 
     public PathContour[]? PathOverlay { get; set; }
+    public HashSet<(int Contour, int Node)> SelectedPathNodes { get; set; } = [];
     public IReadOnlyList<PointD>? LassoPath { get; set; }
     public PointD[]? TransformBox { get; set; }
     public PointD? TransformOrigin { get; set; }
@@ -130,8 +131,9 @@ internal sealed class EditorCanvas : FrameworkElement
 
     private void DrawVectorPaths(DrawingContext dc, PathContour[] contours)
     {
-        foreach (var contour in contours)
+        for (int c = 0; c < contours.Length; c++)
         {
+            var contour = contours[c];
             var nodes = contour.Nodes;
             if (nodes.Length == 0) continue;
             var geometry = new StreamGeometry();
@@ -148,8 +150,9 @@ internal sealed class EditorCanvas : FrameworkElement
                 }
             }
             dc.DrawGeometry(null, pathPen, geometry);
-            foreach (var node in nodes)
+            for (int n = 0; n < nodes.Length; n++)
             {
+                var node = nodes[n];
                 var anchor = ToView(node.Point);
                 void Handle(PointD? point)
                 {
@@ -160,7 +163,8 @@ internal sealed class EditorCanvas : FrameworkElement
                 }
                 Handle(node.Incoming);
                 Handle(node.Outgoing);
-                dc.DrawRectangle(Brushes.White, pathPen, new Rect(anchor.X - 3, anchor.Y - 3, 6, 6));
+                dc.DrawRectangle(SelectedPathNodes.Contains((c, n)) ? Brushes.DeepSkyBlue : Brushes.White,
+                    pathPen, new Rect(anchor.X - 3, anchor.Y - 3, 6, 6));
             }
         }
     }

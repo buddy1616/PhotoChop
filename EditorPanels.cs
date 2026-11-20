@@ -27,6 +27,7 @@ public partial class MainWindow
         {
             LayerKind.Group => "M 1,4 L 1,13 15,13 15,5 8,5 6,3 1,3 Z",
             LayerKind.Effect => "M 9,1 C 5,1 6,12 2,13 M 3,6 L 10,6 M 10,7 L 15,13 M 15,7 L 10,13",
+            LayerKind.Rectangle or LayerKind.Ellipse => "M 8,1 L 15,14 1,14 Z",
             LayerKind.Path => "M 2,13 C 14,12 2,4 14,3 M 1,12 L 3,12 3,14 1,14 Z M 13,2 L 15,2 15,4 13,4 Z",
             LayerKind.Chop => "M 3,1 L 10,1 14,5 14,14 3,14 Z M 10,1 L 10,5 14,5 M 5,9 L 12,9",
             LayerKind.Fill => "M 2,2 L 14,2 14,14 2,14 Z",
@@ -66,7 +67,7 @@ public partial class MainWindow
     }
 
     private Point layerDragStart;
-    private LayerRow? layerDrag;
+    private LayerRow[]? layerDrag;
 
     private void BuildPanels()
     {
@@ -77,16 +78,17 @@ public partial class MainWindow
         var deleteButton = LayerIconButton("\uE74D", "Delete Layer or Group", DeleteLayer);
         layerButtons.Children.Add(rasterButton);
         layerButtons.Children.Add(groupButton);
-        BindLayerDrop(rasterButton, "Copy here", Duplicate);
-        BindLayerDrop(groupButton, "Copy here", Duplicate);
-        BindLayerDrop(deleteButton, "Delete here", id =>
+        BindLayerDrop(rasterButton, "Copy here", DuplicateDropped);
+        BindLayerDrop(groupButton, "Copy here", DuplicateDropped);
+        BindLayerDrop(deleteButton, "Delete here", rows =>
         {
-            if (Confirm("Delete the dropped layer or group?")) Run("layer.delete", 0, id);
+            if (Confirm($"Delete the {rows.Length} dropped layer(s) or group(s)?"))
+                Run("layers.delete", new LayerBatch(rows.Select(row => row.Layer.Id).ToArray()));
         }, copy: false);
         var maskButton = LayerMaskButton();
         maskButton.ContextMenu = new ContextMenu();
         maskButton.ContextMenuOpening += OpenMaskMenu;
-        BindLayerDrop(maskButton, "Add mask here", id => Run("mask.add", 0, id, id), copy: false);
+        BindLayerDrop(maskButton, "Add mask here", rows => Run("mask.add", 0, rows[0].Layer.Id, rows[0].Layer.Id), copy: false, single: true);
         layerButtons.Children.Add(maskButton);
         layerButtons.Children.Add(deleteButton);
         DockPanel.SetDock(properties, System.Windows.Controls.Dock.Top);
@@ -127,7 +129,8 @@ public partial class MainWindow
         layers.PreviewMouseLeftButtonDown += (_, e) =>
         {
             layerDragStart = layers.PointToScreen(e.GetPosition(layers));
-            layerDrag = IsButton(e.OriginalSource) ? null : RowAt(e.OriginalSource);
+            layerDrag = IsButton(e.OriginalSource) || RowAt(e.OriginalSource) is not { } row ? null :
+                layers.SelectedItems.Contains(row) ? DragRoots(layers.SelectedItems.OfType<LayerRow>()) : [row];
         };
         layers.AddHandler(PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler((_, _) => layerDrag = null), true);
         layers.PreviewMouseMove += (_, e) =>
@@ -158,7 +161,9 @@ public partial class MainWindow
         {
             if (active is null || GetDrop(e) is not { } hint) return;
             if (hint.IntoGroup && hint.Order.Parent is { } parent) active.Collapsed.Remove(parent);
-            Run("layer.reorder", hint.Order, hint.Source.Layer.Id, hint.Source.Layer.Id);
+            var ids = hint.Source.Select(row => row.Layer.Id).ToArray();
+            if (Run("layers.move", new LayerBatch(ids, hint.Order), selectId: ids[0]))
+                SelectRows(ids);
             e.Handled = true;
         };
 
@@ -480,7 +485,7 @@ public partial class MainWindow
         var effectKinds = new ComboBox
         {
             ItemsSource = Enum.GetValues<EffectKind>()
-                .Where(kind => (kind != EffectKind.PathFill || layer.Kind == LayerKind.Path) &&
+                .Where(kind => kind != EffectKind.BlendMode && (kind != EffectKind.PathFill || layer.Kind == LayerKind.Path) &&
                     (kind != EffectKind.Transform || layer.Kind != LayerKind.Effect))
                 .Select(kind => new { Kind = kind, Name = EffectName(kind) })
                 .OrderBy(effect => effect.Name, StringComparer.CurrentCultureIgnoreCase).ToArray(),
@@ -637,10 +642,18 @@ public partial class MainWindow
         }
         if (effect.Kind == EffectKind.BlendMode)
         {
-            var input = Form("Effect blend mode", ("Normal, Multiply, Screen, Overlay, Add", effect.Mode.ToString()));
-            Effect? blend = null;
-            if (input is not null) Guard(() => blend = effect with { Mode = Enum.Parse<Blend>(input[0], ignoreCase: true) });
-            return blend;
+            var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = "Effect Blend Mode", Width = 280,
+                SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                ResizeMode = ResizeMode.NoResize };
+            var panel = new StackPanel { Margin = new Thickness(12) };
+            var modes = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = effect.Mode, Margin = new Thickness(2) };
+            panel.Children.Add(modes);
+            var apply = Button("Apply", () => dialog.DialogResult = true);
+            apply.IsDefault = true;
+            panel.Children.Add(apply);
+            panel.Children.Add(new Button { Content = "Cancel", IsCancel = true });
+            dialog.Content = panel;
+            return dialog.ShowDialog() == true && modes.SelectedItem is Blend blend ? effect with { Mode = blend } : null;
         }
 
         (string Label, string Initial)[] fields = effect.Kind switch

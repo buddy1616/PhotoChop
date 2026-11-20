@@ -13,7 +13,7 @@ public partial class MainWindow
     private const string MaskClipboardFormat = "CHOP.AlphaMask";
     private LayerDragAdorner? layerDragAdorner;
     private int historyContextIndex = -1;
-    private sealed record DropHint(LayerRow Source, ReorderArgs Order, bool IntoGroup, Rect Bounds, double LineY);
+    private sealed record DropHint(LayerRow[] Source, ReorderArgs Order, bool IntoGroup, Rect Bounds, double LineY);
 
     private void OpenMaskMenu(object sender, ContextMenuEventArgs e)
     {
@@ -113,13 +113,13 @@ public partial class MainWindow
         return button;
     }
 
-    private static void BindLayerDrop(Button button, string hint, Action<string> drop, bool copy = true)
+    private static void BindLayerDrop(Button button, string hint, Action<LayerRow[]> drop, bool copy = true, bool single = false)
     {
         button.AllowDrop = true;
         string name = (string)button.ToolTip;
         void Hover(DragEventArgs e)
         {
-            e.Effects = e.Data.GetDataPresent(typeof(LayerRow)) ? (copy ? DragDropEffects.Copy : DragDropEffects.Move) : DragDropEffects.None;
+            e.Effects = e.Data.GetData(typeof(LayerRow[])) is LayerRow[] rows && (!single || rows.Length == 1) ? (copy ? DragDropEffects.Copy : DragDropEffects.Move) : DragDropEffects.None;
             if (e.Effects != DragDropEffects.None)
             {
                 button.BorderBrush = Brushes.DeepSkyBlue;
@@ -137,7 +137,7 @@ public partial class MainWindow
         button.Drop += (_, e) =>
         {
             Clear();
-            if (e.Data.GetData(typeof(LayerRow)) is LayerRow row) drop(row.Layer.Id);
+            if (e.Data.GetData(typeof(LayerRow[])) is LayerRow[] rows && (!single || rows.Length == 1)) drop(rows);
             e.Handled = true;
         };
     }
@@ -236,28 +236,60 @@ public partial class MainWindow
         return starts.Concat(timeline);
     }
 
-    private void DragLayer(LayerRow row)
+    private static LayerRow[] DragRoots(IEnumerable<LayerRow> selected)
     {
+        var rows = selected.ToArray();
+        var descendants = rows.SelectMany(row => new Document("", 1, 1) { Layers = row.Layer.Children }.AllLayers())
+            .Select(layer => layer.Id).ToHashSet();
+        return rows.Where(row => !descendants.Contains(row.Layer.Id)).ToArray();
+    }
+
+    private void SelectRows(string[] ids)
+    {
+        syncing = true;
+        try
+        {
+            var selected = ids.ToHashSet();
+            layers.SelectedItems.Clear();
+            foreach (var row in layers.Items.OfType<LayerRow>().Where(row => selected.Contains(row.Layer.Id)))
+                layers.SelectedItems.Add(row);
+        }
+        finally { syncing = false; }
+    }
+
+    private void DuplicateDropped(LayerRow[] rows)
+    {
+        var copies = rows.Select(_ => Format.Id()).ToArray();
+        var ids = rows.Select(row => row.Layer.Id).ToArray();
+        // The command visits layers in stacking order. Each generated ID identifies one new root.
+        if (Run("layers.duplicate", new LayerBatch(ids, CopyIds: copies), selectId: copies[0]))
+            SelectRows(copies);
+    }
+
+    private void DragLayer(LayerRow[] rows)
+    {
+        if (rows.Length > 1) SelectRows(rows.Select(row => row.Layer.Id).ToArray());
         var layer = AdornerLayer.GetAdornerLayer(layers);
-        var adorner = new LayerDragAdorner(layers, row.Layer.Name) { Pointer = Mouse.GetPosition(layers) };
+        var adorner = new LayerDragAdorner(layers, rows.Length == 1 ? rows[0].Layer.Name : $"{rows.Length} layers") { Pointer = Mouse.GetPosition(layers) };
         layerDragAdorner = adorner;
         layer?.Add(adorner);
-        try { DragDrop.DoDragDrop(layers, new DataObject(typeof(LayerRow), row), DragDropEffects.Move | DragDropEffects.Copy); }
+        try { DragDrop.DoDragDrop(layers, new DataObject(typeof(LayerRow[]), rows), DragDropEffects.Move | DragDropEffects.Copy); }
         finally { layer?.Remove(adorner); layerDragAdorner = null; }
     }
 
     private DropHint? GetDrop(DragEventArgs e)
     {
-        if (!e.Data.GetDataPresent(typeof(LayerRow)) || e.Data.GetData(typeof(LayerRow)) is not LayerRow source) return null;
+        if (e.Data.GetData(typeof(LayerRow[])) is not LayerRow[] source) return null;
+        var moved = source.SelectMany(row => new Document("", 1, 1) { Layers = [row.Layer] }.AllLayers())
+            .Select(item => item.Id).ToHashSet();
         var target = RowAt(e.OriginalSource);
-        if (target?.Layer.Id == source.Layer.Id) return null;
+        if (target is not null && moved.Contains(target.Layer.Id)) return null;
         var item = target is null ? null : layers.ItemContainerGenerator.ContainerFromItem(target) as ListBoxItem;
         double fraction = item is null || item.ActualHeight == 0 ? 1 : e.GetPosition(item).Y / item.ActualHeight;
         bool into = target?.Layer.Kind == LayerKind.Group && fraction > .25 && fraction < .75;
         string? parent = into ? target!.Layer.Id : target?.Parent;
-        if (parent == source.Layer.Id || new Document("", 1, 1) { Layers = source.Layer.Children }.AllLayers().Any(layer => layer.Id == parent))
-            return null;
-        var siblings = layers.Items.Cast<LayerRow>().Where(row => row.Parent == parent && row.Layer.Id != source.Layer.Id).ToArray();
+        if (parent is not null && moved.Contains(parent)) return null;
+        var siblings = layers.Items.Cast<LayerRow>().Where(row => row.Parent == parent && !moved.Contains(row.Layer.Id)).ToArray();
         string? before = into ? null : target is null ? siblings.LastOrDefault()?.Layer.Id :
             fraction >= .5 ? target.Layer.Id : siblings.TakeWhile(row => row.Layer.Id != target.Layer.Id).LastOrDefault()?.Layer.Id;
         var origin = item?.TranslatePoint(new Point(), layers) ?? new Point(4, Math.Max(4, e.GetPosition(layers).Y));

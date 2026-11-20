@@ -11,6 +11,7 @@ using AvalonDock.Layout.Serialization;
 using Chop.Core;
 using Chop.Rendering;
 using Microsoft.Win32;
+using SkiaSharp;
 
 namespace PhotoChop;
 
@@ -262,18 +263,58 @@ public partial class MainWindow : Window
         panel.IsActive = true;
     }
 
+    private MenuItem? fileMenu;
+    private void FileAccessKey(object sender, PreProcessInputEventArgs args)
+    {
+        if (fileMenu is not { } menu || args.StagingItem.Input is not KeyEventArgs e ||
+            e.RoutedEvent != Keyboard.PreviewKeyDownEvent || e.IsUp) return;
+
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key == Key.F && Keyboard.Modifiers == ModifierKeys.Alt &&
+            (IsActive || Application.Current.Windows.OfType<AvalonDock.Controls.LayoutFloatingWindowControl>().Any(host => host.IsActive)))
+        {
+            e.Handled = true;
+            if (!IsActive) Activate();
+            menu.Focus();
+            menu.IsSubmenuOpen = true;
+            return;
+        }
+
+        if (!menu.IsSubmenuOpen || Keyboard.Modifiers is not (ModifierKeys.None or ModifierKeys.Alt)) return;
+        Action? action = key switch
+        {
+            Key.A => () => Save(active, true),
+            Key.N => NewDocument,
+            Key.O => OpenDocument,
+            Key.S => () => Save(active),
+            Key.C => () => CloseSession(active),
+            _ => null
+        };
+        if (action is null) return;
+        e.Handled = true;
+        menu.IsSubmenuOpen = false;
+        Dispatcher.BeginInvoke(action);
+    }
+
     private void BuildMenus()
     {
-        var file = Menu("_File");
+        var file = fileMenu = Menu("_File");
+        InputManager.Current.PreProcessInput += FileAccessKey;
+        Closed += (_, _) => InputManager.Current.PreProcessInput -= FileAccessKey;
         Item(file, "_New…", NewDocument, "Ctrl+N");
         Item(file, "_Open…", OpenDocument, "Ctrl+O");
         recentMenu = new MenuItem { Header = "Recent files" };
         file.Items.Add(recentMenu);
         UpdateRecent();
-        Item(file, "Import PNG…", ImportPng);
+        Item(file, "Import Image…", ImportImage);
         Item(file, "_Save", () => Save(active), "Ctrl+S");
         Item(file, "Save _As…", () => Save(active, true), "Ctrl+Shift+S");
-        Item(file, "_Export PNG…", ExportPng, "Ctrl+Shift+E");
+        var export = new MenuItem { Header = "_Export" };
+        file.Items.Add(export);
+        Item(export, "PNG", ExportPng, "Ctrl+Shift+E");
+        Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", SKEncodedImageFormat.Jpeg));
+        Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", SKEncodedImageFormat.Webp));
+        Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", null));
         Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
 
         var edit = Menu("Edit");
@@ -304,6 +345,11 @@ public partial class MainWindow : Window
             shapeItem.IsEnabled = selected?.Kind is LayerKind.Rectangle or LayerKind.Ellipse;
         };
         var image = Menu("Image");
+        var adjustments = new MenuItem { Header = "Adjustments" };
+        image.Items.Add(adjustments);
+        foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity })
+            Item(adjustments, EffectName(kind), () => AddEffect(kind));
+
         Item(image, "Canvas Size…", () => ResizeDocument(canvasOnly: true));
         Item(image, "Image Size…", () => ResizeDocument(canvasOnly: false));
         var orientation = new MenuItem { Header = "Image Rotation" };
@@ -312,7 +358,7 @@ public partial class MainWindow : Window
         {
             ("Flip Horizontal", OrientationAction.FlipHorizontal), ("Flip Vertical", OrientationAction.FlipVertical),
             ("90° Clockwise", OrientationAction.Clockwise), ("90° Counterclockwise", OrientationAction.Counterclockwise),
-            ("180°", OrientationAction.HalfTurn), ("Reset Rotation / Flip", OrientationAction.Reset), ("Bake Rotation / Flip…", OrientationAction.Bake)
+            ("180°", OrientationAction.HalfTurn), ("Reset Rotation", OrientationAction.ResetRotation), ("Reset Flip", OrientationAction.ResetFlip), ("Bake Rotation / Flip…", OrientationAction.Bake)
         })
             Item(orientation, label, () =>
             {
@@ -323,11 +369,6 @@ public partial class MainWindow : Window
         Item(image, "Chop to selection", () => { if (active?.Engine.Current?.Selection is { } area) Run("document.chop", area); });
         Item(image, "Flatten image…", Flatten);
         Item(image, "Default document size…", SetDefaults);
-
-        var adjustments = new MenuItem { Header = "Adjustments" };
-        image.Items.Add(adjustments);
-        foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity })
-            Item(adjustments, EffectName(kind), () => AddEffect(kind));
 
         var layer = Menu("Layer");
         var newLayer = new MenuItem { Header = "New" };
@@ -580,18 +621,20 @@ public partial class MainWindow : Window
         });
     }
 
-    private void ImportPng()
+    private void ImportImage()
     {
-        var picker = new OpenFileDialog { Filter = "PNG images (*.png)|*.png" };
+        var picker = new OpenFileDialog { Filter = "Images (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp" };
         if (picker.ShowDialog(this) != true) return;
         Guard(() =>
         {
             byte[] source = File.ReadAllBytes(picker.FileName);
+            var image = renderer.DecodeImage(source);
+            if (!string.Equals(Path.GetExtension(picker.FileName), ".png", StringComparison.OrdinalIgnoreCase))
+                source = renderer.EncodePng(image);
             var name = Path.GetFileNameWithoutExtension(picker.FileName);
             string id = Format.Id();
             if (active is null)
             {
-                var image = renderer.DecodePng(source);
                 var session = NewSession();
                 session.Engine.Execute(Command.Of("document.create", new NewArgs(Format.Id(), image.Width, image.Height)));
                 session.Engine.Execute(Command.Of("layer.importPng", new ImportArgs(id, name, source)));
@@ -604,7 +647,7 @@ public partial class MainWindow : Window
                 if (parent is not null) active.Collapsed.Remove(parent);
                 if (!Run("layer.importPng", new ImportArgs(id, name, source, parent), selectId: id)) return;
             }
-            Say($"Imported {name}.png");
+            Say($"Imported {Path.GetFileName(picker.FileName)}");
         });
     }
 
@@ -613,6 +656,15 @@ public partial class MainWindow : Window
         if (active is null) return;
         var picker = new SaveFileDialog { Filter = "PNG images (*.png)|*.png", DefaultExt = ".png", AddExtension = true };
         if (picker.ShowDialog(this) == true) Run("document.export", new PathArgs(picker.FileName));
+    }
+
+    private void ExportImage(string label, string extension, string pattern, SKEncodedImageFormat? format)
+    {
+        if (active?.Engine.Current is not { } document) return;
+        var picker = new SaveFileDialog { Filter = $"{label} images ({pattern})|{pattern}", DefaultExt = extension, AddExtension = true };
+        if (picker.ShowDialog(EditorOwner) != true) return;
+        Guard(() => File.WriteAllBytes(picker.FileName, format is { } raster
+            ? renderer.EncodeImage(document, raster) : renderer.EncodeSvg(document)));
     }
 
     private bool CanClose(Session session)

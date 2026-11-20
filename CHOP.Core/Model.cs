@@ -4,6 +4,8 @@ using System.Text.Json.Serialization;
 namespace Chop.Core;
 
 public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill, Effect, Chop, Path }
+public sealed record LayerBatch(string[] Ids, ReorderArgs? Order = null, string[]? CopyIds = null);
+
 public enum Blend { Normal, Multiply, Screen, Overlay, Add }
 public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush, PathFill }
 
@@ -82,6 +84,7 @@ public sealed record Document(string Id, int Width, int Height)
     public Dictionary<string, string> Metadata { get; init; } = [];
     public Layer[] Layers { get; init; } = [];
     public Projective? ImageOrientation { get; init; }
+    public Projective? ImageFlip { get; init; }
     [JsonIgnore] public FloatingPixels? Floating { get; init; }
     public bool GuidesLocked { get; init; }
     public Guide[] Guides { get; init; } = [];
