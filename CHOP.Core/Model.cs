@@ -26,7 +26,11 @@ public sealed record Transform(double X = 0, double Y = 0, double ScaleX = 1, do
 }
 public sealed record Placement(double X = 0, double Y = 0, double ScaleX = 1, double ScaleY = 1);
 public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal, string Ink = "#FF000000", StrokeAlignment Alignment = StrokeAlignment.Outside,
-    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null);
+    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null, bool UseGlobalLight = false, StyleContour Contour = StyleContour.Linear)
+{
+    public static bool UsesLight(EffectKind kind) => kind is EffectKind.BevelEmboss or EffectKind.DropShadow or EffectKind.InnerShadow;
+    public static double LightAngle(EffectKind kind, double angle) => ((angle + (kind == EffectKind.DropShadow ? 180 : 0)) % 360 + 360) % 360;
+}
 
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
 public sealed record Pixels(int Width, int Height, byte[] Rgba, ColorPlanes? Native = null)
@@ -100,6 +104,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
 
 public sealed record Document(string Id, int Width, int Height)
 {
+    public double GlobalLightAngle { get; init; } = 225;
     public double PixelsPerInch { get; init; } = 72;
     public string ColorSpace { get; init; } = "sRGB";
     [JsonIgnore] public byte[]? IccProfile { get; init; }

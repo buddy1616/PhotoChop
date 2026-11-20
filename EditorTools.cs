@@ -673,7 +673,11 @@ public partial class MainWindow
         {
             NumberOption("Size", 1, 512, brushSize, value => brushSize = value);
             if (tool != "Brush" || !pencilMode) NumberOption("Hardness", 0, 1, hardness, value => hardness = value);
-            NumberOption("Opacity", 0, 1, brushOpacity, value => brushOpacity = value);
+            OptionLabel("Opacity (%)");
+            var opacity = StyleFields.Range(brushOpacity * 100, 0, 100);
+            opacity.Slider.Width = 75;
+            opacity.Slider.ValueChanged += (_, _) => brushOpacity = opacity.Slider.Value / 100;
+            ToolOptions.Children.Add(opacity.Row);
         }
         if (tool == "Selection") AddMarqueeOptions();
         if (tool == "Shape")

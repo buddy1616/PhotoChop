@@ -7,6 +7,39 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void OuterChiselDoesNotTurnAFaintDistantPixelIntoARidge()
+    {
+        var rgba = new byte[40 * 12 * 4];
+        for (int y = 2; y < 10; y++)
+        for (int x = 2; x < 10; x++)
+            rgba[(y * 40 + x) * 4 + 3] = 255;
+        rgba[(6 * 40 + 30) * 4 + 3] = 12;
+        var layer = new Layer("art", "Art", LayerKind.Raster) { Pixels = new Pixels(40, 12, rgba),
+            Effects = [new("bevel", EffectKind.BevelEmboss, Size: 4, Alignment: StrokeAlignment.Outside,
+                Lighting: new(Technique: BevelTechnique.ChiselHard))] };
+        var image = new SkiaRenderer().Composite(new Document("test", 40, 12) { Layers = [layer] });
+        Assert.Equal(0, image.Rgba[(6 * 40 + 31) * 4 + 3]);
+        Assert.Equal(12, image.Rgba[(6 * 40 + 30) * 4 + 3]);
+    }
+
+    [Fact]
+    public void SharedLightUpdatesLinkedEffectsAndLeavesLocalAnglesAlone()
+    {
+        var engine = new CommandEngine(new SkiaRenderer());
+        engine.Execute(Command.Of("document.create", new NewArgs("test", 100, 100)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("art", "Art", LayerKind.Rectangle)));
+        var bevel = new Effect("bevel", EffectKind.BevelEmboss, Size: 4, A: 225, UseGlobalLight: true);
+        engine.Execute(Command.Of("effect.add", bevel, "art"));
+        engine.Execute(Command.Of("effect.add", new Effect("drop", EffectKind.DropShadow, A: 45, UseGlobalLight: true), "art"));
+        engine.Execute(Command.Of("effect.add", new Effect("local", EffectKind.InnerShadow, A: 90, Size: 4), "art"));
+        engine.Execute(Command.Of("effect.update", bevel with { A = 30, Contour = StyleContour.Cone }, "art"));
+        var document = engine.Current!;
+        Assert.Equal(30, document.GlobalLightAngle);
+        Assert.Equal(new double[] { 30, 210, 90 }, document.Layers[0].Effects.Select(effect => effect.A));
+        Assert.Equal(StyleContour.Cone, document.Layers[0].Effects[0].Contour);
+    }
+
+    [Fact]
     public void ChiselHardHasAFlatFacetAndChiselSoftRoundsItsShoulder()
     {
         var renderer = new SkiaRenderer();

@@ -113,8 +113,19 @@ public partial class MainWindow
             return box;
         }
         var blend = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = effect.Mode };
-        Field("Blend mode", blend);
-        var opacity = NumberField("Opacity (%)", effect.Opacity * 100, 0, 100);
+        if (!bevel) Field("Blend mode", blend);
+        TextBox OpacityField(string name, double value)
+        {
+            var control = StyleFields.Range(value * 100, 0, 100);
+            panel.Children.Add(new Label { Content = name, Target = control.Input });
+            panel.Children.Add(control.Row);
+            return control.Input;
+        }
+        var opacity = bevel ? null : OpacityField("Opacity (%)", effect.Opacity);
+        var shared = new CheckBox { Content = "Use global light", IsChecked = effect.UseGlobalLight };
+        var contour = StyleFields.Contour(effect.Contour);
+        if (bevel || shadow) panel.Children.Add(shared);
+        if (bevel || shadow || glow) Field("Contour", contour);
         var placement = new ComboBox { ItemsSource = Enum.GetValues<StrokeAlignment>(), SelectedItem = effect.Alignment };
         if (glow || bevel) Field("Position", placement);
         string[] techniques = ["Smooth", "Chisel Hard", "Chisel Soft"];
@@ -128,10 +139,41 @@ public partial class MainWindow
         }
         var size = glow || shadow || bevel ? NumberField("Size (px)", effect.Size, bevel ? 1 : .1, 100) : null;
         var angle = !glow && !pattern ? NumberField("Angle (degrees)", effect.A, -360, 360) : null;
+        shared.Checked += (_, _) =>
+        {
+            if (angle is not null) angle.Text = (active?.Engine.Current?.GlobalLightAngle ?? 225).ToString("0.###");
+        };
         var distance = shadow ? NumberField("Distance (px)", effect.B, 0, 512) :
             bevel ? NumberField("Light altitude (degrees)", effect.B, 0, 90) : null;
         var spread = glow ? NumberField("Spread (%)", effect.Spread, 0, 100) : null;
         Action refreshPreview = () => { };
+        var lighting = effect.Lighting ?? new();
+        ComboBox? highlightMode = null, shadowMode = null;
+        TextBox? highlightOpacity = null, shadowOpacity = null;
+        string highlight = lighting.Highlight, shade = lighting.Shadow;
+        if (bevel)
+        {
+            ComboBox ModeField(string title, Blend current)
+            {
+                var control = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = current };
+                Field(title, control);
+                return control;
+            }
+            Button LightColor(string name, Func<string> current, Action<string> set) => Button(name, () =>
+            {
+                if (ColorPickerDialog.Show(dialog, name, current()) is { } picked) { set(picked); refreshPreview(); }
+            });
+            panel.Children.Add(new Separator());
+            panel.Children.Add(new TextBlock { Text = "Highlight", FontWeight = FontWeights.SemiBold });
+            highlightMode = ModeField("Highlight blend mode", lighting.HighlightMode);
+            panel.Children.Add(LightColor("Highlight color…", () => highlight, color => highlight = color));
+            highlightOpacity = OpacityField("Highlight opacity (%)", lighting.HighlightOpacity * effect.Opacity);
+            panel.Children.Add(new Separator());
+            panel.Children.Add(new TextBlock { Text = "Shadow", FontWeight = FontWeights.SemiBold });
+            shadowMode = ModeField("Shadow blend mode", lighting.ShadowMode);
+            panel.Children.Add(LightColor("Shadow color…", () => shade, color => shade = color));
+            shadowOpacity = OpacityField("Shadow opacity (%)", lighting.ShadowOpacity * effect.Opacity);
+        }
         string ink = effect.Ink;
         if (glow || shadow) panel.Children.Add(Button("Choose Color…", () =>
         { if (ColorPickerDialog.Show(dialog, "Effect Color", ink) is { } color) { ink = color; refreshPreview(); } }));
@@ -189,10 +231,15 @@ public partial class MainWindow
             var edited = effect with { Ink = ink, Stops = gradient ? stops : null, Texture = chosen,
                 Mode = (Blend)blend.SelectedItem, Opacity = Read(opacity, 100) / 100,
                 Size = Read(size, effect.Size), A = Read(angle, effect.A), B = Read(distance, effect.B),
-                Spread = Read(spread, effect.Spread), Alignment = (StrokeAlignment)placement.SelectedItem };
+                Spread = Read(spread, effect.Spread), Alignment = (StrokeAlignment)placement.SelectedItem,
+                UseGlobalLight = Chop.Core.Effect.UsesLight(effect.Kind) && shared.IsChecked == true,
+                Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag };
             if (technique is not null)
-                edited = edited with { Lighting = (effect.Lighting ?? new()) with
-                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0) } };
+                edited = edited with { Lighting = lighting with
+                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0),
+                        Highlight = highlight, Shadow = shade, HighlightMode = (Blend)highlightMode!.SelectedItem,
+                        ShadowMode = (Blend)shadowMode!.SelectedItem, HighlightOpacity = Read(highlightOpacity, 100) / 100,
+                        ShadowOpacity = Read(shadowOpacity, 100) / 100 } };
             return edited;
         }
         var engine = active?.Engine;
@@ -214,6 +261,9 @@ public partial class MainWindow
         };
         foreach (var control in panel.Children.OfType<TextBox>()) control.TextChanged += (_, _) => refreshPreview();
         foreach (var control in panel.Children.OfType<ComboBox>()) control.SelectionChanged += (_, _) => refreshPreview();
+        foreach (var field in new[] { opacity, highlightOpacity, shadowOpacity })
+            if (field is not null) field.TextChanged += (_, _) => refreshPreview();
+        shared.Click += (_, _) => refreshPreview();
         if (angle is not null) angle.TextChanged += (_, _) => refreshPreview();
         live.Click += (_, _) => refreshPreview();
         dialog.Loaded += (_, _) => refreshPreview();

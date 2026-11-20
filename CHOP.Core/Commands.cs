@@ -238,6 +238,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         "layer.text" => "Edit text layer",
         "path.break" => "Break Path",
         "effect.add" => $"Add {EffectLabel(command.Read<Effect>().Kind)}",
+        "document.globalLight" => "Set Global Light",
         "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
         "layer.scale" => "Scale",
         "layer.move" => "Move layer",
@@ -518,6 +519,23 @@ public sealed class CommandEngine(IRasterBackend backend)
             if (checkLock) EnsureEditable(layers, layer.Id);
             return With(Update(layers, layer.Id, edit));
         }
+        static Document SetLight(Document target, double angle)
+        {
+            Range(angle, 0, 360);
+            angle %= 360;
+            if (target.GlobalLightAngle == angle) return target;
+            Layer UpdateLight(Layer layer)
+            {
+                var effects = layer.Effects.Select(effect => effect.UseGlobalLight && Effect.UsesLight(effect.Kind)
+                    ? effect with { A = Effect.LightAngle(effect.Kind, angle) } : effect).ToArray();
+                var children = layer.Children.Select(UpdateLight).ToArray();
+                return effects.SequenceEqual(layer.Effects) && children.SequenceEqual(layer.Children, ReferenceEqualityComparer.Instance)
+                    ? layer : layer with { Effects = effects, Children = children };
+            }
+            return target with { GlobalLightAngle = angle, Layers = target.Layers.Select(UpdateLight).ToArray() };
+        }
+        static Document UpdateLightForEffect(Document target, Effect effect) => effect.UseGlobalLight && Effect.UsesLight(effect.Kind)
+            ? SetLight(target, Effect.LightAngle(effect.Kind, effect.A)) : target;
         void NewId(string id)
         {
             CheckId(id);
@@ -1132,6 +1150,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 NewId(flat);
                 RequireEditableSubtree(layers, layers);
                 return With([new(flat, "Flattened", LayerKind.Raster) { Pixels = backend.CompositeForStorage(doc) }]);
+            case "document.globalLight":
+                return SetLight(doc, command.Read<double>());
             case "effect.add":
                 var effect = command.Read<Effect>();
                 CheckEffect(effect);
@@ -1139,8 +1159,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                     throw new InvalidDataException("The Fill effect requires a Path layer.");
                 if (Wanted().Kind == LayerKind.Effect && effect.Kind == EffectKind.Transform)
                     throw new InvalidDataException("Effect layers do not have transforms.");
-                return Edit(layer => layer.Effects.Any(item => item.Id == effect.Id)
-                    ? throw new InvalidDataException("Effect ID already exists.") : layer with { Effects = [.. layer.Effects, effect] });
+                return UpdateLightForEffect(Edit(layer => layer.Effects.Any(item => item.Id == effect.Id)
+                    ? throw new InvalidDataException("Effect ID already exists.") : layer with { Effects = [.. layer.Effects, effect] }), effect);
             case "effect.update":
                 var update = command.Read<Effect>();
                 CheckEffect(update);
@@ -1148,8 +1168,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                     throw new InvalidDataException("The Fill effect requires a Path layer.");
                 if (Wanted().Kind == LayerKind.Effect && update.Kind == EffectKind.Transform)
                     throw new InvalidDataException("Effect layers do not have transforms.");
-                return Edit(layer => layer with { Effects = UpdateEffects(layer.Effects, update.Id, list =>
-                    list[list.FindIndex(item => item.Id == update.Id)] = update) });
+                return UpdateLightForEffect(Edit(layer => layer with { Effects = UpdateEffects(layer.Effects, update.Id, list =>
+                    list[list.FindIndex(item => item.Id == update.Id)] = update) }), update);
             case "effect.remove":
                 var id = command.Read<string>();
                 return Edit(layer => layer with { Effects = UpdateEffects(layer.Effects, id, list =>
@@ -1551,6 +1571,8 @@ public sealed class CommandEngine(IRasterBackend backend)
 
     internal static void CheckEffect(Effect effect)
     {
+        if (!Enum.IsDefined(effect.Contour) || effect.UseGlobalLight && !Effect.UsesLight(effect.Kind))
+            throw new InvalidDataException("Invalid contour or global light setting.");
         if (effect is null || !Enum.IsDefined(effect.Kind)) throw new InvalidDataException("Unknown effect.");
         CheckId(effect.Id);
         switch (effect.Kind)

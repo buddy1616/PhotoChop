@@ -499,21 +499,27 @@ public partial class MainWindow
             properties.Children.Add(pass);
         }
 
-        properties.Children.Add(Button($"Fill Opacity {layer.FillOpacity:P0}…", () =>
+        void AddOpacity(string label, string command, double value)
         {
-            var values = Form("Fill Opacity", ("Fill opacity (%)", (layer.FillOpacity * 100).ToString("0.###")));
-            if (values is not null) Guard(() => RunLayer("layer.fillOpacity", Number(values[0]) / 100));
-        }));
-
-        Caption($"Opacity  {layer.Opacity:P0}");
-        var opacity = new Slider { Minimum = 0, Maximum = 1, Value = layer.Opacity, TickFrequency = .01, IsSnapToTickEnabled = true };
-        opacity.AddHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler((_, _) => RunLayer("layer.opacity", opacity.Value)));
-        properties.Children.Add(opacity);
-        properties.Children.Add(Button("Set opacity…", () =>
-        {
-            var values = Form("Layer opacity", ("Opacity (0–100)", (layer.Opacity * 100).ToString()));
-            if (values is not null) Guard(() => RunLayer("layer.opacity", Number(values[0]) / 100));
-        }));
+            Caption(label);
+            var control = StyleFields.Range(value * 100, 0, 100);
+            void Save()
+            {
+                var selected = ActiveLayer();
+                if (selected?.Id != layer.Id) return;
+                double current = command == "layer.opacity" ? selected.Opacity : selected.FillOpacity;
+                if (Math.Abs(control.Slider.Value / 100 - current) > 1e-8)
+                    RunLayer(command, control.Slider.Value / 100);
+            }
+            control.Slider.AddHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler((_, _) => Save()));
+            control.Slider.PreviewKeyUp += (_, _) => Save();
+            control.Slider.PreviewMouseLeftButtonUp += (_, _) => Save();
+            control.Input.LostKeyboardFocus += (_, _) => Save();
+            control.Input.AddHandler(UIElement.PreviewMouseWheelEvent, new System.Windows.Input.MouseWheelEventHandler((_, _) => Save()), true);
+            properties.Children.Add(control.Row);
+        }
+        AddOpacity("Fill opacity (%)", "layer.fillOpacity", layer.FillOpacity);
+        AddOpacity("Opacity (%)", "layer.opacity", layer.Opacity);
         if (effectEditor is not null) PopulateEffects(layer);
     }
 
@@ -668,8 +674,10 @@ public partial class MainWindow
             B: kind == EffectKind.BevelEmboss ? 30 : kind is EffectKind.DropShadow or EffectKind.InnerShadow ? 5 : 0, Spatial: kind == EffectKind.Transform ? new() : null,
             Ink: kind is EffectKind.Stroke or EffectKind.PathFill or EffectKind.ColorOverlay ? foreground : "#FF000000", Size: kind is EffectKind.DropShadow or EffectKind.InnerShadow or EffectKind.BevelEmboss or EffectKind.Glow ? 4 : 0,
             Opacity: kind == EffectKind.DropShadow ? .7 : 1);
+        if (Chop.Core.Effect.UsesLight(kind))
+            effect = effect with { UseGlobalLight = true, A = Chop.Core.Effect.LightAngle(kind, active?.Engine.Current?.GlobalLightAngle ?? 225) };
         if (kind == EffectKind.Glow) effect = effect with { Ink = "#FFFFFFFF", Mode = Blend.Screen };
-        if (kind == EffectKind.BevelEmboss) effect = effect with { Alignment = StrokeAlignment.Inside };
+        if (kind == EffectKind.BevelEmboss) effect = effect with { Alignment = StrokeAlignment.Inside, Lighting = new(HighlightMode: Blend.Screen, ShadowMode: Blend.Multiply) };
         if (EffectForm(effect) is { } configured) RunLayer("effect.add", configured);
     }
 
