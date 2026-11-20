@@ -7,6 +7,45 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void ImportedCmykColorOverlayKeepsDarkTextureFromClippingToOneHue()
+    {
+        var renderer = new SkiaRenderer();
+        var neutral = new Pixels(2, 1, [65, 65, 65, 255, 100, 100, 100, 255]);
+        var effect = new Effect("tint", EffectKind.ColorOverlay, Mode: Blend.Color, Ink: "#FFF8A022",
+            CmykInk: new(.0039, .4314, .9725, 0));
+        var layer = new Layer("metal", "Metal", LayerKind.Raster) { Pixels = neutral, Effects = [effect] };
+        byte[] result = renderer.Composite(new Document("test", 2, 1) { Layers = [layer] }).Rgba;
+        Assert.True(result[0] > result[1] && result[1] > result[2]);
+        Assert.True(result[2] > 0 && result[6] > result[2]);
+    }
+
+    [Fact]
+    public void DeepRoundBevelGraduallyTurnsAwayFromTheLight()
+    {
+        var renderer = new SkiaRenderer();
+        var bevel = new Effect("bevel", EffectKind.BevelEmboss, Size: 26, Alignment: StrokeAlignment.Inside,
+            Lighting: new(Depth: 10, Technique: BevelTechnique.ChiselHard));
+        var disk = new Layer("art", "Art", LayerKind.Ellipse)
+            { Width = 120, Height = 120, Color = "#FF808080", Effects = [bevel] };
+        var rendered = renderer.Composite(new Document("test", 120, 120) { Layers = [disk] });
+        double ShadeAt(double degrees)
+        {
+            double sum = 0;
+            double a = degrees * Math.PI / 180;
+            for (int radius = 43; radius <= 47; radius++)
+            {
+                int x = (int)Math.Round(59.5 + radius * Math.Cos(a)), y = (int)Math.Round(59.5 + radius * Math.Sin(a));
+                sum += rendered.Rgba[(y * 120 + x) * 4];
+            }
+            return sum / 5;
+        }
+
+        Assert.True(ShadeAt(0) > ShadeAt(45) + 10);
+        Assert.True(ShadeAt(45) > ShadeAt(75) + 10);
+        Assert.InRange(ShadeAt(90), 121, 135);
+    }
+
+    [Fact]
     public void NormalCmykLayersCompositeTheirInkChannelsBeforeDisplayConversion()
     {
         var settings = new ColorSettings(ChannelColorMode.Cmyk, ChannelDepth.Bit8);

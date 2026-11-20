@@ -91,19 +91,24 @@ public sealed partial class SkiaRenderer
             }
             else if (bevel)
             {
-                double shapeSlope = ((ShapeAt(x + 1, y) - ShapeAt(x - 1, y)) * dx +
-                    (ShapeAt(x, y + 1) - ShapeAt(x, y - 1)) * dy) * effect.Size * (lighting?.Depth ?? 1);
-                double textureSlope = 0;
+                double depth = effect.Size * (lighting?.Depth ?? 1) / 2;
+                double gx = (ShapeAt(x + 1, y) - ShapeAt(x - 1, y)) * depth;
+                double gy = (ShapeAt(x, y + 1) - ShapeAt(x, y - 1)) * depth;
                 if (texture is { Depth: > 0 })
                 {
                     // Texture depth is independent of bevel depth and width.
                     int sx = x + shapeX, sy = y + shapeY;
-                    textureSlope = ((TextureHeight(sx + 1, sy) - TextureHeight(sx - 1, sy)) * dx +
-                        (TextureHeight(sx, sy + 1) - TextureHeight(sx, sy - 1)) * dy) * texture.Depth * ShapeAlpha(x, y);
+                    double relief = texture.Depth * ShapeAlpha(x, y) / 2;
+                    gx += (TextureHeight(sx + 1, sy) - TextureHeight(sx - 1, sy)) * relief;
+                    gy += (TextureHeight(sx, sy + 1) - TextureHeight(sx, sy - 1)) * relief;
                 }
-                double light = -(shapeSlope + textureSlope) * Math.Cos(altitude) * (lighting?.Down == true ? -1 : 1);
+                // Normalize the surface normal before projecting onto the light. Doing this after
+                // projection clips most angles to full intensity as depth increases.
+                double normalLength = Math.Sqrt(1 + gx * gx + gy * gy);
+                double light = -(gx * dx + gy * dy) * Math.Cos(altitude) / normalLength *
+                    (lighting?.Down == true ? -1 : 1);
                 double magnitude = Math.Abs(light);
-                double strength = ContourCurve.Sample(effect.Contour, magnitude / Math.Sqrt(1 + magnitude * magnitude));
+                double strength = ContourCurve.Sample(effect.Contour, magnitude);
                 weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength * ShapeAlpha(x, y);
                 color = light < 0 ? shade : highlight;
                 if (lighting is not null)
