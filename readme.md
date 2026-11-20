@@ -49,6 +49,14 @@ Open [the editable sample](examples/phase-one.chop) from the File menu to try te
 | Middle drag or Space + left drag | Pan |
 | V / B / E / M / I / T | Move / Brush / Eraser / Selection / Eyedropper / Text |
 
+## Photoshop PSD import
+
+**File → Import → Photoshop PSD** opens a PSD as a new editable document. **Photoshop PSD (Flattened)** reads the saved composite for appearance fidelity. The flattened option requires a PSD saved with a composite. Save the imported document as a `.chop` project.
+
+The importer preserves raster layers and groups, clipping, raster and vector masks, common Photoshop blend modes, resolution, guides, named extra channels, and native RGB, Grayscale, or CMYK samples at supported depths. It stores the source ICC profile for preservation. Photoshop text, Smart Objects, and vector shape content can use saved raster data. Unsupported adjustment layers, styles, or blend behavior are reported in import notes. The standard PSD reader supports raw, PackBits RLE, ZIP, and ZIP prediction. PSB and Photoshop multichannel mode are outside the supported format.
+
+Format references include the [Adobe Photoshop File Format Specification](https://www.adobe.com/devnet-apps/photoshop/fileformatashtml/) and the [psd-tools PSD structures](https://github.com/psd-tools/psd-tools/tree/main/src/psd_tools/psd).
+
 ## CLI and command replay
 
 Export the active document's recorded commands from **Command Log → Export script**. Use **Copy selected** to copy the commands for selected rows in execution order. A complete recording includes the initial document and its inputs, including imported PNGs. A selected range or a recording with gaps needs the corresponding starting state. Clear display hides earlier log entries. Export still includes those entries. **Export script with outputs** includes Save and Export as replayable commands and replaces their paths with required parameters named `output1`, `output2`, and so on. **Export script** records the edits without output commands.
@@ -64,6 +72,7 @@ The script is a JSON array of command objects with `name`, optional `target` (a 
 
 | Action | Command and arguments |
 | --- | --- |
+| Import a Photoshop document | `document.importPsd` with `{ "id":"art", "path":"source.psd" }`. Set `flattened` to `true` to import the saved composite. Use base64 `data` in place of `path` to embed the PSD. |
 | Import PNG, JPEG, or WebP as a document | `document.importImage` with `{ "id":"photo", "name":"Photo", "path":"input.webp" }` |
 | Import an image as a layer | `layer.importImage` with the same arguments and optional `parent` |
 | Paste an image file | `layer.pastePixels` with `{ "id":"paste", "name":"Pasted", "path":"input.png", "x":10, "y":20 }` |

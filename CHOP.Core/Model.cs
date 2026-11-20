@@ -6,7 +6,11 @@ namespace Chop.Core;
 public enum LayerKind { Raster, Text, Rectangle, Ellipse, Group, Fill, Effect, Chop, Path }
 public sealed record LayerBatch(string[] Ids, ReorderArgs? Order = null, string[]? CopyIds = null);
 
-public enum Blend { Normal, Multiply, Screen, Overlay, Add }
+public enum Blend
+{
+    Normal, Multiply, Screen, Overlay, Add, Darken, Lighten, ColorBurn, ColorDodge, HardLight, SoftLight,
+    Difference, Exclusion, Hue, Saturation, Color, Luminosity
+}
 public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush, PathFill, ColorOverlay }
 
 public readonly record struct PointD(double X, double Y);
@@ -47,6 +51,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public bool Locked { get; init; }
     public double Opacity { get; init; } = 1;
     public Blend Blend { get; init; }
+    public bool PassThrough { get; init; }
     [JsonIgnore] public Pixels? Pixels { get; init; }
     [JsonIgnore] public AlphaMask? Mask { get; init; }
     [JsonIgnore] public PixelShift[] PixelShifts { get; init; } = [];
@@ -94,6 +99,7 @@ public sealed record Document(string Id, int Width, int Height)
 {
     public double PixelsPerInch { get; init; } = 72;
     public string ColorSpace { get; init; } = "sRGB";
+    [JsonIgnore] public byte[]? IccProfile { get; init; }
     public ColorSettings Color { get; init; } = new();
     [JsonIgnore] public ChannelPlane[] Channels { get; init; } = [];
     public Dictionary<string, string> Metadata { get; init; } = [];

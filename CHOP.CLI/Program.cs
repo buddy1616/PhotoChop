@@ -18,7 +18,13 @@ try
         parameters.Add(parts[0], parts[1]);
     }
     using var script = File.OpenRead(args[1]);
-    Scripts.Run(new CommandEngine(new SkiaRenderer()), script, parameters);
+    var engine = new CommandEngine(new SkiaRenderer());
+    engine.Executed += entry =>
+    {
+        if (!entry.Success || entry.Command.Name != "document.importPsd") return;
+        foreach (var warning in engine.LastImportWarnings) Console.Error.WriteLine(warning);
+    };
+    Scripts.Run(engine, script, parameters);
     return 0;
 }
 catch (Exception error)

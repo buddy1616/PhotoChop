@@ -65,15 +65,6 @@ public sealed partial class SkiaRenderer
         canvas.DrawImage(image, frame.X, frame.Y, new SKSamplingOptions(SKFilterMode.Linear), paint);
     }
 
-    private static double NativeBlend(double backdrop, double foreground, Blend mode) => mode switch
-    {
-        Blend.Multiply => backdrop * foreground,
-        Blend.Screen => 1 - (1 - backdrop) * (1 - foreground),
-        Blend.Overlay => backdrop <= .5 ? 2 * backdrop * foreground : 1 - 2 * (1 - backdrop) * (1 - foreground),
-        Blend.Add => Math.Min(1, backdrop + foreground),
-        _ => foreground
-    };
-
     private static void RestoreCoverage(SKCanvas canvas, SKBitmap surface, Pixels backdrop, Area region,
         ColorSettings precision, bool opaque)
     {

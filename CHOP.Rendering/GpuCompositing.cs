@@ -68,10 +68,11 @@ public sealed partial class SkiaRenderer
                     return;
                 }
                 using var paint = new SKPaint { Color = SKColors.White.WithAlpha(Byte(layer.Opacity)) };
-                canvas.SaveLayer(paint);
+                bool isolate = !IsPassThroughGroup(layer);
+                if (isolate) canvas.SaveLayer(paint);
                 var world = SKMatrix.Concat(parent, LayerMatrix(layer, !layer.TransformsEnabled));
                 foreach (var child in layer.Children) DrawLayer(child, world);
-                canvas.Restore();
+                if (isolate) canvas.Restore();
             }
 
             void DrawGpuFrame(SKCanvas target, Frame frame, SKPaint? paint) =>

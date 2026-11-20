@@ -116,8 +116,15 @@ public sealed partial class SkiaRenderer : IRasterBackend
     {
         foreach (var layer in layers)
         {
+            if (!layer.Visible || layer.Opacity == 0) continue;
+            if (IsPassThroughGroup(layer))
+            {
+                var world = SKMatrix.Concat(parent, LayerMatrix(layer, !layer.TransformsEnabled));
+                DrawTier(surface, canvas, layer.Children, region, world, precision);
+                continue;
+            }
             if (layer.Kind != LayerKind.Effect) { Draw(canvas, layer, region, parent, precision: precision); continue; }
-            if (!layer.Visible || !layer.TransformsEnabled || layer.Opacity == 0) continue;
+            if (!layer.TransformsEnabled) continue;
             var mode = CommandEngine.EffectiveBlend(layer);
             if (mode == Blend.Normal && !layer.Effects.Any(ProcessesPixels)) continue;
             canvas.Flush();
@@ -150,41 +157,29 @@ public sealed partial class SkiaRenderer : IRasterBackend
                     var backdrop = PixelBuffer.Get(original, dst / 4);
                     var foreground = inside ? PixelBuffer.Get(evaluated.Pixels, src / 4) : default;
                     double added = foreground.A * mix, kept = backdrop.A * (1 - mix), total = added + kept;
-                    double Channel(double b, double f) =>
-                        (b * kept + (backdrop.A == 0 ? f : NativeBlend(b, f, mode)) * added) / total;
+                    var blended = backdrop.A == 0 ? foreground : BlendRgb(backdrop, foreground, mode);
+                    double Channel(double b, double f) => (b * kept + f * added) / total;
                     working.Set(dst / 4, total == 0 ? default :
-                        new(Channel(backdrop.R, foreground.R), Channel(backdrop.G, foreground.G), Channel(backdrop.B, foreground.B), total));
+                        new(Channel(backdrop.R, blended.R), Channel(backdrop.G, blended.G), Channel(backdrop.B, blended.B), total));
                     continue;
                 }
                 var adjusted = evaluated.Pixels.Rgba;
                 double addition = inside ? adjusted[src + 3] / 255d * mix : 0;
                 double retained = bytes[dst + 3] / 255d * (1 - mix);
                 double alpha = addition + retained;
-                for (int c = 0; c < 3; c++)
-                {
-                    byte backdrop = bytes[dst + c], foreground = adjusted[src + c];
-                    if (inside && bytes[dst + 3] != 0) foreground = BlendChannel(backdrop, foreground, mode);
-                    bytes[dst + c] = alpha == 0 ? (byte)0 : Mix(backdrop, foreground, retained, addition, alpha);
-                }
+                var sourceColor = PixelBuffer.Get(evaluated.Pixels, src / 4);
+                var blendedColor = inside && bytes[dst + 3] != 0
+                    ? BlendRgb(PixelBuffer.Get(original, dst / 4), sourceColor, mode)
+                    : sourceColor;
+                bytes[dst] = alpha == 0 ? (byte)0 : Mix(bytes[dst], Byte(blendedColor.R), retained, addition, alpha);
+                bytes[dst + 1] = alpha == 0 ? (byte)0 : Mix(bytes[dst + 1], Byte(blendedColor.G), retained, addition, alpha);
+                bytes[dst + 2] = alpha == 0 ? (byte)0 : Mix(bytes[dst + 2], Byte(blendedColor.B), retained, addition, alpha);
                 bytes[dst + 3] = Byte(alpha);
             }
             using var result = RasterBitmap(working?.Finish() ?? original, precision);
             using var paint = new SKPaint { BlendMode = SKBlendMode.Src };
             canvas.DrawBitmap(result, region.X, region.Y, paint);
         }
-    }
-
-    private static byte BlendChannel(byte backdrop, byte foreground, Blend mode)
-    {
-        double a = backdrop / 255d, b = foreground / 255d;
-        return Byte(mode switch
-        {
-            Blend.Multiply => a * b,
-            Blend.Screen => 1 - (1 - a) * (1 - b),
-            Blend.Overlay => a <= .5 ? 2 * a * b : 1 - 2 * (1 - a) * (1 - b),
-            Blend.Add => a + b,
-            _ => b
-        });
     }
 
     private void Draw(SKCanvas canvas, Layer layer, Area region, SKMatrix parent,
@@ -200,11 +195,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         using var paint = new SKPaint
         {
             Color = SKColors.White.WithAlpha(Byte(layer.Opacity)),
-            BlendMode = blend switch
-            {
-                Blend.Multiply => SKBlendMode.Multiply, Blend.Screen => SKBlendMode.Screen,
-                Blend.Overlay => SKBlendMode.Overlay, _ => SKBlendMode.SrcOver
-            }
+            BlendMode = ToSkiaBlend(blend)
         };
         if (precision is not null) paint.ColorF = new SKColorF(1, 1, 1, (float)layer.Opacity);
         if (blender is not null) paint.Blender = blender;
@@ -624,7 +615,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         var buffer = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
         var ink = effect.Kind == EffectKind.ColorOverlay ? PixelValue.FromArgb(Format.Color(effect.Ink)) : default;
         double amount = ink.A * effect.Opacity;
-        double Overlay(double original, double color) => original + (NativeBlend(original, color, effect.Mode) - original) * amount;
+        static double MixOverlay(double original, double color, double amount) => original + (color - original) * amount;
         float hueR = 0, hueG = 0, hueB = 0;
         if (effect.Kind == EffectKind.HueSaturation)
         {
@@ -640,7 +631,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             switch (effect.Kind)
             {
                 case EffectKind.ColorOverlay:
-                    (r, g, b) = (Overlay(r, ink.R), Overlay(g, ink.G), Overlay(b, ink.B));
+                    var blended = BlendRgb(sample, ink, effect.Mode);
+                    (r, g, b) = (MixOverlay(r, blended.R, amount), MixOverlay(g, blended.G, amount), MixOverlay(b, blended.B, amount));
                     break;
                 case EffectKind.BrightnessContrast:
                     double contrast = (1 + effect.B) / Math.Max(0.01, 1 - effect.B);
@@ -710,8 +702,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         canvas.Clear(SKColors.Transparent);
         canvas.Translate(-x, -y);
         DrawNativeFrame(canvas, bottom, null);
-        using var paint = new SKPaint { BlendMode = mode switch { Blend.Multiply => SKBlendMode.Multiply,
-            Blend.Screen => SKBlendMode.Screen, Blend.Overlay => SKBlendMode.Overlay, Blend.Add => SKBlendMode.Plus, _ => SKBlendMode.SrcOver } };
+        using var paint = new SKPaint { BlendMode = ToSkiaBlend(mode) };
         DrawNativeFrame(canvas, top, paint);
         canvas.Flush();
         return new(Unpremultiply(output, precision), x, y);

@@ -21,6 +21,7 @@ public partial class MainWindow : Window
         public DocumentViewport Viewport { get; } = new();
         public EditorCanvas View => Viewport.Canvas;
         public LayoutDocument? Tab { get; set; }
+        public string? InitialTitle { get; set; }
         public string? MaskOnly { get; set; }
         public string? VectorMaskTarget { get; set; }
         public bool VectorMaskOnly { get; set; }
@@ -40,7 +41,7 @@ public partial class MainWindow : Window
         public System.Windows.Media.Imaging.BitmapSource? Frame { get; set; }
         public Document? Rendered { get; set; }
         public bool NeedsFit { get; set; } = true;
-        public string Title => (Engine.Path is { } path ? Path.GetFileName(path) : "Untitled") + (Engine.Dirty ? " *" : "");
+        public string Title => (Engine.Path is { } path ? Path.GetFileName(path) : InitialTitle ?? "Untitled") + (Engine.Dirty ? " *" : "");
     }
 
     private sealed class Preferences
@@ -328,6 +329,8 @@ public partial class MainWindow : Window
         var import = new MenuItem { Header = "_Import" };
         file.Items.Add(import);
         Item(import, "Image…", ImportImage);
+        Item(import, "Photoshop PSD…", () => ImportPsd(false));
+        Item(import, "Photoshop PSD (Flattened)…", () => ImportPsd(true));
         var export = new MenuItem { Header = "_Export" };
         file.Items.Add(export);
         Item(export, "PNG", ExportPng, "Ctrl+Shift+E");

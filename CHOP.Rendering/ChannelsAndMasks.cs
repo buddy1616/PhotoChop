@@ -107,11 +107,7 @@ public sealed partial class SkiaRenderer
         using var blender = mode == Blend.Add ? addBlend.Value.ToBlender() : null;
         using var paint = new SKPaint
         {
-            BlendMode = mode switch
-            {
-                Blend.Multiply => SKBlendMode.Multiply, Blend.Screen => SKBlendMode.Screen,
-                Blend.Overlay => SKBlendMode.Overlay, _ => SKBlendMode.SrcOver
-            }
+            BlendMode = ToSkiaBlend(mode)
         };
         if (blender is not null) paint.Blender = blender;
         destination.DrawBitmap(corrected ?? surface, region.X, region.Y, paint);
@@ -132,16 +128,12 @@ public sealed partial class SkiaRenderer
     }
 
     private static bool ActiveVectorMask(VectorMask? mask) =>
-        mask is { Enabled: true } && mask.Contours.Any(contour => contour.Closed);
+        mask is { Enabled: true } && (mask.Operations is not null || mask.Contours.Any(contour => contour.Closed));
 
     private static SKBitmap? VectorCoverage(VectorMask? mask, Area region, SKMatrix world)
     {
         if (!ActiveVectorMask(mask)) return null;
-        using var path = new SKPath
-        {
-            FillType = mask!.Inverted ? SKPathFillType.InverseEvenOdd : SKPathFillType.EvenOdd
-        };
-        foreach (var contour in mask.Contours.Where(contour => contour.Closed)) AddContour(path, contour);
+        using var path = ComposeVectorMask(mask!);
         var bitmap = Surface(region.Width, region.Height);
         using var canvas = new SKCanvas(bitmap);
         using var paint = new SKPaint { Color = SKColors.White, IsAntialias = true };
@@ -151,6 +143,58 @@ public sealed partial class SkiaRenderer
         canvas.DrawPath(path, paint);
         canvas.Flush();
         return bitmap;
+    }
+
+    private static SKPath ComposeVectorMask(VectorMask mask)
+    {
+        var composed = new SKPath { FillType = SKPathFillType.EvenOdd };
+        if (mask.Operations is not { } operations || operations.Length != mask.Contours.Length)
+        {
+            foreach (var contour in mask.Contours)
+                if (contour.Closed) AddContour(composed, contour);
+        }
+        else
+        {
+            bool first = true;
+            for (int position = 0; position < operations.Length;)
+            {
+                var op = operations[position];
+                using var component = new SKPath { FillType = SKPathFillType.EvenOdd };
+                do
+                {
+                    var contour = mask.Contours[position++];
+                    if (contour.Closed) AddContour(component, contour);
+                } while (position < operations.Length && operations[position] == VectorMaskOperation.Continue);
+                if (component.IsEmpty) continue;
+
+                // The first subtract or intersect operates on the whole canvas.
+                if (first && (op is VectorMaskOperation.Subtract or VectorMaskOperation.Intersect))
+                    composed.FillType = SKPathFillType.InverseEvenOdd;
+                var next = composed.Op(component, op switch
+                {
+                    VectorMaskOperation.Exclude => SKPathOp.Xor,
+                    VectorMaskOperation.Subtract => SKPathOp.Difference,
+                    VectorMaskOperation.Intersect => SKPathOp.Intersect,
+                    _ => SKPathOp.Union
+                });
+                if (next is not null)
+                {
+                    composed.Dispose();
+                    composed = next;
+                }
+                first = false;
+            }
+            if (first && mask.InitialFill) composed.FillType = SKPathFillType.InverseEvenOdd;
+        }
+        if (mask.Inverted)
+            composed.FillType = composed.FillType switch
+            {
+                SKPathFillType.Winding => SKPathFillType.InverseWinding,
+                SKPathFillType.InverseWinding => SKPathFillType.Winding,
+                SKPathFillType.InverseEvenOdd => SKPathFillType.EvenOdd,
+                _ => SKPathFillType.InverseEvenOdd
+            };
+        return composed;
     }
 
     private static void AddContour(SKPath builder, PathContour contour)
