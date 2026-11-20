@@ -25,6 +25,95 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void ResetRotationAndResetFlipKeepTheOtherComponentAcrossSaveAndOpen()
+    {
+        var engine = NewEngine(8, 4);
+        Layer(engine, new("pixel", "Red", LayerKind.Rectangle,
+            Color: "#FFFF0000", Width: 1, Height: 1, Transform: new(2, 0)));
+        engine.Execute(Command.Of("document.orient", OrientationAction.FlipVertical));
+        byte[] flippedOnly = Composite(engine);
+        engine.Execute(Command.Of("document.orient", OrientationAction.Clockwise));
+        string path = Path.Combine(folder, "orientation.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        engine.Execute(Command.Of("document.open", new OpenArgs(path, File.ReadAllBytes(path))));
+        engine.Execute(Command.Of("document.orient", OrientationAction.ResetRotation));
+        Assert.Equal(8, engine.Current!.Width);
+        Assert.Equal(4, engine.Current.Height);
+        Assert.Equal(flippedOnly, Composite(engine));
+        engine.Execute(Command.Of("document.orient", OrientationAction.Clockwise));
+        engine.Execute(Command.Of("document.orient", OrientationAction.ResetFlip));
+        var rotatedOnly = NewEngine(8, 4);
+        Layer(rotatedOnly, new("pixel", "Red", LayerKind.Rectangle,
+            Color: "#FFFF0000", Width: 1, Height: 1, Transform: new(2, 0)));
+        rotatedOnly.Execute(Command.Of("document.orient", OrientationAction.Clockwise));
+        Assert.Equal(4, engine.Current.Width);
+        Assert.Equal(8, engine.Current.Height);
+        Assert.Equal(Composite(rotatedOnly), Composite(engine));
+    }
+
+    [Fact]
+    public void LayerBatchPreservesStackOrderAndTreatsSelectedGroupAsOneRoot()
+    {
+        var engine = NewEngine();
+        Layer(engine, new("destination", "Destination", LayerKind.Group));
+        Layer(engine, new("a", "A", LayerKind.Rectangle));
+        Layer(engine, new("group", "Group", LayerKind.Group));
+        Layer(engine, new("child", "Child", LayerKind.Rectangle, Parent: "group"));
+        Layer(engine, new("b", "B", LayerKind.Rectangle));
+        var ids = new[] { "b", "child", "group", "a" };
+        engine.Execute(Command.Of("layers.move", new LayerBatch(ids, new("destination", null))));
+        var destination = Assert.Single(engine.Current!.Layers);
+        Assert.Equal(new[] { "a", "group", "b" }, destination.Children.Select(layer => layer.Id));
+        Assert.Equal("child", Assert.Single(destination.Children[1].Children).Id);
+        engine.Execute(Command.Of("layers.duplicate", new LayerBatch(ids, CopyIds: ["copyA", "copyGroup", "copyB"])));
+        destination = Assert.Single(engine.Current!.Layers);
+        Assert.Equal(new[] { "copyA", "a", "copyGroup", "group", "copyB", "b" },
+            destination.Children.Select(layer => layer.Id));
+        Assert.Equal("copyGroup-1", Assert.Single(destination.Children[2].Children).Id);
+        engine.Execute(Command.Of("layers.delete", new LayerBatch(ids)));
+        Assert.Equal(new[] { "copyA", "copyGroup", "copyB" },
+            Assert.Single(engine.Current!.Layers).Children.Select(layer => layer.Id));
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Equal(6, Assert.Single(engine.Current!.Layers).Children.Length);
+    }
+
+    [Fact]
+    public void ExportsSvgVectorsAndFallsBackToAnEmbeddedCompositeForMasks()
+    {
+        var engine = NewEngine();
+        Layer(engine, new("box", "Box & colors", LayerKind.Rectangle, Width: 4, Height: 3));
+        engine.Execute(Command.Of("layer.createPath", new CreatePathArgs("curve", "Curve",
+            [new([new(new(5, 5), Outgoing: new(6, 10)), new(new(14, 12), Incoming: new(12, 5))])])));
+        engine.Execute(Command.Of("effect.add", new Effect("stroke", EffectKind.Stroke, A: 2,
+            Alignment: StrokeAlignment.Center), "curve"));
+        System.Xml.Linq.XNamespace ns = "http://www.w3.org/2000/svg";
+        var svg = System.Xml.Linq.XDocument.Load(new MemoryStream(renderer.EncodeSvg(engine.Current!)));
+        Assert.Single(svg.Descendants(ns + "rect"));
+        Assert.Contains(" C ", (string)Assert.Single(svg.Descendants(ns + "path")).Attribute("d")!);
+        Assert.Empty(svg.Descendants(ns + "image"));
+
+        engine.Execute(Command.Of("mask.add", 0, "box"));
+        svg = System.Xml.Linq.XDocument.Load(new MemoryStream(renderer.EncodeSvg(engine.Current!)));
+        var uri = (string)Assert.Single(svg.Descendants(ns + "image")).Attribute("href")!;
+        Assert.StartsWith("data:image/png;base64,", uri);
+        Assert.Equal(Composite(engine), renderer.DecodePng(Convert.FromBase64String(uri.Split(',')[1])).Rgba);
+    }
+
+    [Fact]
+    public void JpegUsesWhiteMatteAndWebpPreservesTransparency()
+    {
+        var engine = NewEngine(16, 16);
+        Layer(engine, new("shape", "Shape", LayerKind.Rectangle, Width: 6, Height: 6, Color: "#FFFF0000"));
+        var jpeg = renderer.DecodeImage(renderer.EncodeImage(engine.Current!, SkiaSharp.SKEncodedImageFormat.Jpeg));
+        Assert.Equal((16, 16), (jpeg.Width, jpeg.Height));
+        Assert.Equal(255, jpeg.Rgba[^1]);
+        Assert.InRange(jpeg.Rgba[^2], 248, 255);
+        var webp = renderer.DecodeImage(renderer.EncodeImage(engine.Current!, SkiaSharp.SKEncodedImageFormat.Webp));
+        Assert.Equal(0, webp.Rgba[^1]);
+        Assert.Equal(255, webp.Rgba[3]);
+    }
+
+    [Fact]
     public void VerticalImageFlipRendersAndBakesNestedGroups()
     {
         var engine = NewEngine(8, 8);

@@ -8,7 +8,7 @@ using SkiaSharp;
 namespace Chop.Rendering;
 
 /// <summary>CPU renderer with immutable input snapshots and a weakly keyed operation cache.</summary>
-public sealed class SkiaRenderer : IRasterBackend
+public sealed partial class SkiaRenderer : IRasterBackend
 {
     private sealed record Frame(Pixels Pixels, int X = 0, int Y = 0);
     private sealed record Evaluation(Frame Frame, Effect Effect, Evaluation? Input, int X, int Y);
@@ -33,14 +33,20 @@ public sealed class SkiaRenderer : IRasterBackend
     private readonly ConditionalWeakTable<Pixels, Evaluations> evaluations = new();
     private readonly ConditionalWeakTable<Layer, Pixels> vectors = new();
 
-    public Pixels DecodePng(byte[] data)
+    public Pixels DecodePng(byte[] data) => DecodeImage(data, pngOnly: true);
+
+    public Pixels DecodeImage(byte[] data) => DecodeImage(data, pngOnly: false);
+
+    private static Pixels DecodeImage(byte[] data, bool pngOnly)
     {
-        using var codec = SKCodec.Create(new SKMemoryStream(data)) ?? throw new InvalidDataException("Invalid PNG.");
-        if (codec.EncodedFormat != SKEncodedImageFormat.Png) throw new InvalidDataException("Only PNG import is supported.");
+        using var codec = SKCodec.Create(new SKMemoryStream(data)) ?? throw new InvalidDataException("Invalid image data.");
+        if (codec.EncodedFormat != SKEncodedImageFormat.Png &&
+            (pngOnly || codec.EncodedFormat is not (SKEncodedImageFormat.Jpeg or SKEncodedImageFormat.Webp)))
+            throw new InvalidDataException(pngOnly ? "Expected PNG data." : "Choose a PNG, JPEG, or WebP image.");
         Format.Dimensions(codec.Info.Width, codec.Info.Height);
         using var bitmap = new SKBitmap(new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
         var result = codec.GetPixels(bitmap.Info, bitmap.GetPixels());
-        if (result != SKCodecResult.Success) throw new InvalidDataException($"PNG decode failed: {result}.");
+        if (result != SKCodecResult.Success) throw new InvalidDataException($"Image decode failed: {result}.");
         return Read(bitmap);
     }
 

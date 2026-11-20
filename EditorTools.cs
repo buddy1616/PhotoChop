@@ -742,6 +742,22 @@ public partial class MainWindow
         if (e.Key == Key.Escape && (gesture is not null || guideDrag is not null)) { CancelGesture(); e.Handled = true; return; }
         if (e.OriginalSource is TextBoxBase or PasswordBox) return;
         var modifiers = Keyboard.Modifiers;
+        if (canvas.IsKeyboardFocusWithin && pathDrag is null && (tool is "Pen" or "Path Select") &&
+            ActiveLayer() is { Kind: LayerKind.Path } path)
+        {
+            if (e.Key == Key.A && modifiers == ModifierKeys.Control)
+            {
+                SelectAllPathNodes(path);
+                e.Handled = true;
+                return;
+            }
+            if (e.Key == Key.Delete && selectedNodes.Count > 0 && active?.Engine.Current is { } doc && Editable(doc, path.Id))
+            {
+                DeletePathNodes(path, selectedNodes);
+                e.Handled = true;
+                return;
+            }
+        }
         bool control = modifiers == ModifierKeys.Control || modifiers == (ModifierKeys.Control | ModifierKeys.Shift);
         bool shift = modifiers.HasFlag(ModifierKeys.Shift);
         Action? action = control ? e.Key switch

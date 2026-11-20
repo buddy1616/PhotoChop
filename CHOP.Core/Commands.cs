@@ -173,6 +173,9 @@ public sealed class CommandEngine(IRasterBackend backend)
         "selection.lasso" => "Lasso Selection",
         "mask.maskerStroke" => "Masker Stroke",
         "layer.flip" => command.Read<FlipArgs>().Horizontal ? "Flip horizontal" : "Flip vertical",
+        "layers.move" => "Move Layers",
+        "layers.delete" => "Delete Layers",
+        "layers.duplicate" => "Duplicate Layers",
         "layer.mergeDown" => "Merge Down",
         "guide.set" => $"Set {command.Read<Guide>().Axis.ToString().ToLowerInvariant()} guide",
         "guide.remove" => "Remove guide",
@@ -213,7 +216,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         var current = doc.ImageOrientation ?? Projective.Identity;
         if (action == OrientationAction.Bake)
         {
-            if (current == Projective.Identity) return doc;
+            if (current == Projective.Identity) return doc.ImageFlip is null ? doc : doc with { ImageFlip = null };
             var baked = doc.Layers.Select(layer =>
             {
                 if (layer.Kind == LayerKind.Effect)
@@ -224,25 +227,39 @@ public sealed class CommandEngine(IRasterBackend backend)
                     RasterX = raster.X, RasterY = raster.Y, Visible = layer.Visible, Locked = layer.Locked,
                     Opacity = layer.Opacity, Blend = layer.TransformsEnabled ? EffectiveBlend(layer) : layer.Blend };
             }).ToArray();
-            return doc with { ImageOrientation = null, Layers = baked };
+            return doc with { ImageOrientation = null, ImageFlip = null, Layers = baked };
         }
+        var horizontal = new Projective(-1, 0, 1, 0, 1, 0);
+        var vertical = new Projective(1, 0, 0, 0, -1, 1);
+        // Older files only recorded the combined matrix. Mixed reflections are ambiguous.
+        var flip = doc.ImageFlip ?? (current == vertical ? vertical :
+            current.A * current.E - current.B * current.D < 0 ? horizontal : Projective.Identity);
+        var rotation = flip.Inverse().Then(current);
         var unit = action switch
         {
-            OrientationAction.FlipHorizontal => new Projective(-1, 0, 1, 0, 1, 0),
-            OrientationAction.FlipVertical => new Projective(1, 0, 0, 0, -1, 1),
+            OrientationAction.FlipHorizontal => horizontal,
+            OrientationAction.FlipVertical => vertical,
             OrientationAction.Clockwise => new Projective(0, -1, 1, 1, 0, 0),
             OrientationAction.Counterclockwise => new Projective(0, 1, 0, -1, 0, 1),
             OrientationAction.HalfTurn => new Projective(-1, 0, 1, 0, -1, 1),
+            OrientationAction.ResetRotation => rotation.Inverse(),
+            OrientationAction.ResetFlip => current.Inverse().Then(rotation),
             _ => current.Inverse()
         };
-        if (unit == Projective.Identity) return doc;
+        if (unit == Projective.Identity)
+            return action == OrientationAction.Reset && doc.ImageFlip is not null ? doc with { ImageFlip = null } : doc;
         int width = unit.A == 0 ? doc.Height : doc.Width, height = unit.A == 0 ? doc.Width : doc.Height;
         var orientation = current.Then(unit);
+        if (action is OrientationAction.FlipHorizontal or OrientationAction.FlipVertical)
+            flip = orientation.Then(rotation.Inverse());
+        else if (action is OrientationAction.Reset or OrientationAction.ResetFlip)
+            flip = Projective.Identity;
         var matrix = Projective.Anchored(1d / doc.Width, 1d / doc.Height, 0, 0)
             .Then(unit).Then(Projective.Anchored(width, height, 0, 0));
         var inverse = matrix.Inverse();
         var result = doc with { Width = width, Height = height,
             ImageOrientation = orientation == Projective.Identity ? null : orientation,
+            ImageFlip = flip == Projective.Identity ? null : flip,
             Layers = doc.Layers.Select(layer =>
             {
                 var placement = (layer.ImagePlacement ?? Projective.Identity).Then(matrix);
@@ -543,6 +560,47 @@ public sealed class CommandEngine(IRasterBackend backend)
                     location = new Projective(1, 0, paste.X, 0, 1, paste.Y).Then(parentMatrix.Inverse());
                 }
                 return pastedDoc.ReplaceLayer(pasteLayer.Id, pasteLayer with { RasterGrid = location });
+            case "layers.move":
+            case "layers.delete":
+            case "layers.duplicate":
+                var batch = command.Read<LayerBatch>();
+                var ids = batch.Ids.ToHashSet();
+                if (ids.Count == 0 || ids.Count != batch.Ids.Length ||
+                    !ids.IsSubsetOf(doc.AllLayers().Select(item => item.Id)))
+                    throw new InvalidDataException("Select valid layers.");
+                IEnumerable<Layer> Roots(Layer[] items)
+                {
+                    foreach (var item in items)
+                        if (ids.Contains(item.Id)) yield return item;
+                        else foreach (var child in Roots(item.Children)) yield return child;
+                }
+                var roots = Roots(layers).ToArray();
+                var updatedBatch = doc;
+                if (command.Name == "layers.move")
+                {
+                    var dropOrder = batch.Order ?? throw new InvalidDataException("Choose a destination.");
+                    CheckParent(dropOrder.Parent);
+                    foreach (var root in roots)
+                    {
+                        EnsureEditable(layers, root.Id);
+                        if (new Document("", 1, 1) { Layers = [root] }.AllLayers().Any(item =>
+                            item.Id == dropOrder.Parent || item.Id == dropOrder.Before)) return doc;
+                    }
+                    var moved = layers;
+                    foreach (var root in roots) moved = Remove(moved, root.Id);
+                    foreach (var root in roots) moved = Insert(moved, dropOrder.Parent, dropOrder.Before, root);
+                    return With(moved);
+                }
+                if (command.Name == "layers.delete")
+                {
+                    RequireEditableSubtree(layers, roots);
+                    foreach (var root in roots) updatedBatch = Apply(updatedBatch, Command.Of("layer.delete", 0, root.Id));
+                    return updatedBatch;
+                }
+                if (batch.CopyIds?.Length != roots.Length) throw new InvalidDataException("Missing copy IDs.");
+                for (int index = 0; index < roots.Length; index++)
+                    updatedBatch = Apply(updatedBatch, Command.Of("layer.duplicate", batch.CopyIds[index], roots[index].Id));
+                return updatedBatch;
             case "layer.delete":
                 var deleted = Wanted();
                 RequireEditableSubtree(layers, [deleted]);

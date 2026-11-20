@@ -27,6 +27,7 @@ public partial class MainWindow
         public PointD LocalStart { get; } = localStart;
     }
 
+    private readonly HashSet<(int Contour, int Node)> selectedNodes = [];
     private PathDrag? pathDrag;
     private string? penLayer;
     private int penContour = -1;
@@ -44,6 +45,7 @@ public partial class MainWindow
 
     private void CancelPathEditing()
     {
+        selectedNodes.Clear();
         var drag = pathDrag;
         pathDrag = null;
         penLayer = null;
@@ -100,15 +102,22 @@ public partial class MainWindow
         if (tool is not ("Pen" or "Path Select") || active?.Engine.Current is not { } doc || ActiveLayer() is not { Kind: LayerKind.Path } layer)
         {
             canvas.PathOverlay = null;
+            canvas.SelectedPathNodes = [];
             canvas.InvalidateVisual();
             return;
         }
         if (pathDrag is { } drag) SetPathOverlay(drag.Pending, drag.World);
-        else SetPathOverlay(layer.Contours, PathMatrix(doc, layer));
+        else
+        {
+            selectedNodes.RemoveWhere(key => key.Contour >= layer.Contours.Length ||
+                key.Node >= layer.Contours[key.Contour].Nodes.Length);
+            SetPathOverlay(layer.Contours, PathMatrix(doc, layer));
+        }
     }
 
     private void SetPathOverlay(PathContour[] contours, SKMatrix world)
     {
+        canvas.SelectedPathNodes = selectedNodes.ToHashSet();
         canvas.PathOverlay = contours.Select(contour => contour with
         {
             Nodes = contour.Nodes.Select(node => new PathNode(MapPath(world, node.Point),
@@ -173,8 +182,27 @@ public partial class MainWindow
         if (button != MouseButton.Left) return false;
         if (tool == "Path Select")
         {
-            if (hit is null || !Editable(doc, hit.Layer.Id)) return true;
-            if (active.ActiveId != hit.Layer.Id) SelectLayer(hit.Layer.Id);
+            if (hit is null)
+            {
+                selectedNodes.Clear();
+                RefreshPathOverlay();
+                return true;
+            }
+            if (!Editable(doc, hit.Layer.Id)) return true;
+            if (active.ActiveId != hit.Layer.Id)
+            {
+                selectedNodes.Clear();
+                SelectLayer(hit.Layer.Id);
+            }
+            var anchor = (hit.Contour, hit.Node);
+            if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) && hit.Part == PathPart.Anchor)
+            {
+                if (!selectedNodes.Add(anchor)) selectedNodes.Remove(anchor);
+                RefreshPathOverlay();
+                return true;
+            }
+            if (!selectedNodes.Contains(anchor)) selectedNodes.Clear();
+            selectedNodes.Add(anchor);
             StartPathDrag(doc, hit.Layer, hit.Layer.Contours, hit.Contour, hit.Node, hit.Part, point);
             return true;
         }
@@ -250,7 +278,12 @@ public partial class MainWindow
                     moved ? current : null));
                 break;
             case PathPart.Extend:
-                if (moved) nodes.Add(new PathNode(current));
+                if (moved)
+                {
+                    double extensionX = (current.X - drag.LocalStart.X) / 3, extensionY = (current.Y - drag.LocalStart.Y) / 3;
+                    nodes.Add(new PathNode(current, new(current.X - extensionX, current.Y - extensionY),
+                        new(current.X + extensionX, current.Y + extensionY)));
+                }
                 break;
             case PathPart.Close:
                 if (moved)
@@ -263,12 +296,25 @@ public partial class MainWindow
                 contour = contour with { Closed = true };
                 break;
             case PathPart.Anchor:
-                var original = nodes[drag.Node];
                 var dx = current.X - drag.LocalStart.X;
                 var dy = current.Y - drag.LocalStart.Y;
                 PointD Shift(PointD p) => new(p.X + dx, p.Y + dy);
-                nodes[drag.Node] = original with { Point = Shift(original.Point),
+                PathNode MoveNode(PathNode original) => original with { Point = Shift(original.Point),
                     Incoming = original.Incoming is { } a ? Shift(a) : null, Outgoing = original.Outgoing is { } b ? Shift(b) : null };
+                foreach (var grouping in selectedNodes.GroupBy(key => key.Contour))
+                {
+                    if (grouping.Key == drag.Contour)
+                    {
+                        foreach (var key in grouping) nodes[key.Node] = MoveNode(nodes[key.Node]);
+                    }
+                    else
+                    {
+                        var other = contours[grouping.Key];
+                        var otherNodes = other.Nodes.ToArray();
+                        foreach (var key in grouping) otherNodes[key.Node] = MoveNode(otherNodes[key.Node]);
+                        contours[grouping.Key] = other with { Nodes = otherNodes };
+                    }
+                }
                 break;
             case PathPart.Incoming:
             case PathPart.Outgoing:
@@ -324,6 +370,7 @@ public partial class MainWindow
             if (hit is { } node)
             {
                 bool editable = Editable(doc, node.Layer.Id);
+                Item(menu, "Delete Anchor Point", () => DeletePathNodes(node.Layer, [(node.Contour, node.Node)])).IsEnabled = editable;
                 Item(menu, "Make Sharp Corner", () => ChangePathHandles(node, false, false)).IsEnabled = editable;
                 Item(menu, "Make Smooth", () => ChangePathHandles(node, true, true)).IsEnabled = editable;
                 Item(menu, "Incoming Handle Only", () => ChangePathHandles(node, true, false)).IsEnabled = editable;
@@ -334,6 +381,27 @@ public partial class MainWindow
         if (doc.Selection is not null)
             Item(menu, "Convert Selection to Paths", ConvertSelectionToPaths);
         if (menu.Items.Count != 0) menu.IsOpen = true;
+    }
+
+    private void SelectAllPathNodes(Layer layer)
+    {
+        selectedNodes.Clear();
+        for (int c = 0; c < layer.Contours.Length; c++)
+        for (int n = 0; n < layer.Contours[c].Nodes.Length; n++)
+            selectedNodes.Add((c, n));
+        RefreshPathOverlay();
+    }
+
+    private void DeletePathNodes(Layer layer, IEnumerable<(int Contour, int Node)> nodes)
+    {
+        var removed = nodes.ToHashSet();
+        var contours = layer.Contours.Select((contour, c) =>
+        {
+            var remaining = contour.Nodes.Where((_, n) => !removed.Contains((c, n))).ToArray();
+            return contour with { Nodes = remaining, Closed = contour.Closed && remaining.Length >= 2 };
+        }).Where(contour => contour.Nodes.Length > 0).ToArray();
+        CancelPathEditing();
+        Run("layer.path", contours, layer.Id, layer.Id);
     }
 
     private void ChangePathHandles(PathHit hit, bool incoming, bool outgoing)
