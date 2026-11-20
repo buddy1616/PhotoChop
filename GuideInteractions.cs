@@ -48,14 +48,17 @@ public partial class MainWindow
             if (active?.Engine.Current is { } doc) Run("guide.lock", !doc.GuidesLocked);
         });
         lockGuidesMenu.IsCheckable = true;
-        Item(guides, "Guides Color…", () =>
+        MenuItem guideColor = null!;
+        guideColor = Item(guides, "Guides Color…", () =>
         {
             if (ColorPickerDialog.Show(EditorOwner, "Guides Color", preferences.GuideColor) is { } color)
             {
                 preferences.GuideColor = color;
+                guideColor.Icon = StyleFields.ColorChip(color);
                 UpdateRulers();
             }
         });
+        guideColor.Icon = StyleFields.ColorChip(preferences.GuideColor);
         UpdateRulers();
     }
 

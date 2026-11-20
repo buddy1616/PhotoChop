@@ -6,7 +6,8 @@ namespace Chop.Core;
 /// <summary>Converts device CMYK samples from an embedded ICC profile to sRGB.</summary>
 public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
 {
-    private const uint RelativeColorimetric = 1;
+    // Match the perceptual mapping in the embedded print profile.
+    private const uint Perceptual = 0;
     // Little CMS packed 16-bit formats, four CMYK channels and three RGB channels.
     private const uint Cmyk16 = (6 << 16) | (4 << 3) | 2;
     private const uint Rgb16 = (4 << 16) | (3 << 3) | 2;
@@ -71,8 +72,8 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
         if (source == 0) return 0;
         nint target = cmsCreate_sRGBProfile();
         try { return target == 0 ? 0 : fromSrgb
-            ? cmsCreateTransform(target, Rgb16, source, Cmyk16, RelativeColorimetric, 0)
-            : cmsCreateTransform(source, Cmyk16, target, Rgb16, RelativeColorimetric, 0); }
+            ? cmsCreateTransform(target, Rgb16, source, Cmyk16, Perceptual, 0)
+            : cmsCreateTransform(source, Cmyk16, target, Rgb16, Perceptual, 0); }
         finally
         {
             if (target != 0) cmsCloseProfile(target);
@@ -97,7 +98,7 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
             source = OpenColorProfileW(new(2, memory.AddrOfPinnedObject(), (uint)profile.Length), 1, 1, 3);
             target = OpenColorProfileW(new(1, name, (uint)((filename.Length + 1) * 2)), 1, 1, 3);
             return source == 0 || target == 0 ? 0 :
-                CreateMultiProfileTransform(fromSrgb ? [target, source] : [source, target], 2, [RelativeColorimetric, RelativeColorimetric], 2, 3, 0);
+                CreateMultiProfileTransform(fromSrgb ? [target, source] : [source, target], 2, [Perceptual, Perceptual], 2, 3, 0);
         }
         finally
         {

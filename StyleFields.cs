@@ -36,6 +36,29 @@ internal static class StyleFields
         return (row, slider, input);
     }
 
+    public static Border ColorChip(string value) => new()
+    {
+        Width = 34, Height = 17, CornerRadius = new CornerRadius(2),
+        BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1),
+        Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(value)!)
+    };
+
+    public static Button Swatch(Window owner, string label, string value, Action<string> changed)
+    {
+        var chip = ColorChip(value);
+        var button = new Button { Content = chip, ToolTip = label, HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(3), Margin = new Thickness(2) };
+        System.Windows.Automation.AutomationProperties.SetName(button, label);
+        button.Click += (_, _) =>
+        {
+            if (ColorPickerDialog.Show(owner, label, value) is not { } picked) return;
+            value = picked;
+            chip.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(picked)!);
+            changed(picked);
+        };
+        return button;
+    }
+
     public static ComboBox Contour(StyleContour current)
     {
         var field = new ComboBox();

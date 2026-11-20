@@ -31,21 +31,13 @@ internal static class TextLayerDialog
         var live = new CheckBox { Content = "Live preview", IsChecked = true, Margin = new Thickness(0, 6, 12, 0),
             VerticalAlignment = VerticalAlignment.Center };
         void Preview() => previewChanged(live.IsChecked == true ? Read() : null);
-        var colorButton = new Button { Content = "Text color…", Padding = new Thickness(7, 4, 7, 4), Margin = new Thickness(10, 0, 0, 0) };
-        colorButton.Click += (_, _) =>
-        {
-            if (ColorPickerDialog.Show(dialog, "Text color", color) is { } picked)
-            {
-                color = picked;
-                colorButton.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)!);
-                Preview();
-            }
-        };
+        var colorButton = StyleFields.Swatch(dialog, "Text color", color, picked => { color = picked; Preview(); });
         var options = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 9) };
         options.Children.Add(new Label { Content = "Size (px)", Target = size });
         options.Children.Add(size);
         options.Children.Add(new Label { Content = "Arc (%)", Target = bend });
         options.Children.Add(bend);
+        options.Children.Add(new Label { Content = "Color", Target = colorButton });
         options.Children.Add(colorButton);
         header.Children.Add(new Label { Content = "Font", Target = font });
         header.Children.Add(font);

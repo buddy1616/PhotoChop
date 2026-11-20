@@ -147,7 +147,7 @@ internal static class PsdDescriptorStyles
                 ushort Sample(string key) => (ushort)Math.Round(Ink(key) * 65535);
                 ushort[] rgb = new ushort[3];
                 if (colorTransform.Convert([Sample("Cyn "), Sample("Mgnt"), Sample("Ylw "), Sample("Blck")], rgb, 1))
-                    return $"#FF{rgb[0] >> 8:X2}{rgb[1] >> 8:X2}{rgb[2] >> 8:X2}";
+                    return $"#FF{(rgb[0] + 128) / 257:X2}{(rgb[1] + 128) / 257:X2}{(rgb[2] + 128) / 257:X2}";
             }
             double light = 1 - Ink("Blck");
             int Rgb(string key) => (int)Math.Round(255 * (1 - Ink(key)) * light);

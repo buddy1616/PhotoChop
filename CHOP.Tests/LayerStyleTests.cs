@@ -7,6 +7,25 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void OuterBevelDoesNotBevelAnEarlierGlow()
+    {
+        var renderer = new SkiaRenderer();
+        var layer = new Layer("art", "Art", LayerKind.Rectangle)
+            { Width = 24, Height = 24, Transform = new(20, 20), Color = "#FF808080" };
+        var doc = new Document("test", 64, 64);
+        var glow = new Effect("glow", EffectKind.Glow, Size: 15, Ink: "#FFFFFFFF");
+        var bevel = new Effect("bevel", EffectKind.BevelEmboss, Size: 5,
+            Lighting: new(Technique: BevelTechnique.ChiselHard));
+        Pixels Render(params Effect[] effects) => renderer.Composite(doc with { Layers = [layer with { Effects = effects }] });
+        var glowOnly = Render(glow);
+        var styled = Render(glow, bevel);
+        int distant = (32 * 64 + 9) * 4;
+        Assert.True(glowOnly.Rgba[distant + 3] > 0);
+        Assert.Equal(glowOnly.Rgba[distant..(distant + 4)], styled.Rgba[distant..(distant + 4)]);
+        Assert.False(glowOnly.Rgba.SequenceEqual(styled.Rgba));
+    }
+
+    [Fact]
     public void OuterChiselDoesNotTurnAFaintDistantPixelIntoARidge()
     {
         var rgba = new byte[40 * 12 * 4];

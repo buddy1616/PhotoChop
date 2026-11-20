@@ -19,12 +19,19 @@ public partial class MainWindow
         return dial;
     }
 
-    private static DockPanel AngleRow(TextBox box, bool signed = false)
+    private static DockPanel AngleRow(TextBox box, bool signed = false, CheckBox? shared = null)
     {
         var row = new DockPanel();
         var dial = LinkAngleDial(box, signed);
         DockPanel.SetDock(dial, System.Windows.Controls.Dock.Left);
         row.Children.Add(dial);
+        if (shared is not null)
+        {
+            shared.VerticalAlignment = VerticalAlignment.Center;
+            shared.Margin = new Thickness(0, 0, 8, 0);
+            DockPanel.SetDock(shared, System.Windows.Controls.Dock.Left);
+            row.Children.Add(shared);
+        }
         box.VerticalAlignment = VerticalAlignment.Center;
         row.Children.Add(box);
         return row;

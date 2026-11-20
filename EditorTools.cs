@@ -730,22 +730,11 @@ public partial class MainWindow
 
     private Button ColorButton(string label, string value, Action<string> apply)
     {
-        var button = Button(label, () =>
+        var button = StyleFields.Swatch(this, label + " color", value, color =>
         {
-            if (ColorPickerDialog.Show(this, label + " color", value) is { } color)
-            {
-                apply(color);
-                RefreshTools();
-            }
+            apply(color);
+            RefreshTools();
         });
-        var row = new StackPanel { Orientation = Orientation.Horizontal };
-        row.Children.Add(new System.Windows.Shapes.Rectangle
-        {
-            Width = 14, Height = 14, Margin = new Thickness(0, 0, 5, 0), Stroke = Brushes.Gray,
-            Fill = new SolidColorBrush((Color)ColorConverter.ConvertFromString(value)!)
-        });
-        row.Children.Add(new TextBlock { Text = label });
-        button.Content = row;
         return button;
     }
 

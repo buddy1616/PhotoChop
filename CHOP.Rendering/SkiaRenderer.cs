@@ -567,15 +567,20 @@ public sealed partial class SkiaRenderer : IRasterBackend
         lock (cache)
         {
             Evaluation? input = null;
+            var silhouette = new Frame(source, x, y);
+            bool trackSilhouette = effects.Any(effect => effect.Enabled && effect.Kind == EffectKind.BevelEmboss);
             foreach (var effect in effects)
             {
                 if (!ProcessesPixels(effect)) continue;
                 var node = cache.Nodes.Find(item => item.Effect == effect && ReferenceEquals(item.Input, input) && item.X == x && item.Y == y);
                 if (node is null)
                 {
-                    node = new Evaluation(ApplyEffect(input?.Frame ?? new Frame(source, x, y), effect), effect, input, x, y);
+                    node = new Evaluation(ApplyEffect(input?.Frame ?? silhouette, effect, silhouette), effect, input, x, y);
                     cache.Nodes.Add(node);
                 }
+                if (trackSilhouette && effect.Kind == EffectKind.Transform)
+                    silhouette = input is null || ReferenceEquals(input.Frame.Pixels, silhouette.Pixels)
+                        ? node.Frame : ApplyEffect(silhouette, effect);
                 input = node;
             }
             const long budget = 64 * 1024 * 1024;
@@ -591,7 +596,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         }
     }
 
-    private Frame ApplyEffect(Frame frame, Effect effect)
+    private Frame ApplyEffect(Frame frame, Effect effect, Frame? silhouette = null)
     {
         var source = frame.Pixels;
         if (effect.Kind == EffectKind.Transform)
@@ -615,7 +620,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             return new Frame(Unpremultiply(output), x, y);
         }
         if (effect.Kind is EffectKind.Glow or EffectKind.InnerShadow or EffectKind.BevelEmboss or
-            EffectKind.GradientOverlay or EffectKind.PatternOverlay) return RenderLayerStyle(frame, effect);
+            EffectKind.GradientOverlay or EffectKind.PatternOverlay) return RenderLayerStyle(frame, effect, silhouette);
         if (effect.Kind == EffectKind.GaussianBlur) return Blur(frame, effect.A);
         if (effect.Kind == EffectKind.MotionBlur) return MotionBlur(frame, effect.A, effect.B);
         if (effect.Kind == EffectKind.Stroke) return StrokeEffect(frame, effect);
