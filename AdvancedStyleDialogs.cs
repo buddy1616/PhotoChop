@@ -93,7 +93,8 @@ public partial class MainWindow
         var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = EffectName(effect.Kind), Width = 390,
             SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var panel = new StackPanel { Margin = new Thickness(14) };
-        dialog.Content = panel;
+        dialog.Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        dialog.MaxHeight = SystemParameters.WorkArea.Height;
         void Field(string label, Control item)
         {
             panel.Children.Add(new Label { Content = label, Target = item });
@@ -116,6 +117,15 @@ public partial class MainWindow
         var opacity = NumberField("Opacity (%)", effect.Opacity * 100, 0, 100);
         var placement = new ComboBox { ItemsSource = Enum.GetValues<StrokeAlignment>(), SelectedItem = effect.Alignment };
         if (glow || bevel) Field("Position", placement);
+        string[] techniques = ["Smooth", "Chisel Hard", "Chisel Soft"];
+        ComboBox? technique = null;
+        TextBox? soften = null;
+        if (bevel)
+        {
+            technique = new ComboBox { ItemsSource = techniques, SelectedIndex = (int)(effect.Lighting?.Technique ?? BevelTechnique.Smooth) };
+            Field("Technique", technique);
+            soften = NumberField("Soften (px)", effect.Lighting?.Soften ?? 0, 0, 16);
+        }
         var size = glow || shadow || bevel ? NumberField("Size (px)", effect.Size, bevel ? 1 : .1, 100) : null;
         var angle = !glow && !pattern ? NumberField("Angle (degrees)", effect.A, -360, 360) : null;
         var distance = shadow ? NumberField("Distance (px)", effect.B, 0, 512) :
@@ -180,6 +190,9 @@ public partial class MainWindow
                 Mode = (Blend)blend.SelectedItem, Opacity = Read(opacity, 100) / 100,
                 Size = Read(size, effect.Size), A = Read(angle, effect.A), B = Read(distance, effect.B),
                 Spread = Read(spread, effect.Spread), Alignment = (StrokeAlignment)placement.SelectedItem };
+            if (technique is not null)
+                edited = edited with { Lighting = (effect.Lighting ?? new()) with
+                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0) } };
             return edited;
         }
         var engine = active?.Engine;

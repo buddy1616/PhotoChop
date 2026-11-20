@@ -82,8 +82,15 @@ internal static class PsdDescriptorStyles
                             ReadColor(style.Get("sdwC") as Descriptor, colorTransform) ?? "#FF000000",
                             style.Enum("sdwM") is { } shadowBlend ? blend(shadowBlend) : Blend.Multiply,
                             Math.Clamp(style.Number("sdwO", 100) / 100, 0, 1),
-                            Math.Clamp(style.Number("srgR", 100) / 100, 0, 10), style.Enum("bvlD") == "Out ");
-                        partial = true; // Adobe contours and techniques use a different height profile.
+                            Math.Clamp(style.Number("srgR", 100) / 100, 0, 10), style.Enum("bvlD") == "Out ",
+                            style.Enum("bvlT") switch
+                            {
+                                "PrBL" => BevelTechnique.ChiselHard,
+                                "Slmt" => BevelTechnique.ChiselSoft,
+                                _ => BevelTechnique.Smooth
+                            },
+                            Math.Clamp(style.Number("Sftn", 0), 0, 16));
+                        partial = true; // Photoshop contour curves are still approximated.
                     }
                     effects.Add(new($"psd-style-{effects.Count + 1}", type.Value, Enabled: masterEnabled && style.Flag("enab"),
                         A: type == EffectKind.Stroke ? Math.Clamp(style.Number("Sz  ", 1), 1, 512) : angle,

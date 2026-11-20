@@ -34,7 +34,7 @@ public sealed partial class SkiaRenderer
         int spread = glow ? (int)Math.Round(effect.Size * effect.Spread / 100) : 0;
         int pad = glow && effect.Alignment != StrokeAlignment.Inside ? (int)Math.Ceiling(effect.Size * 3) + spread :
             bevel && effect.Alignment != StrokeAlignment.Inside ? (int)Math.Ceiling(effect.Size * 3) : 0;
-        var bevelCoverage = bevel ? new BevelCoverage(source, effect.Size / 3) : null;
+        var bevelCoverage = bevel ? new BevelCoverage(source, effect.Size, effect.Alignment, effect.Lighting) : null;
         var coverage = glow || shadow
             ? Blur(AlphaEffect(frame, spread, true, 0xFFFFFFFF, 1, spread),
                 glow ? effect.Size * (1 - effect.Spread / 100) : effect.Size)

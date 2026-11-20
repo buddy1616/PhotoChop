@@ -7,6 +7,26 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void ChiselHardHasAFlatFacetAndChiselSoftRoundsItsShoulder()
+    {
+        var renderer = new SkiaRenderer();
+        var layer = new Layer("art", "Art", LayerKind.Rectangle) { Width = 80, Height = 80, Color = "#FF808080" };
+        Pixels Render(BevelTechnique technique) => renderer.Composite(new Document("test", 80, 80)
+        {
+            Layers = [layer with { Effects = [new("bevel", EffectKind.BevelEmboss, Size: 16,
+                Alignment: StrokeAlignment.Inside, Lighting: new(Technique: technique))] }]
+        });
+        int Sample(Pixels pixels, int x) => pixels.Rgba[(40 * pixels.Width + x) * 4];
+        var hard = Render(BevelTechnique.ChiselHard);
+        var soft = Render(BevelTechnique.ChiselSoft);
+        var smooth = Render(BevelTechnique.Smooth);
+        Assert.Equal(Sample(hard, 4), Sample(hard, 10));
+        Assert.NotEqual(Sample(hard, 10), Sample(hard, 18));
+        Assert.InRange(Sample(soft, 16), Sample(hard, 10) + 1, Sample(hard, 18) - 1);
+        Assert.NotEqual(Sample(smooth, 4), Sample(smooth, 10));
+    }
+
+    [Fact]
     public void TextArcIsAReplayableEditAndChangesTheRenderedBaseline()
     {
         var renderer = new SkiaRenderer();

@@ -7,8 +7,11 @@
         <ControlTemplate x:Key="NumericTextBoxTemplate" TargetType="TextBox">
             <Border x:Name="FieldBorder" Background="{TemplateBinding Background}"
                     BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                    CornerRadius="3" Padding="{TemplateBinding Padding}">
-                <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                    CornerRadius="3">
+                <ScrollViewer x:Name="PART_ContentHost" Focusable="False"
+                              Padding="{TemplateBinding Padding}"
+                              HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"
+                              TextElement.Foreground="{TemplateBinding Foreground}" />
             </Border>
             <ControlTemplate.Triggers>
                 <Trigger Property="IsKeyboardFocused" Value="True">
