@@ -14,6 +14,7 @@ public partial class MainWindow
 {
     private sealed record LayerRow(Layer Layer, string? Parent, int Depth, bool Collapsed, bool EditingMask)
     {
+        public double EyeOpacity => Layer.Visible ? 1 : .35;
         public Visibility HiddenEye => Layer.Visible ? Visibility.Collapsed : Visibility.Visible;
         public Visibility GroupVisibility => Layer.Kind == LayerKind.Group ? Visibility.Visible : Visibility.Collapsed;
         public Visibility MaskVisibility => Layer.Mask is null ? Visibility.Collapsed : Visibility.Visible;
@@ -220,19 +221,11 @@ public partial class MainWindow
         logPanel.Children.Add(commandLog);
         foreach (var section in ToolSections)
         {
-            var tools = new StackPanel { Margin = new Thickness(6) };
+            var tools = new WrapPanel { Margin = new Thickness(4) };
             toolPanes.Add(section.Title, tools);
-            var scroll = new ScrollViewer { Content = tools, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-            if (section.Title == "Painting Tools")
-            {
-                var dock = new DockPanel();
-                DockPanel.SetDock(toolColors, System.Windows.Controls.Dock.Bottom);
-                dock.Children.Add(toolColors);
-                dock.Children.Add(scroll);
-                panelContent.Add(section.Title, dock);
-            }
-            else panelContent.Add(section.Title, scroll);
+            panelContent.Add(section.Title, new ScrollViewer { Content = tools, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         }
+        panelContent.Add(PalettePane, toolColors);
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("Channels", BuildChannels());

@@ -7,6 +7,21 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void BevelFollowsTheMaskedEdgeOfAnOpaqueLayer()
+    {
+        var renderer = new SkiaRenderer();
+        var layer = new Layer("art", "Art", LayerKind.Rectangle)
+        {
+            Width = 24, Height = 16, Color = "#FF808080",
+            Mask = new(12, 16, Enumerable.Repeat((byte)255, 12 * 16).ToArray(), X: 6, Outside: 0),
+            Effects = [new("bevel", EffectKind.BevelEmboss, A: 0, B: 30, Size: 3, Alignment: StrokeAlignment.Inside)]
+        };
+        var image = renderer.Composite(new Document("test", 24, 16) { Layers = [layer] });
+        Assert.Equal(0, image.Rgba[(8 * 24 + 5) * 4 + 3]);
+        Assert.NotEqual(image.Rgba[(8 * 24 + 12) * 4], image.Rgba[(8 * 24 + 6) * 4]);
+    }
+
+    [Fact]
     public void GradientHonorsAnInternalStopInTheFillToolAndOverlay()
     {
         var renderer = new SkiaRenderer();

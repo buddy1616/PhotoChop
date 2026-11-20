@@ -54,6 +54,7 @@ public static class PsdImport
         private long decodedBytes;
         private int layerNumber;
         private byte[][]? composite;
+        private Dictionary<string, byte[]>? patterns;
         private int BaseChannels => file.Mode switch { 0 or 1 or 2 or 8 => 1, 3 or 9 => 3, 4 => 4, _ => 0 };
         private ColorSettings Settings => new(file.Mode switch
         {
@@ -182,7 +183,8 @@ public static class PsdImport
             var effects = Array.Empty<Effect>();
             if (source.Tags.TryGetValue("lfx2", out var styleData) || source.Tags.TryGetValue("lmfx", out styleData) ||
                 source.Tags.TryGetValue("lfxs", out styleData))
-                effects = PsdDescriptorStyles.Read(styleData, ReadBlend, out partial);
+                effects = PsdDescriptorStyles.Read(styleData, ReadBlend,
+                    patterns ??= PsdPatterns.Read(file.GlobalTags), file.GlobalAngle, file.GlobalAltitude, out partial);
             if (styleData.IsEmpty && source.Tags.TryGetValue("lrFX", out var legacy))
             {
                 effects = PsdLegacyStyles.Read(legacy, ReadBlend, out bool legacyPartial);
@@ -204,7 +206,7 @@ public static class PsdImport
                 Pixels = pixels, Children = children, Effects = effects,
                 Visible = source.Visible, Locked = source.Locked, Opacity = source.Opacity / 255d,
                 FillOpacity = source.Tags.TryGetValue("iOpa", out var fillOpacity) && fillOpacity.Length > 0 ? fillOpacity.Span[0] / 255d : 1,
-                Clipped = source.Clipped && hasBelow, PassThrough = passThrough, Blend = blend,
+                Clipped = source.Clipped && hasBelow, PassThrough = passThrough, Blend = blend, InitiallyCollapsed = source.SectionType == 2,
                 Mask = mask, MaskEnabled = maskEnabled, VectorMask = vectorMask
             };
         }
@@ -228,12 +230,12 @@ public static class PsdImport
 
         private Blend ReadBlend(string key) => key switch
         {
-            "norm" or "pass" => Blend.Normal, "mul " => Blend.Multiply, "scrn" => Blend.Screen,
-            "over" => Blend.Overlay, "lddg" or "add " or "linearDodge" => Blend.Add, "dark" => Blend.Darken,
-            "lite" => Blend.Lighten, "idiv" => Blend.ColorBurn, "div " => Blend.ColorDodge,
-            "hLit" => Blend.HardLight, "sLit" => Blend.SoftLight, "diff" => Blend.Difference,
-            "smud" => Blend.Exclusion, "hue " => Blend.Hue, "sat " => Blend.Saturation,
-            "colr" => Blend.Color, "lum " => Blend.Luminosity,
+            "norm" or "pass" or "Nrml" => Blend.Normal, "mul " or "Mltp" => Blend.Multiply, "scrn" or "Scrn" => Blend.Screen,
+            "over" or "Ovrl" => Blend.Overlay, "lddg" or "add " or "linearDodge" => Blend.Add, "dark" or "Drkn" => Blend.Darken,
+            "lite" or "Lghn" => Blend.Lighten, "idiv" or "CBrn" => Blend.ColorBurn, "div " or "CDdg" => Blend.ColorDodge,
+            "hLit" or "HrdL" => Blend.HardLight, "sLit" or "SftL" => Blend.SoftLight, "diff" or "Dfrn" => Blend.Difference,
+            "smud" or "Xclu" => Blend.Exclusion, "hue " or "H   " => Blend.Hue, "sat " or "Strt" => Blend.Saturation,
+            "colr" or "Clr " => Blend.Color, "lum " or "Lmns" => Blend.Luminosity,
             "lbrn" or "linearBurn" => Blend.LinearBurn, "lLit" or "linearLight" => Blend.LinearLight, "vLit" or "vividLight" => Blend.VividLight,
             "pLit" or "pinLight" => Blend.PinLight, "hMix" or "hardMix" => Blend.HardMix, "fsub" or "blendSubtraction" => Blend.Subtract, "fdiv" or "blendDivide" => Blend.Divide,
             _ => UnsupportedBlend()

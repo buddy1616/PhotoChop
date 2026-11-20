@@ -16,7 +16,7 @@ public sealed class PsdImportTests
     [Fact]
     public void PreservesEditableGroupsStackingClippingAndRasterMaskOffsets()
     {
-        var group = new LayerFixture("Folder", 0, 0, 0, 0, [], Section: 1, UnicodeName: "Grüppe");
+        var group = new LayerFixture("Folder", 0, 0, 0, 0, [], Section: 2, UnicodeName: "Grüppe");
         var top = new LayerFixture("Clipped", 0, 0, 7, 6, [.. Rgb(7, 6, 223, 22, 41), new(-1, Enumerable.Repeat((byte)190, 42).ToArray())], Clipping: 1, Opacity: 128);
         var mask = new MaskFixture(2, 2, 1, 2, [255, 128], Default: 0);
         var basis = new LayerFixture("Base", 1, 1, 4, 4, [.. Rgb(4, 4, 31, 76, 219), new(-2, mask.Data)], Mask: mask);
@@ -32,6 +32,7 @@ public sealed class PsdImportTests
             {
                 Assert.Equal(LayerKind.Group, layer.Kind);
                 Assert.Equal("Grüppe", layer.Name);
+                Assert.True(layer.InitiallyCollapsed);
                 Assert.Collection(layer.Children,
                     child => { Assert.Equal("Base", child.Name); Assert.Equal((4, 4), (child.Pixels!.Width, child.Pixels.Height)); Assert.NotNull(child.Mask); },
                     child => { Assert.Equal("Clipped", child.Name); Assert.True(child.Clipped); Assert.Equal(128 / 255d, child.Opacity, 6); Assert.Equal(190, child.Pixels!.Rgba[3]); });

@@ -19,7 +19,7 @@ public partial class MainWindow
         Say($"Importing {Path.GetFileName(path)}…");
         try
         {
-            await Task.Run(() => session.Engine.Execute(Command.Of("document.importPsd",
+            await WhileLoading(() => session.Engine.Execute(Command.Of("document.importPsd",
                 new PsdImportArgs(id, Path: path, Flattened: flattened))));
             session.ActiveId = session.Engine.Current?.Layers.LastOrDefault()?.Id;
             AddSession(session);

@@ -62,13 +62,13 @@ internal static class PsdCompression
     }
 
     /// <summary>Reads planar data and converts 16-bit words and 32-bit floats to little endian. One-bit rows stay packed.</summary>
-    public static byte[][] ReadChannels(PsdReader reader, int width, int height, int depth, int channelCount, bool psb = false)
+    public static byte[][] ReadChannels(PsdReader reader, int width, int height, int depth, int channelCount, bool psb = false, ushort? compressionCode = null)
     {
         int planeLength = PlaneLength(width, height, depth);
         if (channelCount is < 1 or > 56 || (long)planeLength * channelCount > MaxChannelBytes)
             throw new InvalidDataException("PSD decoded channel data exceeds the supported size.");
 
-        ushort compression = reader.ReadUInt16();
+        ushort compression = compressionCode ?? reader.ReadUInt16();
         var channels = new byte[channelCount][];
         switch (compression)
         {

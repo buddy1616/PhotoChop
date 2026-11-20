@@ -259,21 +259,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 return;
             }
 
-            var frame = Evaluate(Unpremultiply(group, precision), effects, region.X, region.Y);
-            using var adjusted = RasterBitmap(frame.Pixels, precision);
             using var vectorCoverage = VectorCoverage(layer.VectorMask, region, world);
             var groupMask = layer.MaskEnabled ? layer.Mask : null;
-            if (groupMask is null && vectorCoverage is null)
-            {
-                canvas.DrawBitmap(adjusted, frame.X, frame.Y, paint);
-                return;
-            }
-
-            using var output = Surface(region.Width, region.Height, precision);
-            using var outputCanvas = new SKCanvas(output);
-            outputCanvas.Clear(SKColors.Transparent);
-            outputCanvas.Translate(-region.X, -region.Y);
-            outputCanvas.DrawBitmap(adjusted, frame.X, frame.Y);
             using var maskPaint = new SKPaint { BlendMode = SKBlendMode.DstIn };
             if (groupMask is not null)
             {
@@ -286,11 +273,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 maskCanvas.Concat(world);
                 maskCanvas.DrawBitmap(maskBitmap, groupMask.X, groupMask.Y, sourcePaint);
                 maskCanvas.Flush();
-                outputCanvas.DrawBitmap(maskSurface, region.X, region.Y, maskPaint);
+                groupCanvas.DrawBitmap(maskSurface, region.X, region.Y, maskPaint);
             }
-            if (vectorCoverage is not null) outputCanvas.DrawBitmap(vectorCoverage, region.X, region.Y, maskPaint);
-            outputCanvas.Flush();
-            canvas.DrawBitmap(output, region.X, region.Y, paint);
+            if (vectorCoverage is not null) groupCanvas.DrawBitmap(vectorCoverage, region.X, region.Y, maskPaint);
+            groupCanvas.Flush();
+            var frame = Evaluate(Unpremultiply(group, precision), effects, region.X, region.Y);
+            using var result = RasterBitmap(frame.Pixels, precision);
+            canvas.DrawBitmap(result, frame.X, frame.Y, paint);
             return;
         }
 
@@ -335,8 +324,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var stroke = effects.FirstOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.Stroke);
             var fill = effects.FirstOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.PathFill);
             if (RasterizePath(layer.Contours, stroke, fill) is not { } vector) return null;
-            frame = Evaluate(precision is null ? vector.Pixels : PixelBuffer.Convert(vector.Pixels, precision), effects.Where(effect => !ReferenceEquals(effect, stroke) &&
-                effect.Kind != EffectKind.PathFill).ToArray(), vector.X, vector.Y);
+            frame = new(precision is null ? vector.Pixels : PixelBuffer.Convert(vector.Pixels, precision), vector.X, vector.Y);
+            effects = effects.Where(effect => !ReferenceEquals(effect, stroke) && effect.Kind != EffectKind.PathFill).ToArray();
         }
         else
         {
@@ -348,15 +337,19 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 _ => vectors.GetValue(layer, Rasterize)
             };
             if (source is null) return null;
-            frame = Evaluate(precision is null ? source : PixelBuffer.Convert(source, precision), effects, raster?.X ?? 0, raster?.Y ?? 0);
+            frame = new(precision is null ? source : PixelBuffer.Convert(source, precision), raster?.X ?? 0, raster?.Y ?? 0);
         }
-        if (layer.FillOpacity != 1)
-            frame = Evaluate(frame.Pixels, [new("fill-opacity", EffectKind.Opacity, A: layer.FillOpacity)], frame.X, frame.Y);
         if (layer.MaskEnabled && layer.Mask is { } mask) frame = ApplyMask(frame, mask);
         using var coverage = VectorCoverage(layer.VectorMask, new(frame.X, frame.Y, frame.Pixels.Width, frame.Pixels.Height), SKMatrix.Identity);
-        if (coverage is null) return frame;
-        return ApplyMask(frame with { X = 0, Y = 0 }, new(frame.Pixels.Width, frame.Pixels.Height,
-            Read(coverage).Rgba.Where((_, index) => index % 4 == 3).ToArray())) with { X = frame.X, Y = frame.Y };
+        if (coverage is not null)
+        {
+            var masked = ApplyMask(frame with { X = 0, Y = 0 }, new(frame.Pixels.Width, frame.Pixels.Height,
+                Read(coverage).Rgba.Where((_, index) => index % 4 == 3).ToArray()));
+            frame = masked with { X = frame.X, Y = frame.Y };
+        }
+        frame = Evaluate(frame.Pixels, effects, frame.X, frame.Y);
+        return layer.FillOpacity == 1 ? frame :
+            Evaluate(frame.Pixels, [new("fill-opacity", EffectKind.Opacity, A: layer.FillOpacity)], frame.X, frame.Y);
     }
 
     private readonly FrameImageCache frameImages = new(128L * 1024 * 1024);
@@ -715,14 +708,17 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return new(Unpremultiply(output, precision), x, y);
     }
 
-    private static Frame StrokeEffect(Frame frame, Effect effect)
+    private Frame StrokeEffect(Frame frame, Effect effect)
     {
         int total = (int)Math.Round(effect.A);
         int outside = effect.Alignment switch { StrokeAlignment.Outside => total, StrokeAlignment.Center => total / 2, _ => 0 };
         int inside = total - outside;
         var ink = Format.Color(effect.Ink);
-        var outer = AlphaEffect(frame, outside, true, ink, 1, outside);
-        if (outside == total) return StackFrames(outer, frame);
+        var outer = AlphaEffect(frame, outside, true, ink, effect.Opacity, outside);
+        Frame Style(Frame outline) => effect.Stops is { Length: > 0 }
+            ? RenderLayerStyle(outline, effect with { Kind = EffectKind.GradientOverlay, A = effect.B, Mode = Blend.Normal, Opacity = 1 })
+            : outline;
+        if (outside == total) return StackFrames(Style(outer), frame);
         var inner = AlphaEffect(frame, inside, false, 0xFFFFFFFF, 1, inside);
         PixelBuffer? native = WorkingPrecision(outer.Pixels) is { } precision
             ? new(outer.Pixels.Width, outer.Pixels.Height, precision) : null;
@@ -740,7 +736,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             else outer.Pixels.Rgba[i * 4 + 3] = (byte)(outer.Pixels.Rgba[i * 4 + 3] *
                 (255 - inner.Pixels.Rgba[maskIndex * 4 + 3]) / 255);
         }
-        return StackFrames(frame, native is null ? outer : outer with { Pixels = native.Finish() });
+        return StackFrames(frame, Style(native is null ? outer : outer with { Pixels = native.Finish() }), effect.Mode);
     }
 
     private static Frame ShadowEffect(Frame frame, Effect effect)

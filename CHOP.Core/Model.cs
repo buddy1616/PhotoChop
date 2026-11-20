@@ -53,6 +53,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public double FillOpacity { get; init; } = 1;
     public Blend Blend { get; init; }
     public bool PassThrough { get; init; }
+    public bool InitiallyCollapsed { get; init; }
     [JsonIgnore] public Pixels? Pixels { get; init; }
     [JsonIgnore] public AlphaMask? Mask { get; init; }
     [JsonIgnore] public PixelShift[] PixelShifts { get; init; } = [];

@@ -17,6 +17,18 @@ internal static class ToolCursors
     public static Cursor SelectionAdd { get; } = Load("marquee-add");
     public static Cursor SelectionSubtract { get; } = Load("marquee-subtract");
 
+    private static readonly Dictionary<string, System.Windows.Media.ImageSource> Icons = new();
+
+    public static System.Windows.Media.ImageSource Icon(string name)
+    {
+        if (!Icons.TryGetValue(name, out var icon))
+        {
+            icon = new System.Windows.Media.Imaging.BitmapImage(new Uri($"pack://application:,,,/Cursors/{name}.png"));
+            Icons.Add(name, icon);
+        }
+        return icon;
+    }
+
     private static Cursor Load(string name)
     {
         var resource = Application.GetResourceStream(new Uri($"Cursors/{name}.cur", UriKind.Relative));

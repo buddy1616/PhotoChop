@@ -11,7 +11,7 @@
   <PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
   <ItemGroup>
     <Compile Remove="CHOP.*/**/*.cs" />
-    <Resource Include="Cursors/*.cur" />
+    <Resource Include="Cursors/*.cur;Cursors/*.png" />
     <ProjectReference Include="CHOP.Rendering/CHOP.Rendering.csproj" />
     <PackageReference Include="Dirkster.AvalonDock" Version="4.72.1" />
     <PackageReference Include="Dirkster.AvalonDock.Themes.VS2013" Version="4.72.1" />

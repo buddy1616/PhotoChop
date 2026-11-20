@@ -345,6 +345,7 @@ public partial class MainWindow
                     var view = canvas;
                     var overlay = new EditorCanvas.PaintOverlay(paint, active.Engine.Current?.Selection);
                     view.PendingPaint.Add(overlay);
+                    view.InvalidateVisual();
                     if (!Run(completed == "Masker" ? "mask.maskerStroke" : mask ? "mask.paintStroke" : "layer.paintStroke", paint, paintTarget))
                     {
                         view.PendingPaint.Remove(overlay);
@@ -558,14 +559,37 @@ public partial class MainWindow
     private IEnumerable<string> OrderedTools() => (preferences.ToolOrder ?? ToolSections.SelectMany(section => section.Tools).ToArray())
         .Concat(ToolNames).Where(ToolNames.Contains).Distinct();
 
+    private static string ToolLabel(string name) => name switch
+    {
+        "Selection" => "Marquee", "Bucket" => "Fill", _ => name
+    };
+
+    private static (string Icon, string? Key) ToolPresentation(string name) => name switch
+    {
+        "Brush" => ("✎", "B"), "Eraser" => ("eraser", "E"), "Masker" => ("masker", null),
+        "Bucket" => ("bucket", "G"), "Eyedropper" => ("eyedropper", "I"),
+        "Selection" => ("⬚", "M"), "Lasso" => ("⤺", "L"), "Magic Wand" => ("wand", "W"),
+        "Pen" => ("✒", "P"), "Path Select" => ("➚", "A"), "Shape" => ("△", null),
+        "Text" => ("Ⅰ", "T"), "Move" => ("✥", "V"), "Transform" => ("⤢", null), "Chop" => ("⌗", null),
+        _ => throw new ArgumentOutOfRangeException(nameof(name))
+    };
+
     private void RefreshTools()
     {
         foreach (var section in toolPanes.Values) section.Children.Clear();
         var visible = preferences.Tools ?? ToolNames;
         foreach (var name in OrderedTools().Where(visible.Contains))
         {
-            var button = Button(name == "Bucket" ? "Fill" : name, () => SetTool(name));
-            button.HorizontalContentAlignment = HorizontalAlignment.Left;
+            var (icon, key) = ToolPresentation(name);
+            string label = ToolLabel(name);
+            var button = Button("", () => SetTool(name), key is null ? label : $"{label} ({key})");
+            button.Width = 27;
+            button.Height = 27;
+            button.Padding = new Thickness(2);
+            button.Content = icon.Length == 1
+                ? new TextBlock { Text = icon, FontFamily = new FontFamily("Segoe UI Symbol"), FontSize = 16 }
+                : new Image { Width = 21, Height = 21, Source = ToolCursors.Icon(icon) };
+            System.Windows.Automation.AutomationProperties.SetName(button, label);
             if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
             toolPanes[ToolSections.First(section => section.Tools.Contains(name)).Title].Children.Add(button);
         }
@@ -576,7 +600,7 @@ public partial class MainWindow
         toolColors.Children.Add(Button("⇄  Swap (X)", SwapColors, "Swap foreground and background colors"));
         ToolOptions.Children.Clear();
         if (interactiveTransform is { } transform) { TransformOptions(transform); return; }
-        OptionLabel(tool == "Bucket" ? "Fill" : tool);
+        OptionLabel(ToolLabel(tool));
         if (active?.VectorMaskTarget is not null && (tool is "Pen" or "Path Select"))
             ToolOptions.Children.Add(Button("Finish Vector Mask Editing", FinishVectorMaskEditing));
         if (tool == "Bucket")
@@ -594,9 +618,9 @@ public partial class MainWindow
                 ToolOptions.Children.Add(Button("Edit Gradient Stops…", () =>
                     fillGradient = EditGradientStops(EditorOwner, fillGradient) ?? fillGradient));
             }
-            else SliderOption("Tolerance", 0, 255, bucketTolerance, value => bucketTolerance = (int)value);
+            else NumberOption("Tolerance", 0, 255, bucketTolerance, value => bucketTolerance = (int)value);
         }
-        if (tool == "Magic Wand") SliderOption("Tolerance", 0, 255, wandTolerance, value => wandTolerance = (int)value);
+        if (tool == "Magic Wand") NumberOption("Tolerance", 0, 255, wandTolerance, value => wandTolerance = (int)value);
         if (tool == "Lasso")
         {
             OptionLabel("Mode");
@@ -613,9 +637,9 @@ public partial class MainWindow
         }
         if (tool is "Brush" or "Eraser" or "Masker")
         {
-            SliderOption("Size", 1, 512, brushSize, value => brushSize = value);
-            if (tool != "Brush" || !pencilMode) SliderOption("Hardness", 0, 1, hardness, value => hardness = value);
-            SliderOption("Opacity", 0, 1, brushOpacity, value => brushOpacity = value);
+            NumberOption("Size", 1, 512, brushSize, value => brushSize = value);
+            if (tool != "Brush" || !pencilMode) NumberOption("Hardness", 0, 1, hardness, value => hardness = value);
+            NumberOption("Opacity", 0, 1, brushOpacity, value => brushOpacity = value);
         }
         if (tool == "Selection") AddMarqueeOptions();
         if (tool == "Shape")
@@ -696,14 +720,16 @@ public partial class MainWindow
     private void OptionLabel(string text) => ToolOptions.Children.Add(new TextBlock
         { Text = text, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 4, 0) });
 
-    private void SliderOption(string name, double min, double max, double initial, Action<double> changed)
+    private void NumberOption(string name, double min, double max, double initial, Action<double> changed)
     {
         OptionLabel(name);
-        var slider = new Slider { Minimum = min, Maximum = max, Value = initial, Width = 86, VerticalAlignment = VerticalAlignment.Center };
-        var value = new TextBlock { Text = initial.ToString("0.##"), MinWidth = 30, VerticalAlignment = VerticalAlignment.Center };
-        slider.ValueChanged += (_, _) => { changed(slider.Value); value.Text = slider.Value.ToString("0.##"); };
-        ToolOptions.Children.Add(slider);
-        ToolOptions.Children.Add(value);
+        var field = new TextBox { Text = initial.ToString(max == 1 ? "0.00" : "0.##"), Width = 54, VerticalAlignment = VerticalAlignment.Center };
+        NumericWheel.Enable(field, min, max);
+        field.TextChanged += (_, _) =>
+        {
+            if (double.TryParse(field.Text, out double value) && value >= min && value <= max) changed(value);
+        };
+        ToolOptions.Children.Add(field);
     }
 
     private void ConfigureTools()
@@ -724,7 +750,7 @@ public partial class MainWindow
             var items = new ListBox { MinHeight = 175 };
             foreach (string name in names)
             {
-                var check = new CheckBox { Content = name, IsChecked = visible.Contains(name), Margin = new Thickness(3) };
+                var check = new CheckBox { Content = ToolLabel(name), Tag = name, IsChecked = visible.Contains(name), Margin = new Thickness(3) };
                 check.PreviewMouseLeftButtonDown += (_, _) => items.SelectedItem = check;
                 items.Items.Add(check);
             }
@@ -758,8 +784,8 @@ public partial class MainWindow
         dialog.Content = panel;
         if (dialog.ShowDialog() != true) return;
         var checks = toolLists.SelectMany(list => list.Items.Cast<CheckBox>()).ToArray();
-        preferences.ToolOrder = checks.Select(check => (string)check.Content).ToArray();
-        preferences.Tools = checks.Where(check => check.IsChecked == true).Select(check => (string)check.Content).ToArray();
+        preferences.ToolOrder = checks.Select(check => (string)check.Tag).ToArray();
+        preferences.Tools = checks.Where(check => check.IsChecked == true).Select(check => (string)check.Tag).ToArray();
         RefreshTools();
     }
 
