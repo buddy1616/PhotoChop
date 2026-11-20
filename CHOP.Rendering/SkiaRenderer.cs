@@ -85,18 +85,18 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return document.Color.Mode == ChannelColorMode.Grayscale ? ViewComponent(composite, ColorComponent.Gray, opaque: false) : composite;
     }
 
-    private Pixels CompositeRegion(Layer[] layers, Area region)
+    private Pixels CompositeRegion(Layer[] layers, Area region, ColorSettings? precision = null)
     {
-        using var bitmap = Surface(region.Width, region.Height);
+        using var bitmap = Surface(region.Width, region.Height, precision);
         using var canvas = new SKCanvas(bitmap);
         canvas.Clear(SKColors.Transparent);
         canvas.Translate(-region.X, -region.Y);
-        DrawTier(bitmap, canvas, layers, region, SKMatrix.Identity);
+        DrawTier(bitmap, canvas, layers, region, SKMatrix.Identity, precision);
         canvas.Flush();
-        return Unpremultiply(bitmap);
+        return Unpremultiply(bitmap, precision);
     }
 
-    private void DrawTier(SKBitmap surface, SKCanvas canvas, Layer[] layers, Area region, SKMatrix parent)
+    private void DrawTier(SKBitmap surface, SKCanvas canvas, Layer[] layers, Area region, SKMatrix parent, ColorSettings? precision = null)
     {
         int start = 0;
         while (start < layers.Length)
@@ -105,28 +105,30 @@ public sealed partial class SkiaRenderer : IRasterBackend
             while (end < layers.Length && layers[end].Clipped) end++;
             var basis = layers[start];
             if (end == start + 1 || basis.Kind == LayerKind.Effect)
-                DrawUnclippedTier(surface, canvas, layers.AsSpan(start, end - start), region, parent);
+                DrawUnclippedTier(surface, canvas, layers.AsSpan(start, end - start), region, parent, precision);
             else
-                DrawClippingStack(canvas, layers.AsSpan(start, end - start), region, parent);
+                DrawClippingStack(canvas, layers.AsSpan(start, end - start), region, parent, precision);
             start = end;
         }
     }
 
-    private void DrawUnclippedTier(SKBitmap surface, SKCanvas canvas, ReadOnlySpan<Layer> layers, Area region, SKMatrix parent)
+    private void DrawUnclippedTier(SKBitmap surface, SKCanvas canvas, ReadOnlySpan<Layer> layers, Area region, SKMatrix parent, ColorSettings? precision = null)
     {
         foreach (var layer in layers)
         {
-            if (layer.Kind != LayerKind.Effect) { Draw(canvas, layer, region, parent); continue; }
+            if (layer.Kind != LayerKind.Effect) { Draw(canvas, layer, region, parent, precision: precision); continue; }
             if (!layer.Visible || !layer.TransformsEnabled || layer.Opacity == 0) continue;
             var mode = CommandEngine.EffectiveBlend(layer);
             if (mode == Blend.Normal && !layer.Effects.Any(ProcessesPixels)) continue;
             canvas.Flush();
-            var original = Unpremultiply(surface);
+            var original = Unpremultiply(surface, precision);
             var evaluated = Evaluate(original, layer.Effects, region.X, region.Y);
             var maskMatrix = SKMatrix.Concat(parent, SpatialMatrix(layer));
             if (!maskMatrix.TryInvert(out var inverse)) continue;
             using var vectorCoverage = VectorCoverage(layer.VectorMask, region, maskMatrix);
             var bytes = original.Rgba;
+            PixelBuffer? working = precision is null ? null : new(region.Width, region.Height, precision);
+            working?.Copy(original, 0, 0, region.Width * region.Height);
             for (int y = 0; y < region.Height; y++)
             for (int x = 0; x < region.Width; x++)
             {
@@ -143,6 +145,17 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 int sx = wx - evaluated.X, sy = wy - evaluated.Y;
                 bool inside = sx >= 0 && sy >= 0 && sx < evaluated.Pixels.Width && sy < evaluated.Pixels.Height;
                 int src = inside ? (sy * evaluated.Pixels.Width + sx) * 4 : 0;
+                if (working is not null)
+                {
+                    var backdrop = PixelBuffer.Get(original, dst / 4);
+                    var foreground = inside ? PixelBuffer.Get(evaluated.Pixels, src / 4) : default;
+                    double added = foreground.A * mix, kept = backdrop.A * (1 - mix), total = added + kept;
+                    double Channel(double b, double f) =>
+                        (b * kept + (backdrop.A == 0 ? f : NativeBlend(b, f, mode)) * added) / total;
+                    working.Set(dst / 4, total == 0 ? default :
+                        new(Channel(backdrop.R, foreground.R), Channel(backdrop.G, foreground.G), Channel(backdrop.B, foreground.B), total));
+                    continue;
+                }
                 var adjusted = evaluated.Pixels.Rgba;
                 double addition = inside ? adjusted[src + 3] / 255d * mix : 0;
                 double retained = bytes[dst + 3] / 255d * (1 - mix);
@@ -155,7 +168,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 }
                 bytes[dst + 3] = Byte(alpha);
             }
-            using var result = Bitmap(original);
+            using var result = RasterBitmap(working?.Finish() ?? original, precision);
             using var paint = new SKPaint { BlendMode = SKBlendMode.Src };
             canvas.DrawBitmap(result, region.X, region.Y, paint);
         }
@@ -175,7 +188,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
     }
 
     private void Draw(SKCanvas canvas, Layer layer, Area region, SKMatrix parent,
-        Action<SKCanvas, Frame, SKPaint?>? drawLeaf = null)
+        Action<SKCanvas, Frame, SKPaint?>? drawLeaf = null, ColorSettings? precision = null)
     {
         if (!layer.Visible || layer.Opacity == 0 || layer.Kind == LayerKind.Effect) return;
         bool bypass = !layer.TransformsEnabled;
@@ -193,7 +206,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 Blend.Overlay => SKBlendMode.Overlay, _ => SKBlendMode.SrcOver
             }
         };
+        if (precision is not null) paint.ColorF = new SKColorF(1, 1, 1, (float)layer.Opacity);
         if (blender is not null) paint.Blender = blender;
+        drawLeaf ??= precision is null ? DrawFrame : DrawNativeFrame;
 
         var spatial = SpatialMatrix(layer);
         if (spatial != SKMatrix.Identity)
@@ -202,10 +217,10 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var projection = SKMatrix.Concat(parent, SKMatrix.Concat(spatial, parentInverse));
             if (layer.Kind != LayerKind.Group)
             {
-                if (PrepareLayer(layer, effects) is not { } frame) return;
+                if (PrepareLayer(layer, effects, precision) is not { } frame) return;
                 canvas.Save();
                 canvas.Concat(SKMatrix.Concat(projection, world));
-                (drawLeaf ?? DrawFrame)(canvas, frame, paint);
+                drawLeaf(canvas, frame, paint);
                 canvas.Restore();
                 return;
             }
@@ -222,11 +237,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
             }
             else regionToDraw = sourceBounds;
             var local = EnclosingPixels(regionToDraw);
-            using var output = Surface(local.Width, local.Height);
+            using var output = Surface(local.Width, local.Height, precision);
             using var drawing = new SKCanvas(output);
             drawing.Clear(SKColors.Transparent);
             drawing.Translate(-local.X, -local.Y);
-            Draw(drawing, neutral, local, parent);
+            Draw(drawing, neutral, local, parent, precision: precision);
             drawing.Flush();
             using var image = SKImage.FromBitmap(output);
             canvas.Save();
@@ -236,15 +251,15 @@ public sealed partial class SkiaRenderer : IRasterBackend
             return;
         }
 
-        if (layer.Kind == LayerKind.Group && TryDrawPlacedGroup(canvas, layer, region, parent, paint)) return;
+        if (layer.Kind == LayerKind.Group && TryDrawPlacedGroup(canvas, layer, region, parent, paint, precision)) return;
 
         if (layer.Kind == LayerKind.Group)
         {
-            using var group = Surface(region.Width, region.Height);
+            using var group = Surface(region.Width, region.Height, precision);
             using var groupCanvas = new SKCanvas(group);
             groupCanvas.Clear(SKColors.Transparent);
             groupCanvas.Translate(-region.X, -region.Y);
-            DrawTier(group, groupCanvas, layer.Children, region, world);
+            DrawTier(group, groupCanvas, layer.Children, region, world, precision);
             groupCanvas.Flush();
             if (!effects.Any(ProcessesPixels) && (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask))
             {
@@ -252,8 +267,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 return;
             }
 
-            var frame = Evaluate(Unpremultiply(group), effects, region.X, region.Y);
-            using var adjusted = Bitmap(frame.Pixels);
+            var frame = Evaluate(Unpremultiply(group, precision), effects, region.X, region.Y);
+            using var adjusted = RasterBitmap(frame.Pixels, precision);
             using var vectorCoverage = VectorCoverage(layer.VectorMask, region, world);
             var groupMask = layer.MaskEnabled ? layer.Mask : null;
             if (groupMask is null && vectorCoverage is null)
@@ -262,7 +277,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 return;
             }
 
-            using var output = Surface(region.Width, region.Height);
+            using var output = Surface(region.Width, region.Height, precision);
             using var outputCanvas = new SKCanvas(output);
             outputCanvas.Clear(SKColors.Transparent);
             outputCanvas.Translate(-region.X, -region.Y);
@@ -287,15 +302,15 @@ public sealed partial class SkiaRenderer : IRasterBackend
             return;
         }
 
-        if (PrepareLayer(layer, effects) is not { } evaluated) return;
+        if (PrepareLayer(layer, effects, precision) is not { } evaluated) return;
         canvas.Save();
         canvas.Concat(world);
-        (drawLeaf ?? DrawFrame)(canvas, evaluated, paint);
+        drawLeaf(canvas, evaluated, paint);
         canvas.Restore();
     }
 
     // Resize a group after its children and effects have been composited.
-    private bool TryDrawPlacedGroup(SKCanvas canvas, Layer layer, Area region, SKMatrix parent, SKPaint paint)
+    private bool TryDrawPlacedGroup(SKCanvas canvas, Layer layer, Area region, SKMatrix parent, SKPaint paint, ColorSettings? precision)
     {
         if (layer.Placement == new Placement() || !parent.TryInvert(out var parentInverse)) return false;
         var projection = SKMatrix.Concat(parent, SKMatrix.Concat(PlacementMatrix(layer.Placement), parentInverse));
@@ -306,11 +321,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
         var source = layer with { Placement = new(), Opacity = 1, Blend = Blend.Normal,
             Effects = layer.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() };
-        using var intermediate = Surface(local.Width, local.Height);
+        using var intermediate = Surface(local.Width, local.Height, precision);
         using var intermediateCanvas = new SKCanvas(intermediate);
         intermediateCanvas.Clear(SKColors.Transparent);
         intermediateCanvas.Translate(-local.X, -local.Y);
-        Draw(intermediateCanvas, source, local, parent);
+        Draw(intermediateCanvas, source, local, parent, precision: precision);
         intermediateCanvas.Flush();
         using var image = SKImage.FromBitmap(intermediate);
         canvas.Save();
@@ -320,7 +335,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return true;
     }
 
-    private Frame? PrepareLayer(Layer layer, Effect[] effects)
+    private Frame? PrepareLayer(Layer layer, Effect[] effects, ColorSettings? precision = null)
     {
         Frame frame;
         if (layer.Kind == LayerKind.Path)
@@ -328,7 +343,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var stroke = effects.FirstOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.Stroke);
             var fill = effects.FirstOrDefault(effect => effect.Enabled && effect.Kind == EffectKind.PathFill);
             if (RasterizePath(layer.Contours, stroke, fill) is not { } vector) return null;
-            frame = Evaluate(vector.Pixels, effects.Where(effect => !ReferenceEquals(effect, stroke) &&
+            frame = Evaluate(precision is null ? vector.Pixels : PixelBuffer.Convert(vector.Pixels, precision), effects.Where(effect => !ReferenceEquals(effect, stroke) &&
                 effect.Kind != EffectKind.PathFill).ToArray(), vector.X, vector.Y);
         }
         else
@@ -341,7 +356,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 _ => vectors.GetValue(layer, Rasterize)
             };
             if (source is null) return null;
-            frame = Evaluate(source, effects, raster?.X ?? 0, raster?.Y ?? 0);
+            frame = Evaluate(precision is null ? source : PixelBuffer.Convert(source, precision), effects, raster?.X ?? 0, raster?.Y ?? 0);
         }
         if (layer.MaskEnabled && layer.Mask is { } mask) frame = ApplyMask(frame, mask);
         using var coverage = VectorCoverage(layer.VectorMask, new(frame.X, frame.Y, frame.Pixels.Width, frame.Pixels.Height), SKMatrix.Identity);
@@ -363,16 +378,18 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var parent = NativeParentMatrix(document.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
             if (!parent.TryInvert(out var inverse)) throw new InvalidDataException("The parent group transform cannot be inverted.");
             var region = EnclosingPixels(inverse.MapRect(SKRect.Create(document.Width, document.Height)));
-            return new(CompositeRegion([layer], region), region.X, region.Y);
+            return new(CompositeRegion([layer], region, NativePrecision(document)), region.X, region.Y);
         }
         Effect[] effects = layer.TransformsEnabled ? layer.Effects : [];
-        if (PrepareLayer(layer, effects) is not { } frame)
+        if (PrepareLayer(layer, effects, NativePrecision(document)) is not { } frame)
             return new(new Pixels(layer.Width, layer.Height, new byte[layer.Width * layer.Height * 4]), layer.RasterX, layer.RasterY);
         if (layer.ActiveTransform == new Transform() && layer.Placement == new Placement() && layer.RasterGrid is null) return new(frame.Pixels, frame.X, frame.Y);
 
         var matrix = LayerMatrix(layer, !layer.TransformsEnabled);
         if (layer.RasterGrid is { } grid) matrix = SKMatrix.Concat(matrix, ToSkia(grid));
         var area = EnclosingPixels(matrix.MapRect(SKRect.Create(frame.X, frame.Y, frame.Pixels.Width, frame.Pixels.Height)));
+        if (NativePrecision(document) is { } precision && matrix.TryInvert(out var inverseMatrix))
+            return new(Resample(frame.Pixels, area, inverseMatrix, frame.X, frame.Y, precision), area.X, area.Y);
         using var output = Surface(area.Width, area.Height);
         using var canvas = new SKCanvas(output);
         canvas.Clear(SKColors.Transparent);
@@ -555,11 +572,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 input = node;
             }
             const long budget = 64 * 1024 * 1024;
-            if (cache.Nodes.Sum(node => node.Frame.Pixels.Rgba.LongLength) > budget)
+            if (cache.Nodes.Sum(node => node.Frame.Pixels.StorageBytes) > budget)
             {
                 cache.Nodes.Clear();
                 long size = 0;
-                for (var node = input; node is not null; node = node.Input) size += node.Frame.Pixels.Rgba.LongLength;
+                for (var node = input; node is not null; node = node.Input) size += node.Frame.Pixels.StorageBytes;
                 if (size <= budget)
                     for (var node = input; node is not null; node = node.Input) cache.Nodes.Add(node);
             }
@@ -577,6 +594,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             int x = (int)Math.Floor(area.Left), y = (int)Math.Floor(area.Top);
             int width = (int)Math.Ceiling(area.Right) - x, height = (int)Math.Ceiling(area.Bottom) - y;
             Format.Dimensions(width, height);
+            if (source.Native is { } native && transform.TryInvert(out var inverse))
+                return new(Resample(source, new(x, y, width, height), inverse, frame.X, frame.Y, native.Settings), x, y);
             using var bitmap = Bitmap(source);
             using var image = SKImage.FromBitmap(bitmap);
             using var output = Surface(width, height);
@@ -595,20 +614,14 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (effect.Kind == EffectKind.BitCrush)
         {
             int block = Math.Max(1, (int)Math.Round(effect.A));
-            var crushed = new byte[source.Rgba.Length];
+            var crushed = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
             for (int y = 0; y < source.Height; y++)
             for (int x = 0; x < source.Width; x++)
-                source.Rgba.AsSpan((y / block * block * source.Width + x / block * block) * 4, 4)
-                    .CopyTo(crushed.AsSpan((y * source.Width + x) * 4, 4));
-            return frame with { Pixels = source with { Rgba = crushed } };
+                crushed.Copy(source, y / block * block * source.Width + x / block * block, y * source.Width + x);
+            return frame with { Pixels = crushed.Finish() };
         }
 
-        var bytes = (byte[])source.Rgba.Clone();
-        if (effect.Kind == EffectKind.Opacity)
-        {
-            for (int i = 3; i < bytes.Length; i += 4) bytes[i] = (byte)Math.Round(bytes[i] * effect.A);
-            return frame with { Pixels = source with { Rgba = bytes } };
-        }
+        var buffer = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
         float hueR = 0, hueG = 0, hueB = 0;
         if (effect.Kind == EffectKind.HueSaturation)
         {
@@ -617,9 +630,10 @@ public sealed partial class SkiaRenderer : IRasterBackend
             hueG = (float)((1 - Math.Cos(angle) - Math.Sqrt(3) * Math.Sin(angle)) / 3);
             hueB = (float)((1 - Math.Cos(angle) + Math.Sqrt(3) * Math.Sin(angle)) / 3);
         }
-        for (int i = 0; i < bytes.Length; i += 4)
+        for (int i = 0; i < source.Width * source.Height; i++)
         {
-            double r = bytes[i] / 255.0, g = bytes[i + 1] / 255.0, b = bytes[i + 2] / 255.0;
+            var sample = PixelBuffer.Get(source, i);
+            double r = sample.R, g = sample.G, b = sample.B;
             switch (effect.Kind)
             {
                 case EffectKind.BrightnessContrast:
@@ -638,11 +652,10 @@ public sealed partial class SkiaRenderer : IRasterBackend
                     break;
                 case EffectKind.Grayscale: r = g = b = 0.2126 * r + 0.7152 * g + 0.0722 * b; break;
             }
-            bytes[i] = Byte(r);
-            bytes[i + 1] = Byte(g);
-            bytes[i + 2] = Byte(b);
+            if (effect.Kind == EffectKind.Opacity) buffer.CopyWithAlpha(source, i, i, sample.A * effect.A);
+            else buffer.Set(i, new(r, g, b, sample.A));
         }
-        return frame with { Pixels = source with { Rgba = bytes } };
+        return frame with { Pixels = buffer.Finish() };
     }
 
     private static Frame AlphaEffect(Frame frame, int radius, bool grow, uint ink, double opacity, int padding)
@@ -650,16 +663,25 @@ public sealed partial class SkiaRenderer : IRasterBackend
         var source = frame.Pixels;
         int width = source.Width + padding * 2, height = source.Height + padding * 2;
         Format.Dimensions(width, height);
-        using var input = Bitmap(source);
-        using var output = Surface(width, height);
+        var precision = WorkingPrecision(source);
+        using var input = RasterBitmap(source, precision);
+        using var output = Surface(width, height, precision);
         using var canvas = new SKCanvas(output);
         canvas.Clear(SKColors.Transparent);
         using var filter = radius == 0 ? null : grow ? SKImageFilter.CreateDilate(radius, radius) : SKImageFilter.CreateErode(radius, radius);
         using var paint = new SKPaint { ImageFilter = filter };
         canvas.DrawBitmap(input, padding, padding, paint);
         canvas.Flush();
-        var rgba = Unpremultiply(output);
+        var rgba = Unpremultiply(output, precision);
         double alpha = (ink >> 24) / 255d * opacity;
+        if (precision is not null)
+        {
+            var buffer = new PixelBuffer(width, height, precision);
+            var color = PixelValue.FromArgb(ink);
+            for (int i = 0; i < width * height; i++)
+                buffer.Set(i, color with { A = PixelBuffer.Alpha(rgba, i) * alpha });
+            return new(buffer.Finish(), frame.X - padding, frame.Y - padding);
+        }
         for (int i = 0; i < rgba.Rgba.Length; i += 4)
         {
             rgba.Rgba[i] = (byte)(ink >> 16);
@@ -676,18 +698,17 @@ public sealed partial class SkiaRenderer : IRasterBackend
         int width = Math.Max(bottom.X + bottom.Pixels.Width, top.X + top.Pixels.Width) - x;
         int height = Math.Max(bottom.Y + bottom.Pixels.Height, top.Y + top.Pixels.Height) - y;
         Format.Dimensions(width, height);
-        using var output = Surface(width, height);
+        var precision = WorkingPrecision(top.Pixels) ?? WorkingPrecision(bottom.Pixels);
+        using var output = Surface(width, height, precision);
         using var canvas = new SKCanvas(output);
         canvas.Clear(SKColors.Transparent);
         canvas.Translate(-x, -y);
-        using var bottomImage = CreateFrameImage(bottom.Pixels);
-        canvas.DrawImage(bottomImage, bottom.X, bottom.Y, new SKSamplingOptions(SKFilterMode.Linear));
+        DrawNativeFrame(canvas, bottom, null);
         using var paint = new SKPaint { BlendMode = mode switch { Blend.Multiply => SKBlendMode.Multiply,
             Blend.Screen => SKBlendMode.Screen, Blend.Overlay => SKBlendMode.Overlay, Blend.Add => SKBlendMode.Plus, _ => SKBlendMode.SrcOver } };
-        using var topImage = CreateFrameImage(top.Pixels);
-        canvas.DrawImage(topImage, top.X, top.Y, new SKSamplingOptions(SKFilterMode.Linear), paint);
+        DrawNativeFrame(canvas, top, paint);
         canvas.Flush();
-        return new(Unpremultiply(output), x, y);
+        return new(Unpremultiply(output, precision), x, y);
     }
 
     private static Frame StrokeEffect(Frame frame, Effect effect)
@@ -699,15 +720,23 @@ public sealed partial class SkiaRenderer : IRasterBackend
         var outer = AlphaEffect(frame, outside, true, ink, 1, outside);
         if (outside == total) return StackFrames(outer, frame);
         var inner = AlphaEffect(frame, inside, false, 0xFFFFFFFF, 1, inside);
+        PixelBuffer? native = WorkingPrecision(outer.Pixels) is { } precision
+            ? new(outer.Pixels.Width, outer.Pixels.Height, precision) : null;
+        native?.Copy(outer.Pixels, 0, 0, outer.Pixels.Width * outer.Pixels.Height);
         for (int y = 0; y < outer.Pixels.Height; y++)
         for (int x = 0; x < outer.Pixels.Width; x++)
         {
             int sx = x + outer.X - inner.X, sy = y + outer.Y - inner.Y;
             if (sx < 0 || sy < 0 || sx >= inner.Pixels.Width || sy >= inner.Pixels.Height) continue;
-            int i = (y * outer.Pixels.Width + x) * 4 + 3;
-            outer.Pixels.Rgba[i] = (byte)(outer.Pixels.Rgba[i] * (255 - inner.Pixels.Rgba[(sy * inner.Pixels.Width + sx) * 4 + 3]) / 255);
+            int i = y * outer.Pixels.Width + x;
+            int maskIndex = sy * inner.Pixels.Width + sx;
+            if (native is not null)
+                native.CopyWithAlpha(outer.Pixels, i, i,
+                    PixelBuffer.Alpha(outer.Pixels, i) * (1 - PixelBuffer.Alpha(inner.Pixels, maskIndex)));
+            else outer.Pixels.Rgba[i * 4 + 3] = (byte)(outer.Pixels.Rgba[i * 4 + 3] *
+                (255 - inner.Pixels.Rgba[maskIndex * 4 + 3]) / 255);
         }
-        return StackFrames(frame, outer);
+        return StackFrames(frame, native is null ? outer : outer with { Pixels = native.Finish() });
     }
 
     private static Frame ShadowEffect(Frame frame, Effect effect)
@@ -734,9 +763,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
             width = frame.Pixels.Width;
             height = frame.Pixels.Height;
         }
-        using var output = Surface(width, height);
+        var precision = WorkingPrecision(frame.Pixels);
+        using var output = Surface(width, height, precision);
         using var canvas = new SKCanvas(output);
-        using var bitmap = Bitmap(frame.Pixels);
+        using var bitmap = RasterBitmap(frame.Pixels, precision);
+        bitmap.SetImmutable();
         using var image = SKImage.FromBitmap(bitmap);
         using var paint = new SKPaint { BlendMode = SKBlendMode.Plus };
         canvas.Clear(SKColors.Transparent);
@@ -745,12 +776,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
         {
             double position = i / (double)(taps - 1) - .5;
             byte weight = (byte)(Math.Round((i + 1) * 255d / taps) - Math.Round(i * 255d / taps));
-            paint.Color = SKColors.White.WithAlpha(weight);
+            if (precision is null) paint.Color = SKColors.White.WithAlpha(weight);
+            else paint.ColorF = new SKColorF(1, 1, 1, 1f / taps);
             canvas.DrawImage(image, (float)(padX + dx * position), (float)(padY + dy * position),
                 new SKSamplingOptions(SKFilterMode.Linear), paint);
         }
         canvas.Flush();
-        return new Frame(Unpremultiply(output), frame.X - padX, frame.Y - padY);
+        return new Frame(Unpremultiply(output, precision), frame.X - padX, frame.Y - padY);
     }
 
     private static Frame Blur(Frame frame, double sigma)
@@ -766,8 +798,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
             height = source.Height;
         }
 
-        using var input = Bitmap(source);
-        using var output = Surface(width, height);
+        var precision = WorkingPrecision(source);
+        using var input = RasterBitmap(source, precision);
+        using var output = Surface(width, height, precision);
         using var canvas = new SKCanvas(output);
         canvas.Clear(SKColors.Transparent);
         if (sigma < 1)
@@ -782,9 +815,14 @@ public sealed partial class SkiaRenderer : IRasterBackend
             for (int y = -radius; y <= radius; y++)
             for (int x = -radius; x <= radius; x++)
             {
-                byte weight = Byte(kernel[x + radius] * kernel[y + radius] / (sum * sum));
-                if (weight == 0) continue;
-                paint.Color = SKColors.White.WithAlpha(weight);
+                double weight = kernel[x + radius] * kernel[y + radius] / (sum * sum);
+                if (precision is null)
+                {
+                    byte quantized = Byte(weight);
+                    if (quantized == 0) continue;
+                    paint.Color = SKColors.White.WithAlpha(quantized);
+                }
+                else paint.ColorF = new SKColorF(1, 1, 1, (float)weight);
                 canvas.DrawBitmap(input, padding + x, padding + y, paint);
             }
         }
@@ -795,24 +833,25 @@ public sealed partial class SkiaRenderer : IRasterBackend
             canvas.DrawBitmap(input, padding, padding, paint);
         }
         canvas.Flush();
-        return new Frame(Unpremultiply(output), frame.X - padding, frame.Y - padding);
+        return new Frame(Unpremultiply(output, precision), frame.X - padding, frame.Y - padding);
     }
 
     private static Frame ApplyMask(Frame frame, AlphaMask mask)
     {
         var source = frame.Pixels;
-        var bytes = (byte[])source.Rgba.Clone();
+        var buffer = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
         int left = mask.Outside == 255 ? (int)Math.Clamp((long)mask.X - frame.X, 0, source.Width) : 0;
         int top = mask.Outside == 255 ? (int)Math.Clamp((long)mask.Y - frame.Y, 0, source.Height) : 0;
         int right = mask.Outside == 255 ? (int)Math.Clamp((long)mask.X + mask.Width - frame.X, 0, source.Width) : source.Width;
         int bottom = mask.Outside == 255 ? (int)Math.Clamp((long)mask.Y + mask.Height - frame.Y, 0, source.Height) : source.Height;
+        buffer.Copy(source, 0, 0, source.Width * source.Height);
         for (int y = top; y < bottom; y++)
         for (int x = left; x < right; x++)
         {
-            int i = (y * source.Width + x) * 4 + 3;
-            bytes[i] = (byte)((bytes[i] * mask.At(x + frame.X, y + frame.Y) + 127) / 255);
+            int i = y * source.Width + x;
+            buffer.CopyWithAlpha(source, i, i, PixelBuffer.Alpha(source, i) * mask.At(x + frame.X, y + frame.Y) / 255d);
         }
-        return frame with { Pixels = source with { Rgba = bytes } };
+        return frame with { Pixels = buffer.Finish() };
     }
 
     private static Pixels MaskPixels(AlphaMask mask)
@@ -893,40 +932,34 @@ public sealed partial class SkiaRenderer : IRasterBackend
     }
 
     public RasterEdit PaintArea(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, uint color) =>
-        PaintArea(doc, layer, bounds, contains, (_, _) => color);
+        PaintArea(doc, layer, bounds, contains, (_, _) => PixelValue.FromArgb(color));
 
-    private RasterEdit PaintArea(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, Func<float, float, uint> sample)
+    private RasterEdit PaintArea(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, Func<float, float, PixelValue> sample)
     {
         var raster = ResolveRaster(layer) ?? new RasterEdit(new Pixels(layer.Width, layer.Height,
             new byte[layer.Width * layer.Height * 4]), layer.RasterX, layer.RasterY);
         var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
         var area = EnclosingPixels(inverse.MapRect(SKRect.Create(bounds.X, bounds.Y, bounds.Width, bounds.Height)));
-        var patch = new byte[area.Width * area.Height * 4];
+        var patch = new PixelBuffer(area.Width, area.Height, doc.Color);
         bool changed = false;
         for (int y = 0; y < area.Height; y++)
         for (int x = 0; x < area.Width; x++)
         {
             int lx = area.X + x, ly = area.Y + y;
-            int dest = (y * area.Width + x) * 4;
-            if (raster is { } original && lx >= original.X && ly >= original.Y &&
-                lx - original.X < original.Pixels.Width && ly - original.Y < original.Pixels.Height)
-                original.Pixels.Rgba.AsSpan(((ly - original.Y) * original.Pixels.Width + lx - original.X) * 4, 4).CopyTo(patch.AsSpan(dest, 4));
+            int dest = y * area.Width + x;
+            if (lx >= raster.X && ly >= raster.Y &&
+                lx - raster.X < raster.Pixels.Width && ly - raster.Y < raster.Pixels.Height)
+                patch.Copy(raster.Pixels, (ly - raster.Y) * raster.Pixels.Width + lx - raster.X, dest);
             var point = world.MapPoint(lx + .5f, ly + .5f);
             int px = (int)Math.Floor(point.X), py = (int)Math.Floor(point.Y);
             if (px < bounds.X || py < bounds.Y || px >= bounds.X + bounds.Width || py >= bounds.Y + bounds.Height || !contains(px, py)) continue;
-            uint color = sample(point.X, point.Y);
-            if (color >> 24 == 0) continue;
-            double paintAlpha = (color >> 24) / 255.0;
+            var color = sample(point.X, point.Y);
+            if (color.A == 0) continue;
             changed = true;
-            double retained = patch[dest + 3] / 255.0 * (1 - paintAlpha);
-            double alpha = paintAlpha + retained;
-            patch[dest] = Mix(patch[dest], (byte)(color >> 16), retained, paintAlpha, alpha);
-            patch[dest + 1] = Mix(patch[dest + 1], (byte)(color >> 8), retained, paintAlpha, alpha);
-            patch[dest + 2] = Mix(patch[dest + 2], (byte)color, retained, paintAlpha, alpha);
-            patch[dest + 3] = Byte(alpha);
+            patch.Set(dest, color.Over(patch.Get(dest)));
         }
-        var pixels = new Pixels(area.Width, area.Height, patch);
+        var pixels = patch.Finish();
         if (!changed) return raster;
         var edit = new PixelShift(area, [], 0, 0, Patch: pixels);
         return ApplyShift(raster, edit) with { Shift = edit };
@@ -1046,7 +1079,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
             }
         }
         Pixels pixels;
-        if (raster is { } input)
+        if (raster is { } native && doc.Color != PixelBuffer.Rgba8)
+            pixels = Resample(native.Pixels, area, inverse, native.X, native.Y, doc.Color);
+        else if (raster is { } input)
         {
             using var output = Surface(area.Width, area.Height);
             using var canvas = new SKCanvas(output);
@@ -1104,12 +1139,16 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (branch.Length == 0) return null;
         var area = doc.Selection ?? VisibleLayerBounds(doc, id);
         if (area is not { } box) return null;
-        var pixels = CompositeRegion(branch, box);
-        if (doc.SelectionMask is not null)
-            for (int y = 0; y < box.Height; y++)
-            for (int x = 0; x < box.Width; x++)
-                if (!doc.Selected(x + box.X, y + box.Y)) Array.Clear(pixels.Rgba, (y * box.Width + x) * 4, 4);
-        return new(pixels, box.X, box.Y);
+        var pixels = CompositeRegion(branch, box, NativePrecision(doc));
+        if (doc.SelectionMask is null) return new(pixels, box.X, box.Y);
+        var selection = new PixelBuffer(box.Width, box.Height, doc.Color);
+        for (int y = 0; y < box.Height; y++)
+        for (int x = 0; x < box.Width; x++)
+        {
+            int offset = y * box.Width + x;
+            if (doc.Selected(x + box.X, y + box.Y)) selection.Copy(pixels, offset, offset);
+        }
+        return new(selection.Finish(), box.X, box.Y);
     }
 
     public Layer BakeStroke(Layer layer, OutlineArgs outline)
@@ -1126,8 +1165,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (ResolveRaster(editable) is not { } raster) return layer;
         var working = doc.ReplaceLayer(layer.Id, editable);
         var world = WorldMatrix(working.Layers, editable.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
-        var before = raster.Pixels.Rgba;
-        var data = (byte[])before.Clone();
+        var before = raster.Pixels;
+        var data = new PixelBuffer(before.Width, before.Height, doc.Color);
+        data.Copy(before, 0, 0, before.Width * before.Height);
         var area = doc.Selection!.Value;
         if (!world.TryInvert(out var inverse)) return layer;
         for (int y = 0; y < raster.Pixels.Height; y++)
@@ -1139,12 +1179,12 @@ public sealed partial class SkiaRenderer : IRasterBackend
             int fy = area.Y + ((int)point.Y - area.Y) / size * size;
             var src = inverse.MapPoint(fx + .5f, fy + .5f);
             int sx = (int)Math.Floor(src.X) - raster.X, sy = (int)Math.Floor(src.Y) - raster.Y;
-            var destination = data.AsSpan((y * raster.Pixels.Width + x) * 4, 4);
-            if (sx >= 0 && sy >= 0 && sx < raster.Pixels.Width && sy < raster.Pixels.Height)
-                before.AsSpan((sy * raster.Pixels.Width + sx) * 4, 4).CopyTo(destination);
-            else destination.Clear();
+            int destination = y * before.Width + x;
+            if (sx >= 0 && sy >= 0 && sx < before.Width && sy < before.Height)
+                data.Copy(before, sy * before.Width + sx, destination);
+            else data.Set(destination, default);
         }
-        return editable with { Pixels = raster.Pixels with { Rgba = data }, RasterX = raster.X, RasterY = raster.Y, PixelShifts = [] };
+        return editable with { Pixels = data.Finish(), RasterX = raster.X, RasterY = raster.Y, PixelShifts = [] };
     }
 
     public Layer? MoveSelection(Document doc, Layer layer, Area selection, int dx, int dy)
@@ -1175,37 +1215,35 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (localBefore.IsEmpty) return null;
         var area = EnclosingPixels(new SKRect(Math.Min(localBefore.Left, localAfter.Left), Math.Min(localBefore.Top, localAfter.Top),
             Math.Max(localBefore.Right, localAfter.Right), Math.Max(localBefore.Bottom, localAfter.Bottom)));
-        var bytes = new byte[area.Width * area.Height * 4];
+        var buffer = new PixelBuffer(area.Width, area.Height, doc.Color);
         int SourceIndex(int x, int y) => x >= raster.X && y >= raster.Y &&
             x - raster.X < source.Width && y - raster.Y < source.Height
-            ? ((y - raster.Y) * source.Width + x - raster.X) * 4 : -1;
+            ? (y - raster.Y) * source.Width + x - raster.X : -1;
         bool changed = false;
         for (int y = 0; y < area.Height; y++)
         for (int x = 0; x < area.Width; x++)
         {
             int lx = area.X + x, ly = area.Y + y;
-            int index = (y * area.Width + x) * 4;
+            int index = y * area.Width + x;
             var point = world.MapPoint(lx + .5f, ly + .5f);
             int original = SourceIndex(lx, ly);
             bool cut = doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y));
-            if (!cut && original >= 0) source.Rgba.AsSpan(original, 4).CopyTo(bytes.AsSpan(index, 4));
-            if (cut && original >= 0 && source.Rgba[original + 3] != 0) changed = true;
+            if (!cut && original >= 0) buffer.Copy(source, original, index);
+            if (cut && original >= 0 && PixelBuffer.Alpha(source, original) != 0) changed = true;
 
             var from = reverse.Map(point.X, point.Y);
             if (!double.IsFinite(from.X) || !double.IsFinite(from.Y)) continue;
             if (!doc.Selected((int)Math.Floor(from.X), (int)Math.Floor(from.Y))) continue;
             var previous = inverse.MapPoint((float)from.X, (float)from.Y);
             int sample = SourceIndex((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y));
-            if (sample < 0 || source.Rgba[sample + 3] == 0) continue;
+            if (sample < 0 || PixelBuffer.Alpha(source, sample) == 0) continue;
             changed = true;
-            double alpha = source.Rgba[sample + 3] / 255.0;
-            double retained = bytes[index + 3] / 255.0 * (1 - alpha);
-            for (int c = 0; c < 3; c++)
-                bytes[index + c] = Mix(bytes[index + c], source.Rgba[sample + c], retained, alpha, alpha + retained);
-            bytes[index + 3] = Byte(alpha + retained);
+            var backdrop = buffer.Get(index);
+            if (backdrop.A == 0) buffer.Copy(source, sample, index);
+            else buffer.Set(index, PixelBuffer.Get(source, sample).Over(backdrop));
         }
         if (!changed) return null;
-        var edit = new PixelShift(area, [], 0, 0, Patch: new Pixels(area.Width, area.Height, bytes));
+        var edit = new PixelShift(area, [], 0, 0, Patch: buffer.Finish());
         return ApplyShift(raster, edit) with { Shift = edit };
     }
 
@@ -1216,7 +1254,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
         var mask = PixelSelection.Create(source.Width, source.Height, (x, y) =>
         {
-            if (source.Rgba[(y * source.Width + x) * 4 + 3] == 0) return false;
+            if (PixelBuffer.Alpha(source, y * source.Width + x) == 0) return false;
             var p = world.MapPoint(x + raster.X + .5f, y + raster.Y + .5f);
             return doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y));
         });
@@ -1236,36 +1274,34 @@ public sealed partial class SkiaRenderer : IRasterBackend
         int bottom = Math.Max(raster.Y + source.Height, checked(area.Y + area.Height + shift.Dy));
         int width = checked(right - left), height = checked(bottom - top);
         Format.Dimensions(width, height);
-        var rgba = new byte[width * height * 4];
-        int Index(int x, int y) => ((y - top) * width + x - left) * 4;
+        var buffer = new PixelBuffer(width, height, PixelBuffer.Settings(shift.Patch?.Native is not null ? shift.Patch : source));
+        int Index(int x, int y) => (y - top) * width + x - left;
         bool Selected(int x, int y) => shift.Bits.Length == 0 || shift.Bits[(y - area.Y) * area.Width + x - area.X] != 0;
         for (int y = 0; y < source.Height; y++)
-            Buffer.BlockCopy(source.Rgba, y * source.Width * 4, rgba, Index(raster.X, raster.Y + y), source.Width * 4);
+            buffer.Copy(source, y * source.Width, Index(raster.X, raster.Y + y), source.Width);
         if (shift.Patch is { } patch)
         {
             for (int y = 0; y < patch.Height; y++)
-                Array.Copy(patch.Rgba, y * patch.Width * 4, rgba, Index(area.X, area.Y + y), patch.Width * 4);
-            return new(new(width, height, rgba), left, top);
+                buffer.Copy(patch, y * patch.Width, Index(area.X, area.Y + y), patch.Width);
+            return new(buffer.Finish(), left, top);
         }
         for (int y = area.Y; y < area.Y + area.Height; y++)
         for (int x = area.X; x < area.X + area.Width; x++)
-            if (Selected(x, y)) Array.Clear(rgba, Index(x, y), 4);
+            if (Selected(x, y)) buffer.Set(Index(x, y), default);
         if (!shift.Clear)
             for (int y = area.Y; y < area.Y + area.Height; y++)
             for (int x = area.X; x < area.X + area.Width; x++)
             {
                 if (!Selected(x, y)) continue;
                 int destination = Index(x + shift.Dx, y + shift.Dy);
-                int pixel = ((y - raster.Y) * source.Width + x - raster.X) * 4;
-                double alpha = source.Rgba[pixel + 3] / 255.0;
-                double retained = rgba[destination + 3] / 255.0 * (1 - alpha);
-                double output = alpha + retained;
-                if (output == 0) continue;
-                for (int c = 0; c < 3; c++)
-                    rgba[destination + c] = Mix(rgba[destination + c], source.Rgba[pixel + c], retained, alpha, output);
-                rgba[destination + 3] = Byte(output);
+                int pixel = (y - raster.Y) * source.Width + x - raster.X;
+                var backdrop = buffer.Get(destination);
+                var foreground = PixelBuffer.Get(source, pixel);
+                if (foreground.A == 0) continue;
+                if (backdrop.A == 0) buffer.Copy(source, pixel, destination);
+                else buffer.Set(destination, foreground.Over(backdrop));
             }
-        return new(new(width, height, rgba), left, top);
+        return new(buffer.Finish(), left, top);
     }
 
     public Pixels Stroke(Document doc, Layer layer, StrokeArgs stroke) => Stroke(doc, layer, stroke, mask: false);
@@ -1275,7 +1311,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
         var raster = ResolveRaster(layer);
         int width = raster?.Pixels.Width ?? layer.Width;
         int height = raster?.Pixels.Height ?? layer.Height;
-        var bytes = raster?.Pixels is { } source ? (byte[])source.Rgba.Clone() : new byte[width * height * 4];
+        var settings = mask ? PixelBuffer.Rgba8 : doc.Color;
+        var buffer = new PixelBuffer(width, height, settings);
+        if (raster?.Pixels is { } source) buffer.Copy(source, 0, 0, width * height);
         var world = FindMatrix(doc.Layers, layer.Id, SKMatrix.Identity, SKMatrix.Identity, !mask) ?? SKMatrix.Identity;
         world = SKMatrix.Concat(world, SKMatrix.CreateTranslation(raster?.X ?? layer.RasterX, raster?.Y ?? layer.RasterY));
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
@@ -1292,7 +1330,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
         int lastX = (int)Math.Clamp(Math.Ceiling(corners.Right), firstX, width);
         int lastY = (int)Math.Clamp(Math.Ceiling(corners.Bottom), firstY, height);
         int stride = lastX - firstX;
-        var coverage = new byte[stride * (lastY - firstY)];
+        bool eightBit = settings.Depth == ChannelDepth.Bit8;
+        var coverage = new float[stride * (lastY - firstY)];
 
         void Stamp(PointD point)
         {
@@ -1311,9 +1350,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
                     !doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y)))) continue;
                 double dx = p.X - point.X, dy = p.Y - point.Y;
                 double distance = Math.Sqrt(dx * dx + dy * dy);
-                byte mask = Byte(Math.Clamp((radius - distance) / Math.Max(.5, radius * (1 - stroke.Hardness)), 0, 1));
+                double amount = Math.Clamp((radius - distance) / Math.Max(.5, radius * (1 - stroke.Hardness)), 0, 1);
                 int i = (y - firstY) * stride + x - firstX;
-                coverage[i] = Math.Max(coverage[i], mask);
+                coverage[i] = Math.Max(coverage[i], eightBit ? Byte(amount) : (float)amount);
             }
         }
 
@@ -1336,18 +1375,15 @@ public sealed partial class SkiaRenderer : IRasterBackend
         for (int y = firstY; y < lastY; y++)
         for (int x = firstX; x < lastX; x++)
         {
-            double alpha = opacity * coverage[(y - firstY) * stride + x - firstX] / 255;
+            double alpha = opacity * coverage[(y - firstY) * stride + x - firstX] / (eightBit ? 255 : 1);
             if (alpha == 0) continue;
-            int i = (y * width + x) * 4;
-            double retained = bytes[i + 3] / 255.0 * (1 - alpha);
-            if (stroke.Erase) { bytes[i + 3] = Byte(retained); continue; }
-            double output = alpha + retained;
-            bytes[i] = Mix(bytes[i], (byte)(color >> 16), retained, alpha, output);
-            bytes[i + 1] = Mix(bytes[i + 1], (byte)(color >> 8), retained, alpha, output);
-            bytes[i + 2] = Mix(bytes[i + 2], (byte)color, retained, alpha, output);
-            bytes[i + 3] = Byte(output);
+            int i = y * width + x;
+            var backdrop = buffer.Get(i);
+            var foreground = PixelValue.FromArgb(color) with { A = alpha };
+            if (stroke.Erase) buffer.CopyWithAlpha(buffer.Finish(), i, i, backdrop.A * (1 - alpha));
+            else buffer.Set(i, foreground.Over(backdrop));
         }
-        return new(width, height, bytes);
+        return buffer.Finish();
     }
 
     /// <summary>Maps source coordinates onto the canvas for transformed brush strokes.</summary>
@@ -1404,7 +1440,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
     private static byte Mix(byte old, byte color, double retained, double alpha, double output) =>
         (byte)Math.Round((old * retained + color * alpha) / output);
     private static byte Byte(double value) => (byte)Math.Round(Math.Clamp(value, 0, 1) * 255);
-    private static SKBitmap Surface(int width, int height) => new(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
+    private static SKBitmap Surface(int width, int height, ColorSettings? precision = null) =>
+        new(width, height, precision is null ? SKColorType.Rgba8888 : SKColorType.RgbaF32, SKAlphaType.Premul);
 
     private static SKBitmap Bitmap(Pixels pixels)
     {
@@ -1421,8 +1458,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return new(bitmap.Width, bitmap.Height, bytes);
     }
 
-    private static Pixels Unpremultiply(SKBitmap bitmap)
+    private static Pixels Unpremultiply(SKBitmap bitmap, ColorSettings? precision = null)
     {
+        if (precision is not null) return ReadNative(bitmap, precision);
         using var pixmap = bitmap.PeekPixels();
         return ReadIntoArray(bitmap.Width, bitmap.Height, (info, address) =>
             pixmap.ReadPixels(info, address, info.RowBytes));

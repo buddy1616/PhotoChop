@@ -70,7 +70,7 @@ internal static class NewDocumentDialog
         PreserveValueOnUnitChange(resolution, unit => unit == 1 ? 2.54 : 1);
 
         var modes = new ComboBox { ItemsSource = new[] { "RGB", "Grayscale", "CMYK" }, SelectedIndex = 0 };
-        var depths = new ComboBox { ItemsSource = new[] { "8 Bits/Channel", "16 Bits/Channel", "32 Bits/Channel" }, SelectedIndex = 0 };
+        var depths = new ComboBox { ItemsSource = new[] { "8 Bits/Channel", "16 Bits/Channel", "32 Bits/Channel (Float)" }, SelectedIndex = 1 };
         panel.Children.Add(new Label { Content = "Color mode", Target = modes });
         var colorRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
         DockPanel.SetDock(depths, Dock.Right);

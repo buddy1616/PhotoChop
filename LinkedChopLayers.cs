@@ -58,7 +58,9 @@ public partial class MainWindow
                 snapshot = await Task.Run(() =>
                 {
                     var document = ProjectFile.Open(path);
-                    return new ChopSnapshotArgs(path, renderer.EncodePng(renderer.Composite(document), document.PixelsPerInch));
+                    var pixels = renderer.CompositeForStorage(document);
+                    return pixels.Native is { } native ? new ChopSnapshotArgs(path, Native: native) :
+                        new ChopSnapshotArgs(path, renderer.EncodePng(pixels, document.PixelsPerInch));
                 });
             }
             catch (Exception error) { failure = error; }

@@ -17,12 +17,102 @@ public sealed class EditorTests : IDisposable
     private CommandEngine NewEngine(int width = 32, int height = 24)
     {
         var engine = new CommandEngine(renderer);
-        engine.Execute(Command.Of("document.create", new NewArgs("test", width, height)));
+        engine.Execute(Command.Of("document.create", new NewArgs("test", width, height, Color: new())));
         return engine;
     }
 
     private static void Layer(CommandEngine engine, LayerArgs args) => engine.Execute(Command.Of("layer.create", args));
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
+
+    [Fact]
+    public void DefaultSixteenBitGradientAndBrushRetainPrecisionInNativePatchResources()
+    {
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("precision", 5, 2,
+            "#FF000000", StarterLayers: true)));
+        Assert.Equal(ChannelDepth.Bit16, engine.Current!.Color.Depth);
+        const string id = "precision-layer";
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(.5, .5), new(4.5, .5),
+            "#FF000000", "#FFFFFFFF"), id));
+        var raster = renderer.ResolveRaster(engine.Current.AllLayers().Single(layer => layer.Id == id))!;
+        Assert.Equal(16384, System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(raster.Pixels.Native!.Planes[0].AsSpan(2)));
+        Assert.Equal(64, raster.Pixels.Rgba[4]);
+        engine.Execute(Command.Of("layer.paintStroke", new StrokeArgs([new(.5, 1.5)], 1, 1, .001,
+            "#FFFFFFFF", false), id));
+        var edited = renderer.ResolveRaster(engine.Current.AllLayers().Single(layer => layer.Id == id))!;
+        Assert.InRange(PixelBuffer.Get(edited.Pixels, 5).R, .00098, .00103);
+        Assert.Equal(0, edited.Pixels.Rgba[5 * 4]);
+
+        string path = Path.Combine(folder, "precision.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(path)));
+        using (var zip = ZipFile.OpenRead(path))
+        {
+            Assert.NotNull(zip.GetEntry("pixels/precision-layer.planes"));
+            Assert.NotNull(zip.GetEntry("shifts/precision-layer/0.planes"));
+            Assert.Null(zip.GetEntry("pixels/precision-layer.rgba"));
+        }
+        var reopened = ProjectFile.Open(path);
+        var restored = renderer.ResolveRaster(reopened.AllLayers().Single(layer => layer.Id == id))!;
+        Assert.Equal(edited.Pixels.Native!.Planes.SelectMany(bytes => bytes), restored.Pixels.Native!.Planes.SelectMany(bytes => bytes));
+    }
+
+    [Fact]
+    public void FloatSamplesSurviveSelectionMovesClipboardAndFlatten()
+    {
+        var engine = new CommandEngine(renderer);
+        var settings = new ColorSettings(ChannelColorMode.Rgb, ChannelDepth.Bit32);
+        engine.Execute(Command.Of("document.create", new NewArgs("float-edit", 6, 3, Color: settings)));
+        Layer(engine, new("float-raster", "Float", LayerKind.Raster));
+        var native = new PixelBuffer(3, 1, settings);
+        native.Set(0, new(.1234567, .2, 1.25, 1));
+        engine.Execute(Command.Of("layer.channels", native.Finish().Native!, "float-raster"));
+        engine.Execute(Command.Of("document.selection", new Area(0, 0, 1, 1)));
+        engine.Execute(Command.Of("layer.moveSelection", new PointD(1, 0), "float-raster"));
+        engine.Execute(Command.Of<Area?>("document.selection", null));
+        var current = renderer.ResolveRaster(engine.Current!.Layers[0])!;
+        var point = PixelBuffer.Get(current.Pixels, 1);
+        Assert.Equal(.1234567, point.R, 6);
+        Assert.Equal(1.25, point.B, 6);
+        engine.Execute(Command.Of("document.selection", new Area(1, 0, 1, 1)));
+        var copied = renderer.CopyPixels(engine.Current!, "float-raster")!;
+        engine.Execute(Command.Of("layer.pastePixels", new PastePixelsArgs("copy", "Copy", [], X: 4, Native: copied.Pixels.Native)));
+        engine.Execute(Command.Of("document.flatten", "flattened"));
+        var flattened = Assert.Single(engine.Current!.Layers).Pixels!;
+        Assert.Equal(.1234567, PixelBuffer.Get(flattened, 4).R, 6);
+        Assert.Equal(1.25, PixelBuffer.Get(flattened, 4).B, 6);
+    }
+
+    [Fact]
+    public void DocumentSettingsConvertRasterModeAndDepthAndCanBeUndone()
+    {
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("settings", 5, 2)));
+        Layer(engine, new("art", "Art", LayerKind.Raster));
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(.5, .5), new(4.5, .5),
+            "#FF000000", "#FFFFFFFF"), "art"));
+        var original = engine.Current!;
+        var grayscale = new ColorSettings(ChannelColorMode.Grayscale, ChannelDepth.Bit16);
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(grayscale, 300)));
+        Assert.Equal(300, engine.Current!.PixelsPerInch);
+        Assert.Equal(2, Assert.Single(engine.Current.Layers).Pixels!.Native!.Planes.Length);
+        var cmyk = new ColorSettings(ChannelColorMode.Cmyk, ChannelDepth.Bit32);
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(cmyk, 300)));
+        string cmykPath = Path.Combine(folder, "cmyk.chop");
+        engine.Execute(Command.Of("document.save", new PathArgs(cmykPath)));
+        var reopened = ProjectFile.Open(cmykPath);
+        Assert.Equal(cmyk, reopened.Color);
+        Assert.Equal(5, Assert.Single(reopened.Layers).Pixels!.Native!.Planes.Length);
+        engine.Execute(Command.Of("document.settings", new DocumentSettingsArgs(new(), 72)));
+        Assert.Null(Assert.Single(engine.Current!.Layers).Pixels!.Native);
+        engine.Execute(Command.Of("layer.gradient", new GradientArgs(new(.5, .5), new(4.5, .5),
+            "#FF000000", "#FFFFFFFF"), "art"));
+        Assert.Null(renderer.ResolveRaster(Assert.Single(engine.Current!.Layers))!.Pixels.Native);
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("history.undo", 0));
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Same(original, engine.Current);
+    }
 
     [Fact]
     public void GpuPreviewEligibilityKeepsBackdropEffectsClippingAndGroupMasksOnCpu()

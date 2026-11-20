@@ -4,7 +4,7 @@ public sealed record PathNode(PointD Point, PointD? Incoming = null, PointD? Out
 public sealed record PathContour(PathNode[] Nodes, bool Closed = false);
 public sealed record CreatePathArgs(string Id, string Name, PathContour[] Contours, string? Above = null, string? Parent = null);
 public sealed record SelectionPathsArgs(string IdPrefix, string? Above = null, string? Parent = null);
-public sealed record ChopSnapshotArgs(string SourcePath, byte[] Png);
+public sealed record ChopSnapshotArgs(string SourcePath, byte[]? Png = null, ColorPlanes? Native = null);
 public sealed record CreateChopArgs(string Id, string Name, ChopSnapshotArgs Snapshot, string? Parent = null);
 
 /// <summary>Traces exact pixel edges. Diagonally touching islands are separate paths.</summary>

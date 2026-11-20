@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using Chop.Core;
@@ -8,6 +9,7 @@ namespace PhotoChop;
 public partial class MainWindow
 {
     private const string ClipboardOrigin = "CHOP.PixelOrigin";
+    private const string ClipboardPrecision = "CHOP.NativeColorPlanes";
     private void CopyPixels()
     {
         if (active?.Engine.Current is not { } doc || ActiveLayer() is not { } layer) return;
@@ -17,6 +19,8 @@ public partial class MainWindow
             var data = new DataObject();
             data.SetImage(EditorCanvas.Bitmap(copy.Pixels));
             data.SetData("PNG", new MemoryStream(renderer.EncodePng(copy.Pixels), writable: false));
+            if (copy.Pixels.Native is { } native)
+                data.SetData(ClipboardPrecision, new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(native, Format.Json), writable: false));
             data.SetData(ClipboardOrigin, $"{doc.Id}|{copy.X}|{copy.Y}");
             Clipboard.SetDataObject(data, true);
             Say("Copied pixels");
@@ -48,6 +52,23 @@ public partial class MainWindow
         return ClipboardDib.Read() ?? Clipboard.GetImage();
     }
 
+    private static ColorPlanes? ReadNativeClipboard(IDataObject? data, int width, int height)
+    {
+        try
+        {
+            if (data?.GetDataPresent(ClipboardPrecision, autoConvert: false) != true) return null;
+            using var stream = data.GetData(ClipboardPrecision, autoConvert: false) as Stream;
+            if (stream is not { CanSeek: true } || stream.Length > 512L * 1024 * 1024) return null;
+            stream.Position = 0;
+            var native = JsonSerializer.Deserialize<ColorPlanes>(stream, Format.Json);
+            if (native is null || native.Width != width || native.Height != height) return null;
+            ChannelSamples.Validate(native);
+            return native;
+        }
+        catch (Exception error) when (error is JsonException or IOException or InvalidDataException or
+            System.Runtime.InteropServices.COMException or ArgumentException) { return null; }
+    }
+
     private void PastePixels()
     {
         Guard(() =>
@@ -56,6 +77,7 @@ public partial class MainWindow
             var image = ClipboardBitmap(data);
             if (image is null) { Say("The clipboard has no image."); return; }
             Format.Dimensions(image.PixelWidth, image.PixelHeight);
+            var native = ReadNativeClipboard(data, image.PixelWidth, image.PixelHeight);
             var encoder = new PngBitmapEncoder();
             encoder.Frames.Add(BitmapFrame.Create(image));
             using var bytes = new MemoryStream();
@@ -65,7 +87,7 @@ public partial class MainWindow
             {
                 var session = NewSession();
                 session.Engine.Execute(Command.Of("document.create", new NewArgs(Format.Id(), image.PixelWidth, image.PixelHeight)));
-                session.Engine.Execute(Command.Of("layer.pastePixels", new PastePixelsArgs(id, "Pasted Layer", bytes.ToArray())));
+                session.Engine.Execute(Command.Of("layer.pastePixels", new PastePixelsArgs(id, "Pasted Layer", bytes.ToArray(), Native: native)));
                 session.ActiveId = id;
                 AddSession(session);
                 return;
@@ -81,7 +103,7 @@ public partial class MainWindow
             }
             string? parent = DestinationGroup();
             if (parent is not null) active.Collapsed.Remove(parent);
-            Run("layer.pastePixels", new PastePixelsArgs(id, "Pasted Layer", bytes.ToArray(), parent, x, y), selectId: id);
+            Run("layer.pastePixels", new PastePixelsArgs(id, "Pasted Layer", bytes.ToArray(), parent, x, y, native), selectId: id);
         });
     }
 }

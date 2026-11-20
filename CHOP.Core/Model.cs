@@ -25,7 +25,10 @@ public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, dou
     double Size = 0, double Spread = 0, double Opacity = 1);
 
 /// <summary>Pixels are straight-alpha, row-major RGBA8. Treat buffers as immutable.</summary>
-public sealed record Pixels(int Width, int Height, byte[] Rgba);
+public sealed record Pixels(int Width, int Height, byte[] Rgba, ColorPlanes? Native = null)
+{
+    public long StorageBytes => Rgba.LongLength + (Native?.Planes.Sum(plane => plane.LongLength) ?? 0);
+}
 public sealed record AlphaMask(int Width, int Height, byte[] Alpha, int X = 0, int Y = 0, byte Outside = 255)
 {
     public byte At(int x, int y)
@@ -148,6 +151,7 @@ public interface IRasterBackend
     Pixels DecodePng(byte[] data);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
+    Pixels CompositeForStorage(Document document);
     Document ResolveFloating(Document document);
     RasterEdit? CopyPixels(Document document, string layerId);
     AlphaMask ReprojectMask(Document document, Layer layer);

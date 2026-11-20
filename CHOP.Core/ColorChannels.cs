@@ -23,6 +23,11 @@ public static class ChannelSamples
         _ => [ColorComponent.Red, ColorComponent.Green, ColorComponent.Blue]
     };
 
+    public static int ComponentCount(ChannelColorMode mode) => mode switch
+    {
+        ChannelColorMode.Grayscale => 1, ChannelColorMode.Cmyk => 4, _ => 3
+    };
+
     public static int Bytes(ChannelDepth depth) => depth switch
     {
         ChannelDepth.Bit8 => 1, ChannelDepth.Bit16 => 2, ChannelDepth.Bit32 => 4,
@@ -45,8 +50,8 @@ public static class ChannelSamples
     public static void Validate(ColorPlanes source)
     {
         Validate(source.Settings);
-        if (source.Planes is null || source.Planes.Length < Components(source.Settings.Mode).Length ||
-            source.Planes.Length > Components(source.Settings.Mode).Length + 1)
+        if (source.Planes is null || source.Planes.Length < ComponentCount(source.Settings.Mode) ||
+            source.Planes.Length > ComponentCount(source.Settings.Mode) + 1)
             throw new InvalidDataException("Incorrect number of color planes.");
         foreach (byte[] samples in source.Planes) Validate(source.Width, source.Height, source.Settings.Depth, samples);
     }
@@ -89,7 +94,7 @@ public static class ChannelSamples
     {
         Validate(source);
         var rgba = new byte[checked(source.Width * source.Height * 4)];
-        int components = Components(source.Settings.Mode).Length;
+        int components = ComponentCount(source.Settings.Mode);
         for (int i = 0; i < rgba.Length / 4; i++)
         {
             float Sample(int channel) => Read(source.Planes[channel], source.Settings.Depth, i);

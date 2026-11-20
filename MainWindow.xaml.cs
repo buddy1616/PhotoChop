@@ -327,6 +327,7 @@ public partial class MainWindow : Window
         Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
 
         var edit = Menu("Edit");
+        Item(edit, "Document Settings…", EditDocumentSettings);
         Item(edit, "Undo", () => Run("history.undo", 0), "Ctrl+Z");
         Item(edit, "Redo", () => Run("history.redo", 0), "Ctrl+Y");
         Item(edit, "Copy Pixels", CopyPixels, "Ctrl+C");

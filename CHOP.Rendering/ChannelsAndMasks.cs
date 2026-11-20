@@ -56,39 +56,53 @@ public sealed partial class SkiaRenderer
 
     public RasterEdit PaintGradient(Document document, Layer layer, Area bounds, GradientArgs gradient)
     {
-        uint first = Format.Color(gradient.StartColor), last = Format.Color(gradient.EndColor);
+        var first = PixelValue.FromArgb(Format.Color(gradient.StartColor));
+        var last = PixelValue.FromArgb(Format.Color(gradient.EndColor));
         double dx = gradient.End.X - gradient.Start.X, dy = gradient.End.Y - gradient.Start.Y;
         double lengthSquared = dx * dx + dy * dy;
         return PaintArea(document, layer, bounds, (x, y) => document.Selection is null || document.Selected(x, y), (x, y) =>
         {
             double t = Math.Clamp(((x - gradient.Start.X) * dx + (y - gradient.Start.Y) * dy) / lengthSquared, 0, 1);
-            uint Interpolate(int shift) => (uint)Math.Round(((first >> shift) & 255) * (1 - t) + ((last >> shift) & 255) * t) << shift;
-            return Interpolate(24) | Interpolate(16) | Interpolate(8) | Interpolate(0);
+            var blended = PixelValue.Lerp(first, last, t);
+            if (document.Color.Depth != ChannelDepth.Bit8) return blended;
+            static double Round(double value) => Math.Round(value * 255) / 255;
+            return new(Round(blended.R), Round(blended.G), Round(blended.B), Round(blended.A));
         });
     }
 
-    private void DrawClippingStack(SKCanvas destination, ReadOnlySpan<Layer> stack, Area region, SKMatrix parent)
+    private void DrawClippingStack(SKCanvas destination, ReadOnlySpan<Layer> stack, Area region, SKMatrix parent, ColorSettings? precision)
     {
         var basis = stack[0];
         if (!basis.Visible || basis.Opacity == 0) return;
-        using var surface = Surface(region.Width, region.Height);
+        using var surface = Surface(region.Width, region.Height, precision);
         using var canvas = new SKCanvas(surface);
         canvas.Clear(SKColors.Transparent);
         canvas.Translate(-region.X, -region.Y);
         Draw(canvas, basis with { Blend = Blend.Normal,
-            Effects = basis.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() }, region, parent);
+            Effects = basis.Effects.Where(effect => effect.Kind != EffectKind.BlendMode).ToArray() }, region, parent, precision: precision);
         canvas.Flush();
-        var basePixels = Unpremultiply(surface);
-        var opaque = (byte[])basePixels.Rgba.Clone();
-        for (int i = 3; i < opaque.Length; i += 4) opaque[i] = 255;
-        using var normalBase = Bitmap(basePixels with { Rgba = opaque });
-        using var replace = new SKPaint { BlendMode = SKBlendMode.Src };
-        canvas.DrawBitmap(normalBase, region.X, region.Y, replace);
-        DrawUnclippedTier(surface, canvas, stack[1..], region, parent);
-        canvas.Flush();
-        var mixed = Unpremultiply(surface);
-        for (int i = 3; i < mixed.Rgba.Length; i += 4) mixed.Rgba[i] = basePixels.Rgba[i];
-        using var corrected = Bitmap(mixed);
+        var basePixels = Unpremultiply(surface, precision);
+        if (precision is not null)
+        {
+            RestoreCoverage(canvas, surface, basePixels, region, precision, opaque: true);
+            DrawUnclippedTier(surface, canvas, stack[1..], region, parent, precision);
+            RestoreCoverage(canvas, surface, basePixels, region, precision, opaque: false);
+            canvas.Flush();
+        }
+        using var corrected = precision is null ? DrawByteStack(stack[1..]) : null;
+        SKBitmap DrawByteStack(ReadOnlySpan<Layer> clipped)
+        {
+            var opaque = (byte[])basePixels.Rgba.Clone();
+            for (int i = 3; i < opaque.Length; i += 4) opaque[i] = 255;
+            using var normalBase = Bitmap(basePixels with { Rgba = opaque });
+            using var replace = new SKPaint { BlendMode = SKBlendMode.Src };
+            canvas.DrawBitmap(normalBase, region.X, region.Y, replace);
+            DrawUnclippedTier(surface, canvas, clipped, region, parent);
+            canvas.Flush();
+            var mixed = Unpremultiply(surface);
+            for (int i = 3; i < mixed.Rgba.Length; i += 4) mixed.Rgba[i] = basePixels.Rgba[i];
+            return Bitmap(mixed);
+        }
         var mode = basis.TransformsEnabled ? CommandEngine.EffectiveBlend(basis) : basis.Blend;
         using var blender = mode == Blend.Add ? addBlend.Value.ToBlender() : null;
         using var paint = new SKPaint
@@ -100,7 +114,7 @@ public sealed partial class SkiaRenderer
             }
         };
         if (blender is not null) paint.Blender = blender;
-        destination.DrawBitmap(corrected, region.X, region.Y, paint);
+        destination.DrawBitmap(corrected ?? surface, region.X, region.Y, paint);
     }
 
     private static bool ActiveVectorMask(VectorMask? mask) =>
