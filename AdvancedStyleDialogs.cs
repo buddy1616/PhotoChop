@@ -52,12 +52,8 @@ public partial class MainWindow
                     };
                     row.Children.Add(slider);
                 }
-                var color = Button(stop.Color, () =>
-                {
-                    if (ColorPickerDialog.Show(dialog, "Stop Color", draft[index].Color) is { } ink)
-                    { draft[index] = draft[index] with { Color = ink }; Draw(); }
-                });
-                color.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(stop.Color));
+                var color = StyleFields.Swatch(dialog, "Stop Color", stop.Color, ink =>
+                { draft[index] = draft[index] with { Color = ink }; Draw(); });
                 row.Children.Add(percent);
                 row.Children.Add(color);
                 if (!endpoint) row.Children.Add(Button("Remove", () => { draft.RemoveAt(index); Draw(); }));
@@ -95,6 +91,7 @@ public partial class MainWindow
         var panel = new StackPanel { Margin = new Thickness(14) };
         dialog.Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         dialog.MaxHeight = SystemParameters.WorkArea.Height;
+        var shared = new CheckBox { Content = "Use global light", IsChecked = effect.UseGlobalLight };
         void Field(string label, Control item)
         {
             panel.Children.Add(new Label { Content = label, Target = item });
@@ -107,7 +104,7 @@ public partial class MainWindow
             if (label.StartsWith("Angle", StringComparison.Ordinal))
             {
                 panel.Children.Add(new Label { Content = label, Target = box });
-                panel.Children.Add(AngleRow(box, signed: true));
+                panel.Children.Add(AngleRow(box, signed: true, shared: bevel || shadow ? shared : null));
             }
             else Field(label, box);
             return box;
@@ -122,19 +119,21 @@ public partial class MainWindow
             return control.Input;
         }
         var opacity = bevel ? null : OpacityField("Opacity (%)", effect.Opacity);
-        var shared = new CheckBox { Content = "Use global light", IsChecked = effect.UseGlobalLight };
         var contour = StyleFields.Contour(effect.Contour);
-        if (bevel || shadow) panel.Children.Add(shared);
         if (bevel || shadow || glow) Field("Contour", contour);
         var placement = new ComboBox { ItemsSource = Enum.GetValues<StrokeAlignment>(), SelectedItem = effect.Alignment };
         if (glow || bevel) Field("Position", placement);
         string[] techniques = ["Smooth", "Chisel Hard", "Chisel Soft"];
         ComboBox? technique = null;
-        TextBox? soften = null;
+        TextBox? soften = null, reliefDepth = null;
         if (bevel)
         {
             technique = new ComboBox { ItemsSource = techniques, SelectedIndex = (int)(effect.Lighting?.Technique ?? BevelTechnique.Smooth) };
             Field("Technique", technique);
+            var depthControl = StyleFields.Range((effect.Lighting?.Depth ?? 1) * 100, 0, 1000);
+            panel.Children.Add(new Label { Content = "Bevel depth (%)", Target = depthControl.Input });
+            panel.Children.Add(depthControl.Row);
+            reliefDepth = depthControl.Input;
             soften = NumberField("Soften (px)", effect.Lighting?.Soften ?? 0, 0, 16);
         }
         var size = glow || shadow || bevel ? NumberField("Size (px)", effect.Size, bevel ? 1 : .1, 100) : null;
@@ -159,24 +158,25 @@ public partial class MainWindow
                 Field(title, control);
                 return control;
             }
-            Button LightColor(string name, Func<string> current, Action<string> set) => Button(name, () =>
-            {
-                if (ColorPickerDialog.Show(dialog, name, current()) is { } picked) { set(picked); refreshPreview(); }
-            });
+            Button LightColor(string name, string current, Action<string> set) => StyleFields.Swatch(dialog, name, current, picked =>
+            { set(picked); refreshPreview(); });
             panel.Children.Add(new Separator());
             panel.Children.Add(new TextBlock { Text = "Highlight", FontWeight = FontWeights.SemiBold });
             highlightMode = ModeField("Highlight blend mode", lighting.HighlightMode);
-            panel.Children.Add(LightColor("Highlight color…", () => highlight, color => highlight = color));
+            panel.Children.Add(LightColor("Highlight color…", highlight, color => highlight = color));
             highlightOpacity = OpacityField("Highlight opacity (%)", lighting.HighlightOpacity * effect.Opacity);
             panel.Children.Add(new Separator());
             panel.Children.Add(new TextBlock { Text = "Shadow", FontWeight = FontWeights.SemiBold });
             shadowMode = ModeField("Shadow blend mode", lighting.ShadowMode);
-            panel.Children.Add(LightColor("Shadow color…", () => shade, color => shade = color));
+            panel.Children.Add(LightColor("Shadow color…", shade, color => shade = color));
             shadowOpacity = OpacityField("Shadow opacity (%)", lighting.ShadowOpacity * effect.Opacity);
         }
         string ink = effect.Ink;
-        if (glow || shadow) panel.Children.Add(Button("Choose Color…", () =>
-        { if (ColorPickerDialog.Show(dialog, "Effect Color", ink) is { } color) { ink = color; refreshPreview(); } }));
+        if (glow || shadow)
+        {
+            var color = StyleFields.Swatch(dialog, "Effect color", ink, picked => { ink = picked; refreshPreview(); });
+            Field("Color", color);
+        }
         var stops = effect.Stops ?? DefaultRamp("#FF000000", "#FFFFFFFF");
         if (gradient) panel.Children.Add(Button("Edit Gradient Stops…", () => { stops = EditGradientStops(dialog, stops) ?? stops; refreshPreview(); }));
         LayerTexture? texture = effect.Texture;
@@ -236,7 +236,7 @@ public partial class MainWindow
                 Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag };
             if (technique is not null)
                 edited = edited with { Lighting = lighting with
-                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0),
+                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0), Depth = Read(reliefDepth, 100) / 100,
                         Highlight = highlight, Shadow = shade, HighlightMode = (Blend)highlightMode!.SelectedItem,
                         ShadowMode = (Blend)shadowMode!.SelectedItem, HighlightOpacity = Read(highlightOpacity, 100) / 100,
                         ShadowOpacity = Read(shadowOpacity, 100) / 100 } };
@@ -261,7 +261,7 @@ public partial class MainWindow
         };
         foreach (var control in panel.Children.OfType<TextBox>()) control.TextChanged += (_, _) => refreshPreview();
         foreach (var control in panel.Children.OfType<ComboBox>()) control.SelectionChanged += (_, _) => refreshPreview();
-        foreach (var field in new[] { opacity, highlightOpacity, shadowOpacity })
+        foreach (var field in new[] { opacity, highlightOpacity, shadowOpacity, reliefDepth })
             if (field is not null) field.TextChanged += (_, _) => refreshPreview();
         shared.Click += (_, _) => refreshPreview();
         if (angle is not null) angle.TextChanged += (_, _) => refreshPreview();

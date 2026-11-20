@@ -84,10 +84,9 @@ public partial class MainWindow
         panel.Children.Add(thickness);
         panel.Children.Add(new Label { Content = "Position", Target = alignment });
         panel.Children.Add(alignment);
-        panel.Children.Add(Button("Choose Color…", () =>
-        {
-            if (ColorPickerDialog.Show(dialog, "Stroke color", ink) is { } color) ink = color;
-        }));
+        var color = StyleFields.Swatch(dialog, "Stroke color", ink, picked => ink = picked);
+        panel.Children.Add(new Label { Content = "Color", Target = color });
+        panel.Children.Add(color);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         OutlineArgs? result = null;
         var ok = Button("Apply", () =>

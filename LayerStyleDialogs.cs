@@ -27,36 +27,19 @@ public partial class MainWindow
         }
         var fields = new List<TextBox>();
         ComboBox? alignment = null, blend = null;
-        AngleDial? dial = null;
         static double Opposite(double angle) => (angle + 180) % 360;
         var shared = new CheckBox { Content = "Use global light", IsChecked = effect.UseGlobalLight };
         var contour = StyleFields.Contour(effect.Contour);
         if (shadow)
         {
-            panel.Children.Add(shared);
-            var angleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            dial = new AngleDial { Width = 52, Height = 52, Angle = Opposite(effect.A) };
-            angleRow.Children.Add(dial);
-            angleRow.Children.Add(new Label { Content = "Light angle (degrees)", VerticalAlignment = VerticalAlignment.Center });
-            var angle = new TextBox { Text = Opposite(effect.A).ToString("0.###"), Width = 66, VerticalAlignment = VerticalAlignment.Center };
-            angleRow.Children.Add(angle);
+            var angle = new TextBox { Text = Opposite(effect.A).ToString("0.###"), Width = 66, HorizontalAlignment = HorizontalAlignment.Left };
             NumericWheel.Enable(angle, 0, 360);
-            panel.Children.Add(angleRow);
+            panel.Children.Add(new Label { Content = "Light angle (degrees)", Target = angle });
+            panel.Children.Add(AngleRow(angle, shared: shared));
             fields.Add(angle);
             shared.Checked += (_, _) => angle.Text = (active?.Engine.Current?.GlobalLightAngle ?? 225).ToString("0.###");
             panel.Children.Add(new Label { Content = "Contour", Target = contour });
             panel.Children.Add(contour);
-            bool syncing = false;
-            dial.Changed += value =>
-            {
-                if (syncing) return;
-                syncing = true; angle.Text = value.ToString("0.###"); syncing = false;
-            };
-            angle.TextChanged += (_, _) =>
-            {
-                if (syncing || !double.TryParse(angle.Text, out var value) || !double.IsFinite(value)) return;
-                syncing = true; dial.Angle = Math.Clamp(value, 0, 360); syncing = false;
-            };
             fields.Add(Numeric("Distance (px)", effect.B, 0, 512));
             fields.Add(Numeric("Size (px)", effect.Size, 0, 100));
             fields.Add(Numeric("Spread (%)", effect.Spread, 0, 100));
@@ -102,10 +85,8 @@ public partial class MainWindow
             catch (Exception e) when (e is InvalidDataException or FormatException) { errorLabel.Text = e.Message; }
             UpdateCanvas();
         }
-        var color = Button("Choose Color…", () =>
-        {
-            if (ColorPickerDialog.Show(dialog, "Effect Color", ink) is { } selected) { ink = selected; RefreshPreview(); }
-        });
+        var color = StyleFields.Swatch(dialog, "Effect color", ink, selected => { ink = selected; RefreshPreview(); });
+        panel.Children.Add(new Label { Content = "Color", Target = color });
         panel.Children.Add(color);
         panel.Children.Add(live);
         panel.Children.Add(errorLabel);

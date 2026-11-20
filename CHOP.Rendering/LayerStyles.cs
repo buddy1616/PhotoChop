@@ -4,7 +4,7 @@ namespace Chop.Rendering;
 
 public sealed partial class SkiaRenderer
 {
-    private Frame RenderLayerStyle(Frame frame, Effect effect)
+    private Frame RenderLayerStyle(Frame frame, Effect effect, Frame? silhouette = null)
     {
         var source = frame.Pixels;
         var precision = PixelBuffer.Settings(source);
@@ -28,13 +28,29 @@ public sealed partial class SkiaRenderer
             return new(gray, gray, gray, 1);
         }
 
+        double TextureHeight(int sx, int sy)
+        {
+            var pixel = Texel(sx, sy);
+            return (pixel.R - .5) * pixel.A;
+        }
+
         bool glow = effect.Kind == EffectKind.Glow;
         bool shadow = effect.Kind == EffectKind.InnerShadow;
         bool bevel = effect.Kind == EffectKind.BevelEmboss;
         int spread = glow ? (int)Math.Round(effect.Size * effect.Spread / 100) : 0;
         int pad = glow && effect.Alignment != StrokeAlignment.Inside ? (int)Math.Ceiling(effect.Size * 3) + spread :
             bevel && effect.Alignment != StrokeAlignment.Inside ? (int)Math.Ceiling(effect.Size * 3) : 0;
-        var bevelCoverage = bevel ? new BevelCoverage(source, effect.Size, effect.Alignment, effect.Lighting) : null;
+        var shapeFrame = silhouette ?? frame;
+        var bevelCoverage = bevel ? new BevelCoverage(shapeFrame.Pixels, effect.Size, effect.Alignment, effect.Lighting) : null;
+        int shapeX = frame.X - shapeFrame.X, shapeY = frame.Y - shapeFrame.Y;
+        double ShapeAt(int x, int y) => bevelCoverage!.At(x + shapeX, y + shapeY);
+        double ShapeAlpha(int x, int y)
+        {
+            x += shapeX;
+            y += shapeY;
+            var pixels = shapeFrame.Pixels;
+            return x >= 0 && y >= 0 && x < pixels.Width && y < pixels.Height ? PixelBuffer.Alpha(pixels, y * pixels.Width + x) : 0;
+        }
         var coverage = glow || shadow
             ? Blur(AlphaEffect(frame, spread, true, 0xFFFFFFFF, 1, spread),
                 glow ? effect.Size * (1 - effect.Spread / 100) : effect.Size)
@@ -75,18 +91,20 @@ public sealed partial class SkiaRenderer
             }
             else if (bevel)
             {
-                double Height(int sx, int sy)
+                double shapeSlope = ((ShapeAt(x + 1, y) - ShapeAt(x - 1, y)) * dx +
+                    (ShapeAt(x, y + 1) - ShapeAt(x, y - 1)) * dy) * effect.Size * (lighting?.Depth ?? 1);
+                double textureSlope = 0;
+                if (texture is { Depth: > 0 })
                 {
-                    double shape = bevelCoverage!.At(sx, sy);
-                    var texel = Texel(sx, sy);
-                    return shape * (1 + (texel.R - .5) * texel.A * (texture?.Depth ?? 0));
+                    // Texture depth is independent of bevel depth and width.
+                    int sx = x + shapeX, sy = y + shapeY;
+                    textureSlope = ((TextureHeight(sx + 1, sy) - TextureHeight(sx - 1, sy)) * dx +
+                        (TextureHeight(sx, sy + 1) - TextureHeight(sx, sy - 1)) * dy) * texture.Depth * ShapeAlpha(x, y);
                 }
-                double slope = (Height(x + 1, y) - Height(x - 1, y)) * dx +
-                    (Height(x, y + 1) - Height(x, y - 1)) * dy;
-                double light = -slope * effect.Size * Math.Cos(altitude) * (lighting?.Depth ?? 1) * (lighting?.Down == true ? -1 : 1);
-                double magnitude = 1.5 * Math.Abs(light);
+                double light = -(shapeSlope + textureSlope) * Math.Cos(altitude) * (lighting?.Down == true ? -1 : 1);
+                double magnitude = Math.Abs(light);
                 double strength = ContourCurve.Sample(effect.Contour, magnitude / Math.Sqrt(1 + magnitude * magnitude));
-                weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength;
+                weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength * ShapeAlpha(x, y);
                 color = light < 0 ? shade : highlight;
                 if (lighting is not null)
                 {
@@ -96,7 +114,7 @@ public sealed partial class SkiaRenderer
                 if (effect.Alignment != StrokeAlignment.Inside)
                 {
                     // Fade the relief into transparency instead of outlining its outer boundary.
-                    double edge = Math.Clamp(bevelCoverage!.At(x, y) * 2, 0, 1);
+                    double edge = Math.Clamp(ShapeAt(x, y) * 2, 0, 1);
                     outside = strength * effect.Opacity * color.A * edge;
                 }
             }
