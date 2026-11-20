@@ -13,26 +13,43 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
     private const uint Rgb16 = (4 << 16) | (3 << 3) | 2;
 
     private readonly bool fromSrgb;
+    private readonly bool useWindowsIcm;
 
-    private CmykProfile(nint transform, bool fromSrgb) : base(true)
+    static CmykProfile() => NativeLibrary.SetDllImportResolver(typeof(CmykProfile).Assembly, (name, _, _) =>
+    {
+        if (name != LittleCms) return 0;
+        if (OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64)
+            return NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, "Native", "Windows-x64", "lcms2.dll"));
+        if (OperatingSystem.IsLinux()) return NativeLibrary.Load("liblcms2.so.2");
+        return 0;
+    });
+
+    private CmykProfile(nint transform, bool fromSrgb, bool useWindowsIcm) : base(true)
     {
         this.fromSrgb = fromSrgb;
+        this.useWindowsIcm = useWindowsIcm;
         SetHandle(transform);
     }
 
     public static CmykProfile? Open(byte[] profile, bool fromSrgb = false)
     {
         if (profile.Length < 128 || !profile.AsSpan(16, 4).SequenceEqual("CMYK"u8)) return null;
-        try
+        if (OperatingSystem.IsLinux() ||
+            (OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64))
         {
-            nint transform = OperatingSystem.IsWindows() ? OpenWindows(profile, fromSrgb) :
-                OperatingSystem.IsLinux() ? OpenLinux(profile, fromSrgb) : 0;
-            return transform == 0 ? null : new(transform, fromSrgb);
+            try
+            {
+                nint transform = OpenLittleCms(profile, fromSrgb);
+                return transform == 0 ? null : new(transform, fromSrgb, false);
+            }
+            catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
+            {
+                return null;
+            }
         }
-        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
-        {
-            return null;
-        }
+        if (!OperatingSystem.IsWindows()) return null;
+        nint native = OpenWindows(profile, fromSrgb);
+        return native == 0 ? null : new(native, fromSrgb, true);
     }
 
     public bool Convert(ushort[] input, ushort[] output, int count)
@@ -42,7 +59,7 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
         if (count > input.Length / inChannels || count > output.Length / outChannels)
             throw new ArgumentException("Color buffers are too short.");
         if (count == 0) return true;
-        if (OperatingSystem.IsWindows())
+        if (useWindowsIcm)
         {
             // COLOR is an eight-byte union on 32-bit Windows and a sixteen-byte union on 64-bit Windows.
             const uint ColorRgb = 2, ColorCmyk = 7;
@@ -61,12 +78,12 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
 
     protected override bool ReleaseHandle()
     {
-        if (OperatingSystem.IsWindows()) return DeleteColorTransform(handle);
+        if (useWindowsIcm) return DeleteColorTransform(handle);
         cmsDeleteTransform(handle);
         return true;
     }
 
-    private static nint OpenLinux(byte[] profile, bool fromSrgb)
+    private static nint OpenLittleCms(byte[] profile, bool fromSrgb)
     {
         nint source = cmsOpenProfileFromMem(profile, (uint)profile.Length);
         if (source == 0) return 0;
@@ -124,7 +141,7 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
     [DllImport(WindowsColor)] private static extern bool TranslateColors(CmykProfile transform, ushort[] input,
         uint count, uint inputType, [Out] ushort[] output, uint outputType);
 
-    private const string LittleCms = "liblcms2.so.2";
+    private const string LittleCms = "ChopLittleCms";
     [DllImport(LittleCms)] private static extern nint cmsOpenProfileFromMem(byte[] data, uint length);
     [DllImport(LittleCms)] private static extern nint cmsCreate_sRGBProfile();
     [DllImport(LittleCms)] private static extern int cmsCloseProfile(nint profile);

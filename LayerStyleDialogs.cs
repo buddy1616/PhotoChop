@@ -67,7 +67,8 @@ public partial class MainWindow
             var v = fields.Select(field => Number(field.Text)).ToArray();
             if (v.Any(value => !double.IsFinite(value))) throw new InvalidDataException("Enter finite values.");
             if (shadow && v[0] is < 0 or > 360) throw new InvalidDataException("Enter a light angle between 0 and 360.");
-            if (overlay) return effect with { Mode = (Blend)blend!.SelectedItem, Opacity = v[0] / 100, Ink = ink };
+            if (overlay) return effect with { Mode = (Blend)blend!.SelectedItem, Opacity = v[0] / 100, Ink = ink,
+                CmykInk = Format.Color(ink) == Format.Color(effect.Ink) ? effect.CmykInk : null };
             return shadow ? effect with { A = Opposite(v[0]), B = v[1], Size = v[2], Spread = v[3], Opacity = v[4] / 100, Ink = ink, UseGlobalLight = shared.IsChecked == true, Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag }
                 : effect with { A = v[0], Alignment = (StrokeAlignment)alignment!.SelectedItem, Ink = ink };
         }
@@ -88,6 +89,13 @@ public partial class MainWindow
         var color = StyleFields.Swatch(dialog, "Effect color", ink, selected => { ink = selected; RefreshPreview(); });
         panel.Children.Add(new Label { Content = "Color", Target = color });
         panel.Children.Add(color);
+        if (overlay && effect.CmykInk is { } inks)
+        {
+            var native = new TextBlock { Text = $"Source CMYK  {inks.Cyan:P2} / {inks.Magenta:P2} / {inks.Yellow:P2} / {inks.Black:P2}",
+                Margin = new Thickness(0, 2, 0, 2) };
+            panel.Children.Add(native);
+            color.Click += (_, _) => native.Visibility = Format.Color(ink) == Format.Color(effect.Ink) ? Visibility.Visible : Visibility.Collapsed;
+        }
         panel.Children.Add(live);
         panel.Children.Add(errorLabel);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };

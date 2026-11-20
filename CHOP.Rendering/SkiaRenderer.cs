@@ -81,7 +81,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
     public Pixels Composite(Document document)
     {
-        var composite = CompositeRegion(ProfiledLayers(ResolveFloating(document)), new Area(0, 0, document.Width, document.Height));
+        document = ResolveFloating(document);
+        if (document.IccProfile is { } profile && CompositeCmyk(document) is { Native: { } native } ink)
+        {
+            using var transform = CmykProfile.Open(profile);
+            if (transform is not null) return ConvertCmyk(ink, native, transform);
+        }
+        var composite = CompositeRegion(ProfiledLayers(document), new Area(0, 0, document.Width, document.Height));
         return document.Color.Mode == ChannelColorMode.Grayscale ? ViewComponent(composite, ColorComponent.Gray, opaque: false) : composite;
     }
 

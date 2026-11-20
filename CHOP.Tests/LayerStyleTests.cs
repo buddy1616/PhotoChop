@@ -7,6 +7,20 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void NormalCmykLayersCompositeTheirInkChannelsBeforeDisplayConversion()
+    {
+        var settings = new ColorSettings(ChannelColorMode.Cmyk, ChannelDepth.Bit8);
+        Pixels Sample(byte cyan, byte magenta, byte yellow, byte black, byte alpha) =>
+            PixelBuffer.FromNative(new(settings, 1, 1, [[cyan], [magenta], [yellow], [black], [alpha]]));
+        var backdrop = new Layer("bottom", "Bottom", LayerKind.Raster) { Pixels = Sample(120, 20, 60, 90, 255) };
+        var foreground = new Layer("top", "Top", LayerKind.Raster) { Pixels = Sample(0, 200, 120, 30, 128),
+            Effects = [new("overlay", EffectKind.ColorOverlay, Ink: "#FFFF0000", Opacity: .5, CmykInk: new(0, 1, 1, 0))] };
+        var doc = new Document("test", 1, 1) { Color = settings, IccProfile = new byte[128], Layers = [backdrop, foreground] };
+        var actual = new SkiaRenderer().CompositeForStorage(doc);
+        Assert.Equal(new byte[] { 60, 124, 124, 52, 255 }, actual.Native!.Planes.Select(plane => plane[0]).ToArray());
+    }
+
+    [Fact]
     public void OuterBevelDoesNotBevelAnEarlierGlow()
     {
         var renderer = new SkiaRenderer();
