@@ -575,7 +575,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         }
     }
 
-    private static Frame ApplyEffect(Frame frame, Effect effect)
+    private Frame ApplyEffect(Frame frame, Effect effect)
     {
         var source = frame.Pixels;
         if (effect.Kind == EffectKind.Transform)
@@ -598,6 +598,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             canvas.Flush();
             return new Frame(Unpremultiply(output), x, y);
         }
+        if (effect.Kind is EffectKind.Glow or EffectKind.InnerShadow or EffectKind.BevelEmboss or
+            EffectKind.GradientOverlay or EffectKind.PatternOverlay) return RenderLayerStyle(frame, effect);
         if (effect.Kind == EffectKind.GaussianBlur) return Blur(frame, effect.A);
         if (effect.Kind == EffectKind.MotionBlur) return MotionBlur(frame, effect.A, effect.B);
         if (effect.Kind == EffectKind.Stroke) return StrokeEffect(frame, effect);

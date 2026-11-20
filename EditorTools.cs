@@ -80,8 +80,8 @@ public partial class MainWindow
     }
 
     private bool gradientFill;
-    private string gradientStart = "#FF000000", gradientEnd = "#FFFFFFFF";
-    private GradientArgs GradientAt(Point end) => new(new(gestureStart.X, gestureStart.Y), new(end.X, end.Y), gradientStart, gradientEnd);
+    private Chop.Core.GradientStop[] fillGradient = DefaultRamp("#FF000000", "#FFFFFFFF");
+    private GradientArgs GradientAt(Point end) => new(new(gestureStart.X, gestureStart.Y), new(end.X, end.Y), fillGradient[0].Color, fillGradient[^1].Color, fillGradient);
 
     private void CanvasDown(object sender, MouseButtonEventArgs e)
     {
@@ -585,8 +585,8 @@ public partial class MainWindow
             ToolOptions.Children.Add(fillModes);
             if (gradientFill)
             {
-                ToolOptions.Children.Add(ColorButton("Start", gradientStart, color => gradientStart = color));
-                ToolOptions.Children.Add(ColorButton("End", gradientEnd, color => gradientEnd = color));
+                ToolOptions.Children.Add(Button("Edit Gradient Stops…", () =>
+                    fillGradient = EditGradientStops(EditorOwner, fillGradient) ?? fillGradient));
             }
             else SliderOption("Tolerance", 0, 255, bucketTolerance, value => bucketTolerance = (int)value);
         }

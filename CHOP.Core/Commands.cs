@@ -418,6 +418,10 @@ public sealed class CommandEngine(IRasterBackend backend)
         EffectKind.HueSaturation => "Hue / Saturation",
         EffectKind.GaussianBlur => "Gaussian Blur",
         EffectKind.MotionBlur => "Motion Blur",
+        EffectKind.BevelEmboss => "Bevel / Emboss",
+        EffectKind.GradientOverlay => "Gradient Overlay",
+        EffectKind.PatternOverlay => "Pattern Overlay",
+        EffectKind.InnerShadow => "Inner Shadow",
         EffectKind.ColorOverlay => "Color Overlay",
         EffectKind.PathFill => "Fill",
         EffectKind.DropShadow => "Drop Shadow",
@@ -931,6 +935,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var gradient = command.Read<GradientArgs>();
                 Format.Color(gradient.StartColor);
                 Format.Color(gradient.EndColor);
+                GradientRamp.Validate(GradientRamp.Stops(gradient.StartColor, gradient.EndColor, gradient.Stops));
                 static bool Finite(PointD point) => double.IsFinite(point.X) && double.IsFinite(point.Y) &&
                     Math.Abs(point.X) <= 1_000_000 && Math.Abs(point.Y) <= 1_000_000;
                 if (!Finite(gradient.Start) || !Finite(gradient.End) || gradient.Start == gradient.End)
@@ -1550,6 +1555,28 @@ public sealed class CommandEngine(IRasterBackend backend)
             case EffectKind.GaussianBlur: Range(effect.A, 0, 100); break;
             case EffectKind.MotionBlur: Range(effect.A, 0, 200); Range(effect.B, -180, 180); break;
             case EffectKind.BitCrush: Range(effect.A, 1, 512); break;
+            case EffectKind.GradientOverlay:
+                GradientRamp.Validate(effect.Stops ?? []);
+                Range(effect.A, -360, 360);
+                goto case EffectKind.ColorOverlay;
+            case EffectKind.PatternOverlay:
+                CheckTexture(effect.Texture ?? throw new InvalidDataException("Choose a pattern texture."));
+                goto case EffectKind.ColorOverlay;
+            case EffectKind.BevelEmboss:
+                if (effect.Texture is { } bevelTexture) CheckTexture(bevelTexture);
+                Range(effect.A, -360, 360);
+                Range(effect.B, 0, 90);
+                Range(effect.Size, 1, 100);
+                if (!Enum.IsDefined(effect.Alignment)) throw new InvalidDataException("Unknown bevel position.");
+                goto case EffectKind.ColorOverlay;
+            case EffectKind.Glow:
+            case EffectKind.InnerShadow:
+                Range(effect.Size, .1, 100);
+                Range(effect.Spread, 0, 100);
+                Range(effect.A, -360, 360);
+                Range(effect.B, 0, 512);
+                if (!Enum.IsDefined(effect.Alignment)) throw new InvalidDataException("Unknown glow position.");
+                goto case EffectKind.ColorOverlay;
             case EffectKind.ColorOverlay:
                 Format.Color(effect.Ink);
                 Range(effect.Opacity, 0, 1);
@@ -1573,6 +1600,19 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (!Enum.IsDefined(effect.Mode)) throw new InvalidDataException("Unknown blend mode.");
                 break;
         }
+    }
+
+    private static void CheckTexture(LayerTexture texture)
+    {
+        if (!Enum.IsDefined(texture.Preset) || texture.Png is { Length: 0 or > 2_000_000 })
+            throw new InvalidDataException("Choose a supported texture up to 2 MB.");
+        if (texture.Png is { } png && (png.Length < 33 || !png.AsSpan(0, 8).SequenceEqual(
+            new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16)) is 0 or > 1024 ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20)) is 0 or > 1024))
+            throw new InvalidDataException("Textures must be PNG images up to 1024 × 1024.");
+        Range(texture.Scale, .1, 10);
+        Range(texture.Depth, 0, 1);
     }
 
     private static void CheckId(string id)
