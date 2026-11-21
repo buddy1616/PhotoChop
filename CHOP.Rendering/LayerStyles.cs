@@ -86,6 +86,8 @@ public sealed partial class SkiaRenderer
         double extent = Math.Max(1, Math.Abs(dx) * (source.Width - 1) + Math.Abs(dy) * (source.Height - 1));
         double altitude = effect.B * Math.PI / 180;
         var lighting = effect.Lighting;
+        double highlightContrast = Math.Pow(4, lighting?.ContrastFor(false) ?? 1);
+        double shadowContrast = Math.Pow(4, lighting?.ContrastFor(true) ?? 1);
         var highlight = PixelValue.FromArgb(Format.Color(lighting?.Highlight ?? "#FFFFFFFF"));
         var shade = PixelValue.FromArgb(Format.Color(lighting?.Shadow ?? "#FF000000"));
         double AlphaAt(int x, int y)
@@ -135,8 +137,8 @@ public sealed partial class SkiaRenderer
                 // Increase facet contrast without flattening the angular falloff around curved edges.
                 if (lighting?.Technique == BevelTechnique.ChiselHard)
                     magnitude = magnitude * magnitude * (3 - 2 * magnitude);
-                double contrast = lighting?.Contrast ?? 0;
-                if (contrast != 0) magnitude = 1 - Math.Pow(1 - Math.Clamp(magnitude, 0, 1), Math.Pow(4, contrast));
+                double contrast = light < 0 ? shadowContrast : highlightContrast;
+                if (contrast != 1) magnitude = 1 - Math.Pow(1 - Math.Clamp(magnitude, 0, 1), contrast);
                 double strength = ContourCurve.Sample(effect.Contour, magnitude);
                 weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength * ShapeAlpha(x, y);
                 color = light < 0 ? shade : highlight;

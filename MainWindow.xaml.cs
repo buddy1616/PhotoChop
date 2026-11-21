@@ -57,6 +57,7 @@ public partial class MainWindow : Window
         public string MaskBackground { get; set; } = "#FFFFFFFF";
         public bool CenterHorizontal { get; set; }
         public bool CenterVertical { get; set; }
+        public double UiScale { get; set; } = 1;
         public bool ExperimentalGpu { get; set; }
         public bool ShowPixelGrid { get; set; } = true;
         public int CheckerSize { get; set; } = 8;
@@ -152,6 +153,7 @@ public partial class MainWindow : Window
         preferences.ToolCatalogVersion = 4;
         BuildMenus();
         BuildPanels();
+        ApplyControlScale();
         ResetLayout();
         Dock.ActiveContentChanged += (_, _) =>
         {

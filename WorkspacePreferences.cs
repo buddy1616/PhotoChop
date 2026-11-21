@@ -23,6 +23,16 @@ public partial class MainWindow
         GpuStatus.Content = "CPU";
     }
 
+    private void ApplyControlScale()
+    {
+        App.ControlScale = double.IsFinite(preferences.UiScale) ? Math.Clamp(preferences.UiScale, .75, 1.25) : 1;
+        preferences.UiScale = App.ControlScale;
+        App.ScaleControls(Menus);
+        App.ScaleControls(ToolOptions);
+        App.ScaleControls(WorkspaceStatus);
+        foreach (var control in panelContent.Values) App.ScaleControls(control);
+    }
+
     private void EditPreferences()
     {
         var dialog = new Window { Owner = this, Title = "Preferences", Width = 500, SizeToContent = SizeToContent.Height,
@@ -45,6 +55,10 @@ public partial class MainWindow
             page.Children.Add(field);
             return field;
         }
+        var appearance = Page("Interface");
+        var uiScale = StyleFields.Range(preferences.UiScale * 100, 75, 125);
+        appearance.Children.Add(new Label { Content = "UI control scale (%)", Target = uiScale.Input });
+        appearance.Children.Add(uiScale.Row);
         var performance = Page("Performance");
         var useGpu = Check(performance, "Use experimental GPU compositing", preferences.ExperimentalGpu);
         var rulers = Page("Units and Rulers");
@@ -78,6 +92,8 @@ public partial class MainWindow
             preferences.GuideColor = ink;
             preferences.ShowPixelGrid = pixelGrid.IsChecked == true;
             preferences.CheckerSize = tile;
+            preferences.UiScale = uiScale.Slider.Value / 100;
+            ApplyControlScale();
             Guard(SavePreferences);
             if (gpuChanged) UpdateGpuPreference();
             dialog.DialogResult = true;

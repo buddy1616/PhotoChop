@@ -13,11 +13,21 @@ public partial class MainWindow
     {
         bool shadow = effect.Kind == EffectKind.DropShadow;
         bool overlay = effect.Kind == EffectKind.ColorOverlay;
-        var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = EffectName(effect.Kind), Width = 420,
+        var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = EffectName(effect.Kind),
+            Width = (shadow ? 690 : 420) * App.ControlScale, MaxHeight = SystemParameters.WorkArea.Height * .85,
             SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false };
-        var panel = new StackPanel { Margin = new Thickness(14) };
-        dialog.Content = panel;
+        var shell = new DockPanel { Margin = new Thickness(12) };
+        var footer = new StackPanel();
+        DockPanel.SetDock(footer, System.Windows.Controls.Dock.Bottom);
+        shell.Children.Add(footer);
+        var columns = new Grid();
+        columns.ColumnDefinitions.Add(new ColumnDefinition());
+        var primary = new StackPanel();
+        var panel = primary;
+        columns.Children.Add(primary);
+        shell.Children.Add(new ScrollViewer { Content = columns, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        dialog.Content = shell;
         TextBox Numeric(string title, double initial, double min, double max)
         {
             panel.Children.Add(new TextBlock { Text = title, Margin = new Thickness(0, 6, 0, 3) });
@@ -40,6 +50,10 @@ public partial class MainWindow
             shared.Checked += (_, _) => angle.Text = (active?.Engine.Current?.GlobalLightAngle ?? 225).ToString("0.###");
             panel.Children.Add(new Label { Content = "Contour", Target = contour });
             panel.Children.Add(contour);
+            columns.ColumnDefinitions.Add(new ColumnDefinition());
+            panel = new StackPanel { Margin = new Thickness(12, 0, 0, 0) };
+            Grid.SetColumn(panel, 1);
+            columns.Children.Add(panel);
             fields.Add(Numeric("Distance (px)", effect.B, 0, 512));
             fields.Add(Numeric("Size (px)", effect.Size, 0, 100));
             fields.Add(Numeric("Spread (%)", effect.Spread, 0, 100));
@@ -87,6 +101,7 @@ public partial class MainWindow
             catch (Exception e) when (e is InvalidDataException or FormatException) { errorLabel.Text = e.Message; }
             UpdateCanvas();
         }
+        panel = primary;
         var color = StyleFields.Swatch(dialog, "Effect color", ink, selected => { ink = selected; RefreshPreview(); });
         panel.Children.Add(new Label { Content = "Color", Target = color });
         panel.Children.Add(color);
@@ -97,8 +112,8 @@ public partial class MainWindow
             panel.Children.Add(native);
             color.Click += (_, _) => native.Visibility = Format.Color(ink) == Format.Color(effect.Ink) ? Visibility.Visible : Visibility.Collapsed;
         }
-        panel.Children.Add(live);
-        panel.Children.Add(errorLabel);
+        footer.Children.Add(live);
+        footer.Children.Add(errorLabel);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         Effect? result = null;
         var apply = Button("Apply", () =>
@@ -115,7 +130,7 @@ public partial class MainWindow
         apply.IsDefault = true;
         buttons.Children.Add(apply);
         buttons.Children.Add(new Button { Content = "Cancel", IsCancel = true, Margin = new Thickness(3) });
-        panel.Children.Add(buttons);
+        footer.Children.Add(buttons);
         foreach (var field in fields) field.TextChanged += (_, _) => RefreshPreview();
         if (alignment is not null) alignment.SelectionChanged += (_, _) => RefreshPreview();
         if (blend is not null) blend.SelectionChanged += (_, _) => RefreshPreview();

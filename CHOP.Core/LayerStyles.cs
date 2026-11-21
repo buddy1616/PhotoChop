@@ -26,7 +26,10 @@ public static class ContourCurve
 public enum BevelTechnique { Smooth, ChiselHard, ChiselSoft }
 
 public sealed record BevelLighting(string Highlight = "#FFFFFFFF", Blend HighlightMode = Blend.Normal, double HighlightOpacity = 1,
-    string Shadow = "#FF000000", Blend ShadowMode = Blend.Normal, double ShadowOpacity = 1, double Depth = 1, bool Down = false, BevelTechnique Technique = BevelTechnique.Smooth, double Soften = 0, double Contrast = 0);
+    string Shadow = "#FF000000", Blend ShadowMode = Blend.Normal, double ShadowOpacity = 1, double Depth = 1, bool Down = false, BevelTechnique Technique = BevelTechnique.Smooth, double Soften = 0, double? Contrast = null, double? HighlightContrast = null, double? ShadowContrast = null)
+{
+    public double ContrastFor(bool shadow) => (shadow ? ShadowContrast : HighlightContrast) ?? Contrast ?? 1;
+}
 public static class GradientRamp
 {
     public static GradientStop[] Stops(string first, string last, GradientStop[]? stops) =>

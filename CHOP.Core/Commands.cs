@@ -1635,7 +1635,9 @@ public sealed class CommandEngine(IRasterBackend backend)
                     Range(light.ShadowOpacity, 0, 1);
                     Range(light.Depth, 0, 10);
                     Range(light.Soften, 0, 16);
-                    Range(light.Contrast, -1, 1);
+                    if (light.Contrast is { } legacy) Range(legacy, -1, 1);
+                    if (light.HighlightContrast is { } highlight) Range(highlight, -1, 1);
+                    if (light.ShadowContrast is { } shadow) Range(shadow, -1, 1);
                     if (!Enum.IsDefined(light.Technique))
                         throw new InvalidDataException("Unknown bevel technique.");
                     if (!Enum.IsDefined(light.HighlightMode) || !Enum.IsDefined(light.ShadowMode))
