@@ -25,7 +25,8 @@ public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null
 public sealed record OpenArgs(string Path, byte[]? Data = null);
 public sealed record TextArgs(string Text, string Font, double Size, string Color, double Bend = 0);
 public sealed record ShapeArgs(int Width, int Height, string Color);
-public sealed record StrokeArgs(PointD[] Points, double Size, double Hardness, double Opacity, string Color, bool Erase, bool Pencil = false);
+public enum TonalStroke { None, Burn, Dodge }
+public sealed record StrokeArgs(PointD[] Points, double Size, double Hardness, double Opacity, string Color, bool Erase, bool Pencil = false, TonalStroke Tone = TonalStroke.None);
 public sealed record ReorderArgs(string? Parent, string? Before);
 public sealed record GroupArgs(string Id, string Name, string[] Layers, string? Anchor = null);
 public sealed record MergeArgs(string Id, string Name, string[] Layers);
@@ -235,7 +236,11 @@ public sealed class CommandEngine(IRasterBackend backend)
         "selection.toPaths" => "Convert Selection to Paths",
         "layer.createShape" => "Create Vector Shape",
         "layer.create" => $"Create {command.Read<LayerArgs>().Kind.ToString().ToLowerInvariant()} layer",
-        "layer.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase pixels" : "Brush stroke",
+        "layer.paintStroke" => command.Read<StrokeArgs>() switch
+        {
+            { Tone: TonalStroke.Burn } => "Burn pixels", { Tone: TonalStroke.Dodge } => "Dodge pixels",
+            { Erase: true } => "Erase pixels", _ => "Brush stroke"
+        },
         "mask.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase mask" : "Paint mask",
         "layer.text" => "Edit text layer",
         "path.break" => "Break Path",
@@ -1108,6 +1113,8 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "mask.maskerStroke":
             case "layer.paintStroke":
                 var stroke = command.Read<StrokeArgs>();
+                if (!Enum.IsDefined(stroke.Tone) || stroke.Tone != TonalStroke.None && (stroke.Erase || command.Name != "layer.paintStroke"))
+                    throw new InvalidDataException("Tonal strokes require an unlocked raster layer.");
                 Range(stroke.Size, 1, 2048);
                 Range(stroke.Hardness, 0, 1);
                 Range(stroke.Opacity, 0, 1);
@@ -1628,6 +1635,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                     Range(light.ShadowOpacity, 0, 1);
                     Range(light.Depth, 0, 10);
                     Range(light.Soften, 0, 16);
+                    Range(light.Contrast, -1, 1);
                     if (!Enum.IsDefined(light.Technique))
                         throw new InvalidDataException("Unknown bevel technique.");
                     if (!Enum.IsDefined(light.HighlightMode) || !Enum.IsDefined(light.ShadowMode))
@@ -1664,6 +1672,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Range(effect.A, 0, 360); Range(effect.B, 0, 512); Range(effect.Size, 0, 100);
                 Range(effect.Spread, 0, 100); Range(effect.Opacity, 0, 1); Format.Color(effect.Ink);
                 break;
+            case EffectKind.Burn:
+            case EffectKind.Dodge:
             case EffectKind.Opacity: Range(effect.A, 0, 1); break;
             case EffectKind.Transform:
                 CheckTransform(effect.Spatial ?? throw new InvalidDataException("A transform effect needs transform parameters."));

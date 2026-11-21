@@ -11,7 +11,7 @@ public enum Blend
     Normal, Multiply, Screen, Overlay, Add, Darken, Lighten, ColorBurn, ColorDodge, HardLight, SoftLight,
     Difference, Exclusion, Hue, Saturation, Color, Luminosity, LinearBurn, LinearLight, VividLight, PinLight, HardMix, Subtract, Divide
 }
-public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush, PathFill, ColorOverlay, Glow, InnerShadow, BevelEmboss, GradientOverlay, PatternOverlay }
+public enum EffectKind { BrightnessContrast, HueSaturation, Grayscale, GaussianBlur, Transform, Opacity, BlendMode, MotionBlur, Stroke, DropShadow, BitCrush, PathFill, ColorOverlay, Glow, InnerShadow, BevelEmboss, GradientOverlay, PatternOverlay, Burn, Dodge }
 
 public readonly record struct PointD(double X, double Y);
 public readonly record struct Area(int X, int Y, int Width, int Height);

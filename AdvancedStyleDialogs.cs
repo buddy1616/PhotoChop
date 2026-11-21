@@ -125,7 +125,7 @@ public partial class MainWindow
         if (glow || bevel) Field("Position", placement);
         string[] techniques = ["Smooth", "Chisel Hard", "Chisel Soft"];
         ComboBox? technique = null;
-        TextBox? soften = null, reliefDepth = null;
+        TextBox? soften = null, reliefDepth = null, bevelContrast = null;
         if (bevel)
         {
             technique = new ComboBox { ItemsSource = techniques, SelectedIndex = (int)(effect.Lighting?.Technique ?? BevelTechnique.Smooth) };
@@ -134,6 +134,10 @@ public partial class MainWindow
             panel.Children.Add(new Label { Content = "Bevel depth (%)", Target = depthControl.Input });
             panel.Children.Add(depthControl.Row);
             reliefDepth = depthControl.Input;
+            var contrastControl = StyleFields.Range((effect.Lighting?.Contrast ?? 0) * 100, -100, 100);
+            panel.Children.Add(new Label { Content = "Bevel contrast (%)", Target = contrastControl.Input });
+            panel.Children.Add(contrastControl.Row);
+            bevelContrast = contrastControl.Input;
             soften = NumberField("Soften (px)", effect.Lighting?.Soften ?? 0, 0, 16);
         }
         var size = glow || shadow || bevel ? NumberField("Size (px)", effect.Size, bevel ? 1 : .1, 100) : null;
@@ -239,7 +243,7 @@ public partial class MainWindow
                 Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag };
             if (technique is not null)
                 edited = edited with { Lighting = lighting with
-                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0), Depth = Read(reliefDepth, 100) / 100,
+                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0), Depth = Read(reliefDepth, 100) / 100, Contrast = Read(bevelContrast, 0) / 100,
                         Highlight = highlight, Shadow = shade, HighlightMode = (Blend)highlightMode!.SelectedItem,
                         ShadowMode = (Blend)shadowMode!.SelectedItem, HighlightOpacity = Read(highlightOpacity, 100) / 100,
                         ShadowOpacity = Read(shadowOpacity, 100) / 100 } };
@@ -264,7 +268,7 @@ public partial class MainWindow
         };
         foreach (var control in panel.Children.OfType<TextBox>()) control.TextChanged += (_, _) => refreshPreview();
         foreach (var control in panel.Children.OfType<ComboBox>()) control.SelectionChanged += (_, _) => refreshPreview();
-        foreach (var field in new[] { opacity, highlightOpacity, shadowOpacity, reliefDepth })
+        foreach (var field in new[] { opacity, highlightOpacity, shadowOpacity, reliefDepth, bevelContrast })
             if (field is not null) field.TextChanged += (_, _) => refreshPreview();
         shared.Click += (_, _) => refreshPreview();
         if (angle is not null) angle.TextChanged += (_, _) => refreshPreview();

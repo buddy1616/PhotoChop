@@ -41,7 +41,7 @@ public partial class MainWindow : Window
         public System.Windows.Media.Imaging.BitmapSource? Frame { get; set; }
         public Document? Rendered { get; set; }
         public bool NeedsFit { get; set; } = true;
-        public bool KeepPencilFrame { get; set; }
+        public bool KeepPaintFrame { get; set; }
         public string Title => (Engine.Path is { } path ? Path.GetFileName(path) : InitialTitle ?? "Untitled") + (Engine.Dirty ? " *" : "");
     }
 
@@ -76,9 +76,9 @@ public partial class MainWindow : Window
     private EditorCanvas canvas => active?.View ?? emptyCanvas;
     private LayoutDocumentPane? documentPane;
     private readonly StackPanel toolColors = new() { Margin = new Thickness(6) };
-    private readonly Dictionary<string, WrapPanel> toolPanes = new();
+    private readonly StackPanel toolStack = new();
     private const string PalettePane = "Color Palette";
-    private static IEnumerable<string> ToolDockTitles => ToolSections.Select(section => section.Title).Append(PalettePane);
+    private static IEnumerable<string> ToolDockTitles => new[] { "Tools", PalettePane };
     private readonly DockPanel layersPanel = new();
     private readonly ListBox layers = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended, AllowDrop = true };
     private readonly ListBox history = new();
@@ -111,7 +111,7 @@ public partial class MainWindow : Window
     private ShapeToolKind shapeKind;
     private int polygonSides = 5;
     private Point? lastCursor;
-    private static readonly string[] ToolNames = ["Selection", "Lasso", "Magic Wand", "Pen", "Path Select", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Bucket", "Chop"];
+    private static readonly string[] ToolNames = ["Selection", "Lasso", "Magic Wand", "Pen", "Path Select", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Burn", "Dodge", "Bucket", "Chop"];
 
     public MainWindow()
     {
@@ -138,17 +138,18 @@ public partial class MainWindow : Window
             WindowStartupLocation = WindowStartupLocation.Manual;
             SourceInitialized += (_, _) => WindowPlacement.Restore(this, placement);
         }
-        if (preferences is { ToolCatalogVersion: < 3, Tools: { } configured })
+        if (preferences is { ToolCatalogVersion: < 4, Tools: { } configured })
         {
             var added = preferences.ToolCatalogVersion switch
             {
                 0 => new[] { "Masker", "Bucket", "Lasso", "Magic Wand", "Pen", "Path Select" },
                 1 => new[] { "Magic Wand", "Pen", "Path Select" },
-                _ => new[] { "Pen", "Path Select" }
+                2 => new[] { "Pen", "Path Select" },
+                _ => Array.Empty<string>()
             };
-            preferences.Tools = configured.Concat(added).Distinct().ToArray();
+            preferences.Tools = configured.Concat(added).Concat(new[] { "Burn", "Dodge" }).Distinct().ToArray();
         }
-        preferences.ToolCatalogVersion = 3;
+        preferences.ToolCatalogVersion = 4;
         BuildMenus();
         BuildPanels();
         ResetLayout();
@@ -178,12 +179,16 @@ public partial class MainWindow : Window
         try
         {
             var serializer = new XmlLayoutSerializer(Dock);
+            bool toolsRestored = false;
             serializer.LayoutSerializationCallback += (_, args) =>
             {
-                if (args.Model.ContentId is "Tools" or "More Tools")
+                if (args.Model.ContentId == "Tools" || args.Model.ContentId == "More Tools" ||
+                    ToolSections.Any(section => section.Title == args.Model.ContentId))
                 {
-                    args.Model.ContentId = args.Model.ContentId == "Tools" ? "Painting Tools" : "Other Tools";
-                    args.Model.Title = args.Model.ContentId;
+                    if (toolsRestored) { args.Cancel = true; return; }
+                    toolsRestored = true;
+                    args.Model.ContentId = "Tools";
+                    args.Model.Title = "Tools";
                 }
                 args.Content = args.Model.ContentId == "workspace" ? emptyCanvas
                     : panelContent.GetValueOrDefault(args.Model.ContentId ?? "");
@@ -201,7 +206,7 @@ public partial class MainWindow : Window
                 {
                     var newPanes = CreateToolDocks(missing);
                     var pantry = Dock.Layout.Descendents().OfType<LayoutAnchorable>()
-                        .FirstOrDefault(panel => panel.ContentId == "Painting Tools")?.FindParent<LayoutAnchorablePaneGroup>();
+                        .FirstOrDefault(panel => panel.ContentId == "Tools")?.FindParent<LayoutAnchorablePaneGroup>();
                     if (pantry is null) Dock.Layout.RootPanel.Children.Insert(0, newPanes);
                     else foreach (var pane in newPanes.Children.ToArray())
                     {
@@ -213,7 +218,7 @@ public partial class MainWindow : Window
             if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Info") &&
                 Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Navigation")?.Parent is LayoutAnchorablePane navigationPane)
                 navigationPane.Children.Add(NewPanel("Info"));
-            if (Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Painting Tools")?.FindParent<LayoutAnchorablePaneGroup>() is { } toolbox)
+            if (Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Tools")?.FindParent<LayoutAnchorablePaneGroup>() is { } toolbox)
             {
                 toolbox.DockMinWidth = 54;
                 if (toolbox.DockWidth.IsAbsolute && toolbox.DockWidth.Value > 86) toolbox.DockWidth = new GridLength(86);
@@ -408,7 +413,7 @@ public partial class MainWindow : Window
         var image = Menu("Image");
         var adjustments = new MenuItem { Header = "Adjustments" };
         image.Items.Add(adjustments);
-        foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity })
+        foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity, EffectKind.Burn, EffectKind.Dodge })
             Item(adjustments, EffectName(kind), () => AddEffect(kind));
 
         AddColorModeMenu(image);
@@ -477,7 +482,7 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Painting Tools", "Selection Tools", "Vector Tools", "Other Tools", PalettePane, "Navigation", "Info", "Layers", "Channels", "History", "Command Log" })
+        foreach (string title in new[] { "Tools", PalettePane, "Navigation", "Info", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -868,7 +873,7 @@ public partial class MainWindow : Window
         }
         canvas.ImageWidth = doc.Width;
         canvas.ImageHeight = doc.Height;
-        if (preview is null && pencilGesture is null && !active.KeepPencilFrame) canvas.Frame = active.Frame is { } priorFrame &&
+        if (preview is null && paintGesture is null && !active.KeepPaintFrame) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
         canvas.Guides = preferences.ShowGuides ? doc.Guides : [];
         var visibleSelection = interactiveTransform is not null ? preview ?? doc : doc;
@@ -882,7 +887,7 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
-        bool modalRender = gesture is null && preview is null && pencilGesture is null && effectDialog is not { IsVisible: true };
+        bool modalRender = gesture is null && preview is null && paintGesture is null && effectDialog is not { IsVisible: true };
         blockRenderInput = modalRender;
         if (modalRender)
         {
@@ -899,9 +904,9 @@ public partial class MainWindow : Window
                 string? targetId = moveId;
                 var selectedLayer = ActiveLayer();
                 var channel = (channelList.SelectedItem as ChannelRow) is { Key: not "composite" } component ? component : null;
-                var pencil = pencilPreview;
-                var pencilId = pencilGesture;
-                bool isPreview = preview is not null || shift is not null || pencil is not null;
+                var paintCommand = paintPreview;
+                var paintId = paintGesture;
+                bool isPreview = preview is not null || shift is not null || paintCommand is not null;
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
                 var vectorLayer = session.VectorMaskOnly && session.VectorMaskTarget is { } vectorId
@@ -909,7 +914,7 @@ public partial class MainWindow : Window
                 bool cached = !isPreview && maskLayer is null && vectorLayer is null && channel is null && session.Rendered is { } prior &&
                     ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color;
                 bool gpuRequested = preferences.ExperimentalGpu;
-                var accelerator = !cached && pencil is null && gpuRequested && channel is null && maskLayer is null && vectorLayer is null &&
+                var accelerator = !cached && paintCommand is null && gpuRequested && channel is null && maskLayer is null && vectorLayer is null &&
                     SkiaRenderer.CanCompositeOnGpu(target) ? gpu ??= new WindowsGpuCompositor() : null;
                 var frame = cached ? (Pixels: session.Composite!, Frame: session.Frame!, Backend: session.RenderBackend) : await Task.Run(() =>
                 {
@@ -918,9 +923,9 @@ public partial class MainWindow : Window
                     {
                         target = session.Engine.Preview(snapshot, Command.Of("layer.moveSelection", offset, targetId));
                     }
-                    if (pencil is not null)
+                    if (paintCommand is not null)
                     {
-                        target = session.Engine.Preview(snapshot, pencil);
+                        target = session.Engine.Preview(snapshot, paintCommand);
                         if (session.MaskOnly is { } editMask)
                             maskLayer = target.AllLayers().FirstOrDefault(layer => layer.Id == editMask && layer.Mask is not null);
                     }
@@ -930,9 +935,9 @@ public partial class MainWindow : Window
                         maskLayer is not null ? renderer.MaskView(target, maskLayer) : RenderChannel(target, channel, selectedLayer));
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels), Backend: (string?)backend);
                 });
-                if ((version != renderVersion && (pencilId is null || !ReferenceEquals(pencilId, pencilGesture))) || gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
+                if ((version != renderVersion && (paintId is null || !ReferenceEquals(paintId, paintGesture))) || gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
                     (isPreview && preview is null && selectionDragDelta is null &&
-                        (pencilId is null || !ReferenceEquals(pencilId, pencilGesture)))) continue;
+                        (paintId is null || !ReferenceEquals(paintId, paintGesture)))) continue;
                 if (!isPreview && maskLayer is null && vectorLayer is null && channel is null)
                 {
                     session.Rendered = snapshot;
@@ -944,11 +949,11 @@ public partial class MainWindow : Window
                 session.View.Frame = frame.Frame;
                 if (!isPreview)
                 {
-                    session.KeepPencilFrame = false;
+                    session.KeepPaintFrame = false;
                     session.View.PendingPaint.Clear();
                 }
                 session.View.InvalidateVisual();
-                if (pencil is null) RefreshNavigation();
+                if (paintCommand is null) RefreshNavigation();
                 if (version == renderVersion) break;
             }
         }

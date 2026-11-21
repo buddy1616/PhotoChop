@@ -7,6 +7,32 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void BurnAndDodgeStrokesPreserveAlphaAndBurnCanUseAnEffectMask()
+    {
+        var renderer = new SkiaRenderer();
+        var ink = new Pixels(2, 1, [128, 128, 128, 200, 128, 128, 128, 200]);
+        var raster = new Layer("art", "Art", LayerKind.Raster) { Pixels = ink };
+        var doc = new Document("test", 2, 1) { Color = PixelBuffer.Rgba8, Layers = [raster] };
+        var brush = new StrokeArgs([new(.5, .5)], 1, 1, 1, "#00000000", Erase: false, Tone: TonalStroke.Burn);
+        var burned = renderer.Stroke(doc, raster, brush);
+        var dodged = renderer.Stroke(doc, raster, brush with { Tone = TonalStroke.Dodge });
+        Assert.True(burned.Rgba[0] < 128 && dodged.Rgba[0] > 128);
+        Assert.Equal(200, burned.Rgba[3]);
+        Assert.Equal(200, dodged.Rgba[3]);
+        Assert.Equal(128, burned.Rgba[4]);
+
+        var effect = new Layer("tone", "Tone", LayerKind.Effect)
+        {
+            Effects = [new("burn", EffectKind.Burn, A: 1)],
+            Mask = new AlphaMask(2, 1, [255, 0])
+        };
+        var result = renderer.Composite(doc with { Layers = [raster, effect] }).Rgba;
+        var untreated = renderer.Composite(doc).Rgba;
+        Assert.True(result[0] < untreated[0]);
+        Assert.Equal(untreated[4..8], result[4..8]);
+    }
+
+    [Fact]
     public void EllipticalMarqueeAndVectorShapesUseReplayableCommands()
     {
         var engine = new CommandEngine(new SkiaRenderer());

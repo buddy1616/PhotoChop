@@ -89,9 +89,9 @@ public partial class MainWindow
             if (!updatingNavigation && active is not null) ZoomBy(Math.Pow(10, navigationSlider.Value) / (active.Zoom * 100));
         };
         buttons.Children.Add(navigationSlider);
+        buttons.Children.Add(Button("+", () => ZoomBy(1.25)));
         buttons.Children.Add(navigationZoom);
         buttons.Children.Add(new TextBlock { Text = "%", VerticalAlignment = VerticalAlignment.Center });
-        buttons.Children.Add(Button("+", () => ZoomBy(1.25)));
         buttons.Children.Add(Button("Fit", Fit));
         DockPanel.SetDock(buttons, System.Windows.Controls.Dock.Bottom);
         container.Children.Add(buttons);

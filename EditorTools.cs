@@ -16,8 +16,8 @@ public partial class MainWindow
     private Chop.Core.Transform? moveOriginal;
     private Chop.Core.Transform? movePreview;
     private Document? preview;
-    private Command? pencilPreview;
-    private object? pencilGesture;
+    private Command? paintPreview;
+    private object? paintGesture;
     private SKMatrix moveParentInverse = SKMatrix.Identity;
     private Point gestureStart;
     private Point panOrigin;
@@ -68,7 +68,7 @@ public partial class MainWindow
         view.PreviewMouseMove += (_, e) =>
         {
             if (sessions.FirstOrDefault(item => ReferenceEquals(item.View, view)) is not { } session) return;
-            view.BrushPointer = IsSamplingCanvas(session) || tool is not ("Brush" or "Eraser" or "Masker") ? null : e.GetPosition(view);
+            view.BrushPointer = IsSamplingCanvas(session) || tool is not ("Brush" or "Eraser" or "Masker" or "Burn" or "Dodge") ? null : e.GetPosition(view);
             view.BrushDiameter = brushSize;
             ShowPixelInfo(session, view.FromView(e.GetPosition(view)));
             view.InvalidateVisual();
@@ -204,17 +204,21 @@ public partial class MainWindow
                         SKMatrix.CreateScale((float)target.Placement.ScaleX, (float)target.Placement.ScaleY));
                     if (moveSpace.TryInvert(out var inverted)) moveParentInverse = inverted;
                     break;
+                case "Burn":
+                case "Dodge":
                 case "Brush":
                 case "Masker":
                 case "Eraser":
                     if (ActiveLayer() is not { Locked: false } raster || !Editable(doc, raster.Id) ||
                         (tool != "Masker" && raster.Kind != LayerKind.Raster && !(active.MaskTarget == raster.Id && raster.Mask is not null)))
                     { Say("Select an unlocked raster layer to paint."); return; }
+                    if (StrokeTone(tool) != TonalStroke.None && (raster.Kind != LayerKind.Raster || active.MaskTarget == raster.Id))
+                    { Say("Select raster pixels to burn or dodge."); return; }
                     stroke.Add(new(point.X, point.Y));
-                    if (tool == "Brush" && pencilMode)
+                    if (tool is "Brush" or "Burn" or "Dodge")
                     {
-                        pencilGesture = new object();
-                        PreviewPencil(raster.Id);
+                        paintGesture = new object();
+                        PreviewStroke(raster.Id);
                     }
                     else canvas.Stroke = stroke;
                     canvas.StrokeColor = foreground;
@@ -269,13 +273,15 @@ public partial class MainWindow
                     lassoPoints.Add(new PointD(point.X, point.Y));
                 canvas.InvalidateVisual();
                 break;
+            case "Burn":
+            case "Dodge":
             case "Masker":
             case "Brush":
             case "Eraser":
                 if (stroke.Count < 99999 && (point - new Point(stroke[^1].X, stroke[^1].Y)).Length >= .25)
                 {
                     stroke.Add(new(point.X, point.Y));
-                    if (pencilGesture is not null && active.ActiveId is { } paintId) PreviewPencil(paintId);
+                    if (paintGesture is not null && active.ActiveId is { } paintId) PreviewStroke(paintId);
                 }
                 canvas.InvalidateVisual();
                 break;
@@ -340,8 +346,8 @@ public partial class MainWindow
         var bounds = GestureBounds(end);
         int x = (int)Math.Floor(bounds.X), y = (int)Math.Floor(bounds.Y);
         var area = new Area(x, y, (int)Math.Ceiling(bounds.Right) - x, (int)Math.Ceiling(bounds.Bottom) - y);
-        bool pencil = pencilGesture is not null;
-        if (pencil && stroke.Count < 100000 && stroke[^1] != new PointD(end.X, end.Y))
+        bool renderedStroke = paintGesture is not null;
+        if (renderedStroke && stroke.Count < 100000 && stroke[^1] != new PointD(end.X, end.Y))
             stroke.Add(new(end.X, end.Y));
         var points = stroke.ToArray();
         var lasso = completed == "Lasso" ? lassoPoints.Append(new PointD(end.X, end.Y)).ToArray() : [];
@@ -354,7 +360,7 @@ public partial class MainWindow
         var mode = selectionMode;
         var moveSelection = new PointD(Math.Round(motion.X), Math.Round(motion.Y));
         bool mask = active.MaskTarget is { } maskId && ActiveLayer() is { Mask: not null } layer && layer.Id == maskId;
-        CancelGesture(keepPencilFrame: pencil);
+        CancelGesture(keepPaintFrame: renderedStroke);
         switch (completed)
         {
             case "Gradient":
@@ -363,18 +369,20 @@ public partial class MainWindow
             case "Lasso":
                 if (lasso.Length >= 3) Run("selection.lasso", new LassoArgs(lasso, mode));
                 break;
+            case "Burn":
+            case "Dodge":
             case "Masker":
             case "Brush":
             case "Eraser":
                 if (points.Length > 0 && active.ActiveId is { } paintTarget)
                 {
-                    var paint = new StrokeArgs(points, brushSize, hardness, brushOpacity, foreground, completed == "Eraser", Pencil: completed == "Brush" && pencilMode);
-                    if (pencil)
+                    var paint = new StrokeArgs(points, brushSize, hardness, StrokeOpacity(completed), foreground, completed == "Eraser", Pencil: completed == "Brush" && pencilMode, Tone: StrokeTone(completed));
+                    if (renderedStroke)
                     {
-                        active.KeepPencilFrame = true;
+                        active.KeepPaintFrame = true;
                         if (!Run(mask ? "mask.paintStroke" : "layer.paintStroke", paint, paintTarget))
                         {
-                            active.KeepPencilFrame = false;
+                            active.KeepPaintFrame = false;
                             UpdateCanvas();
                         }
                         break;
@@ -478,19 +486,35 @@ public partial class MainWindow
         return true;
     }
 
-    private void PreviewPencil(string id)
+    private double burnExposure = .35, dodgeExposure = .35;
+
+    private double StrokeOpacity(string name) => name switch
     {
-        pencilPreview = Command.Of(active?.MaskTarget == id ? "mask.paintStroke" : "layer.paintStroke",
-            new StrokeArgs(stroke.ToArray(), brushSize, hardness, brushOpacity, foreground, Erase: false, Pencil: true), id);
+        "Burn" => burnExposure,
+        "Dodge" => dodgeExposure,
+        _ => brushOpacity
+    };
+
+    private static TonalStroke StrokeTone(string tool) => tool switch
+    {
+        "Burn" => TonalStroke.Burn,
+        "Dodge" => TonalStroke.Dodge,
+        _ => TonalStroke.None
+    };
+
+    private void PreviewStroke(string id)
+    {
+        paintPreview = Command.Of(active?.MaskTarget == id ? "mask.paintStroke" : "layer.paintStroke",
+            new StrokeArgs(stroke.ToArray(), brushSize, hardness, StrokeOpacity(tool), foreground, Erase: false, Pencil: tool == "Brush" && pencilMode, Tone: StrokeTone(tool)), id);
         UpdateCanvas();
     }
 
-    private void CancelGesture(bool keepPencilFrame = false)
+    private void CancelGesture(bool keepPaintFrame = false)
     {
-        bool wasPencil = pencilGesture is not null;
-        pencilGesture = null;
-        pencilPreview = null;
-        if (wasPencil && !keepPencilFrame) UpdateCanvas();
+        bool wasPainting = paintGesture is not null;
+        paintGesture = null;
+        paintPreview = null;
+        if (wasPainting && !keepPaintFrame) UpdateCanvas();
         canvas.GradientGuide = null;
         if (guideDrag is not null) CancelGuide();
         gesture = null;
@@ -618,7 +642,7 @@ public partial class MainWindow
 
     private static Cursor ToolCursor(string name) => name switch
     {
-        "Move" => Cursors.SizeAll, "Brush" or "Eraser" or "Masker" => Cursors.None,
+        "Move" => Cursors.SizeAll, "Brush" or "Eraser" or "Masker" or "Burn" or "Dodge" => Cursors.None,
         "Bucket" => ToolCursors.Bucket, "Pen" => Cursors.Pen, "Path Select" => Cursors.Arrow,
         "Magic Wand" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.WandSubtract :
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.WandAdd : ToolCursors.Wand,
@@ -631,7 +655,7 @@ public partial class MainWindow
     private bool pencilMode;
     private static readonly (string Title, string[] Tools)[] ToolSections =
     [
-        ("Painting Tools", ["Brush", "Eraser", "Masker", "Bucket", "Eyedropper"]),
+        ("Painting Tools", ["Brush", "Eraser", "Masker", "Burn", "Dodge", "Bucket", "Eyedropper"]),
         ("Selection Tools", ["Selection", "Lasso", "Magic Wand"]),
         ("Vector Tools", ["Pen", "Path Select", "Shape", "Text"]),
         ("Other Tools", ["Move", "Transform", "Chop"])
@@ -647,6 +671,7 @@ public partial class MainWindow
     private static (string Icon, string? Key) ToolPresentation(string name) => name switch
     {
         "Brush" => ("✎", "B"), "Eraser" => ("eraser", "E"), "Masker" => ("masker", null),
+        "Burn" => ("◒", null), "Dodge" => ("☀", null),
         "Bucket" => ("bucket", "G"), "Eyedropper" => ("eyedropper", "I"),
         "Selection" => ("⬚", "M"), "Lasso" => ("⤺", "L"), "Magic Wand" => ("wand", "W"),
         "Pen" => ("✒", "P"), "Path Select" => ("➚", "A"), "Shape" => ("△", null),
@@ -656,22 +681,31 @@ public partial class MainWindow
 
     private void RefreshTools()
     {
-        foreach (var section in toolPanes.Values) section.Children.Clear();
+        toolStack.Children.Clear();
         var visible = preferences.Tools ?? ToolNames;
-        foreach (var name in OrderedTools().Where(visible.Contains))
+        var order = OrderedTools().Where(visible.Contains).ToArray();
+        foreach (var section in ToolSections)
         {
-            var (icon, key) = ToolPresentation(name);
-            string label = ToolLabel(name);
-            var button = Button("", () => SetTool(name), key is null ? label : $"{label} ({key})");
-            button.Width = 27;
-            button.Height = 27;
-            button.Padding = new Thickness(2);
-            button.Content = icon.Length == 1
-                ? new TextBlock { Text = icon, FontFamily = new FontFamily("Segoe UI Symbol"), FontSize = 16 }
-                : new Image { Width = 21, Height = 21, Source = ToolCursors.Icon(icon) };
-            System.Windows.Automation.AutomationProperties.SetName(button, label);
-            if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
-            toolPanes[ToolSections.First(section => section.Tools.Contains(name)).Title].Children.Add(button);
+            var names = order.Where(section.Tools.Contains).ToArray();
+            if (names.Length == 0) continue;
+            if (toolStack.Children.Count != 0) toolStack.Children.Add(new Separator { Margin = new Thickness(3, 3, 3, 3) });
+            var buttons = new WrapPanel { Margin = new Thickness(2), MaxWidth = 62, HorizontalAlignment = HorizontalAlignment.Left };
+            toolStack.Children.Add(buttons);
+            foreach (var name in names)
+            {
+                var (icon, key) = ToolPresentation(name);
+                string label = ToolLabel(name);
+                var button = Button("", () => SetTool(name), key is null ? label : $"{label} ({key})");
+                button.Width = 27;
+                button.Height = 27;
+                button.Padding = new Thickness(2);
+                button.Content = icon.Length == 1
+                    ? new TextBlock { Text = icon, FontFamily = new FontFamily("Segoe UI Symbol"), FontSize = 16 }
+                    : new Image { Width = 21, Height = 21, Source = ToolCursors.Icon(icon) };
+                System.Windows.Automation.AutomationProperties.SetName(button, label);
+                if (name == tool) button.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 167, 255));
+                buttons.Children.Add(button);
+            }
         }
 
         toolColors.Children.Clear();
@@ -715,14 +749,24 @@ public partial class MainWindow
             modes.SelectionChanged += (_, _) => { CancelGesture(); pencilMode = modes.SelectedIndex == 1; RefreshTools(); };
             ToolOptions.Children.Add(modes);
         }
-        if (tool is "Brush" or "Eraser" or "Masker")
+        if (tool is "Brush" or "Eraser" or "Masker" or "Burn" or "Dodge")
         {
             NumberOption("Size", 1, 512, brushSize, value => brushSize = value);
             if (tool != "Brush" || !pencilMode) NumberOption("Hardness", 0, 1, hardness, value => hardness = value);
-            OptionLabel("Opacity (%)");
-            var opacity = StyleFields.Range(brushOpacity * 100, 0, 100);
+            OptionLabel(StrokeTone(tool) == TonalStroke.None ? "Opacity (%)" : "Exposure (%)");
+            string ownerTool = tool;
+            var opacity = StyleFields.Range(StrokeOpacity(ownerTool) * 100, 0, 100);
             opacity.Slider.Width = 75;
-            opacity.Slider.ValueChanged += (_, _) => brushOpacity = opacity.Slider.Value / 100;
+            opacity.Slider.ValueChanged += (_, _) =>
+            {
+                double value = opacity.Slider.Value / 100;
+                switch (ownerTool)
+                {
+                    case "Burn": burnExposure = value; break;
+                    case "Dodge": dodgeExposure = value; break;
+                    default: brushOpacity = value; break;
+                }
+            };
             ToolOptions.Children.Add(opacity.Row);
         }
         if (tool == "Selection") AddMarqueeOptions();

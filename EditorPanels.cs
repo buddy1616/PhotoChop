@@ -221,13 +221,9 @@ public partial class MainWindow
         logPanel.Children.Add(logActions);
         commandLog.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
         logPanel.Children.Add(commandLog);
-        foreach (var section in ToolSections)
-        {
-            var tools = new WrapPanel { Margin = new Thickness(2), MaxWidth = 62, HorizontalAlignment = HorizontalAlignment.Left };
-            toolPanes.Add(section.Title, tools);
-            panelContent.Add(section.Title, new ScrollViewer { Content = tools, MinWidth = 51, MaxWidth = 86, HorizontalAlignment = HorizontalAlignment.Left,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        }
+        panelContent.Add("Tools", new ScrollViewer { Content = toolStack, MinWidth = 51, MaxWidth = 86,
+            HorizontalAlignment = HorizontalAlignment.Left, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         panelContent.Add(PalettePane, toolColors);
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Info", BuildInfo());
@@ -674,7 +670,7 @@ public partial class MainWindow
         if (ActiveLayer() is null) return;
         var effect = new Effect(Format.Id(), kind,
             A: kind switch { EffectKind.GaussianBlur => 2, EffectKind.MotionBlur => 12, EffectKind.BitCrush => 8,
-                EffectKind.Opacity => 1, EffectKind.Stroke => 2, EffectKind.DropShadow or EffectKind.InnerShadow or EffectKind.BevelEmboss => 135, _ => 0 },
+                EffectKind.Burn or EffectKind.Dodge => .35, EffectKind.Opacity => 1, EffectKind.Stroke => 2, EffectKind.DropShadow or EffectKind.InnerShadow or EffectKind.BevelEmboss => 135, _ => 0 },
             B: kind == EffectKind.BevelEmboss ? 30 : kind is EffectKind.DropShadow or EffectKind.InnerShadow ? 5 : 0, Spatial: kind == EffectKind.Transform ? new() : null,
             Ink: kind is EffectKind.Stroke or EffectKind.PathFill or EffectKind.ColorOverlay ? foreground : "#FF000000", Size: kind is EffectKind.DropShadow or EffectKind.InnerShadow or EffectKind.BevelEmboss or EffectKind.Glow ? 4 : 0,
             Opacity: kind == EffectKind.DropShadow ? .7 : 1);
@@ -725,6 +721,7 @@ public partial class MainWindow
             EffectKind.BrightnessContrast => [("Brightness (-1 to 1)", effect.A.ToString()), ("Contrast (-1 to 1)", effect.B.ToString())],
             EffectKind.HueSaturation => [("Hue (-180° to 180°)", effect.A.ToString()), ("Saturation adjustment (-1 to 1)", effect.B.ToString())],
             EffectKind.BitCrush => [("Pixel size", effect.A.ToString())],
+            EffectKind.Burn or EffectKind.Dodge => [("Strength (0 to 1)", effect.A.ToString())],
             EffectKind.Opacity => [("Opacity multiplier (0 to 1)", effect.A.ToString())],
             EffectKind.MotionBlur => [("Distance (px)", effect.A.ToString()), ("Angle (degrees)", effect.B.ToString())],
             _ => [("Blur sigma (0–100 px)", effect.A.ToString())]
@@ -734,7 +731,7 @@ public partial class MainWindow
             EffectKind.BrightnessContrast => [(-1, 1), (-1, 1)],
             EffectKind.HueSaturation => [(-180, 180), (-1, 1)],
             EffectKind.BitCrush => [(1, 512)],
-            EffectKind.Opacity => [(0, 1)],
+            EffectKind.Opacity or EffectKind.Burn or EffectKind.Dodge => [(0, 1)],
             EffectKind.MotionBlur => [(0, 200), (-180, 180)],
             _ => [(0, 100)]
         };
