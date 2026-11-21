@@ -15,7 +15,8 @@ public sealed partial class SkiaRenderer
             double soften = lighting?.Soften ?? 0;
             double sigma = technique switch
             {
-                BevelTechnique.ChiselHard => soften,
+                // Average over a small footprint on wide bevels to suppress mask pixel stair steps.
+                BevelTechnique.ChiselHard => Math.Max(soften, Math.Clamp((size - 16) / 20, 0, 3)),
                 BevelTechnique.ChiselSoft => Math.Sqrt(soften * soften + Math.Max(.65, size / 10) * Math.Max(.65, size / 10)),
                 _ => Math.Sqrt(soften * soften + size * size / 9)
             };

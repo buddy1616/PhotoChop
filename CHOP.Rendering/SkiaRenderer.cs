@@ -644,6 +644,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
         var buffer = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
         var ink = effect.Kind == EffectKind.ColorOverlay ? PixelValue.FromArgb(Format.Color(effect.Ink)) : default;
         double amount = ink.A * effect.Opacity;
+        var perceptualInk = effect.Kind == EffectKind.ColorOverlay && effect.Mode == Blend.Color && effect.CmykInk is not null
+            ? PerceptualLab(ink) : (Lab?)null;
         static double MixOverlay(double original, double color, double amount) => original + (color - original) * amount;
         float hueR = 0, hueG = 0, hueB = 0;
         if (effect.Kind == EffectKind.HueSaturation)
@@ -660,7 +662,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             switch (effect.Kind)
             {
                 case EffectKind.ColorOverlay:
-                    var blended = BlendRgb(sample, ink, effect.Mode);
+                    var blended = perceptualInk is { } lab ? PerceptualRecolor(sample, lab) : BlendRgb(sample, ink, effect.Mode);
                     (r, g, b) = (MixOverlay(r, blended.R, amount), MixOverlay(g, blended.G, amount), MixOverlay(b, blended.B, amount));
                     break;
                 case EffectKind.BrightnessContrast:
