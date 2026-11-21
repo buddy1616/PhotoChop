@@ -20,6 +20,9 @@ public sealed partial class SkiaRenderer
         Layer Convert(Layer layer)
         {
             if (!layer.Visible || layer.Opacity == 0) return layer;
+            if (layer.Effects.Any(effect => effect.PhotoshopStyle))
+                layer = layer with { Effects = layer.Effects.Select(effect => effect.PhotoshopStyle
+                    ? effect with { ProfiledCmykStyle = true } : effect).ToArray() };
             if (layer.Children.Length > 0) return layer with { Children = layer.Children.Select(Convert).ToArray() };
             var raster = ResolveRaster(layer);
             if (raster?.Pixels.Native is not { Settings.Mode: ChannelColorMode.Cmyk } native) return layer;

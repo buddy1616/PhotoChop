@@ -216,7 +216,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         {
             if (glow is not null)
             {
-                using var glowBlender = CreateBlender(glow.Mode);
+                using var glowBlender = CreateBlender(glow.Mode, glow.ProfiledCmykStyle);
                 using var glowPaint = new SKPaint { Color = SKColors.White.WithAlpha(Byte(opacity)), BlendMode = ToSkiaBlend(glow.Mode) };
                 if (precision is not null) glowPaint.ColorF = new SKColorF(1, 1, 1, (float)opacity);
                 if (glowBlender is not null) glowPaint.Blender = glowBlender;

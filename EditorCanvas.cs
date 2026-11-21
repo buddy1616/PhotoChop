@@ -8,7 +8,25 @@ namespace PhotoChop;
 internal sealed class EditorCanvas : FrameworkElement
 {
     private static readonly Brush workspace = Frozen(new SolidColorBrush(Color.FromRgb(23, 25, 30)));
-    private static readonly Brush checker = CreateChecker();
+    private Brush checker = CreateChecker(8);
+    private int checkerSize = 8;
+    public bool ShowPixelGrid { get; set; } = true;
+    public Point? BrushPointer { get; set; }
+    public double BrushDiameter { get; set; }
+    public bool EllipticalMarquee { get; set; }
+    public PointD[]? ShapePreview { get; set; }
+    public bool ClosedShapePreview { get; set; }
+    private static readonly Pen pixelGrid = Frozen(new Pen(new SolidColorBrush(Color.FromArgb(100, 235, 235, 235)), 1));
+    private static readonly Pen brushLight = Frozen(new Pen(Brushes.White, 1));
+    private static readonly Pen brushDark = Frozen(new Pen(Brushes.Black, 2.5));
+
+    public void SetCheckerSize(int size)
+    {
+        size = Math.Clamp(size, 2, 64);
+        if (size == checkerSize) return;
+        checkerSize = size;
+        checker = CreateChecker(size);
+    }
     private static readonly Pen border = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(110, 119, 136)), 1));
     private static readonly Pen selectionLight = Frozen(new Pen(Brushes.White, 3));
     private static readonly Pen selectionDark = Frozen(new Pen(Brushes.Black, 2) { DashStyle = DashStyles.Dash });
@@ -73,6 +91,17 @@ internal sealed class EditorCanvas : FrameworkElement
         dc.DrawRectangle(checker, border, imageArea);
         dc.PushClip(new RectangleGeometry(imageArea));
         if (Frame is { } frame) dc.DrawImage(frame, imageArea);
+        if (ShowPixelGrid && Zoom >= 8)
+        {
+            var visible = Rect.Intersect(imageArea, new Rect(RenderSize));
+            if (!visible.IsEmpty)
+            {
+                for (int x = (int)Math.Ceiling((visible.Left - Offset.X) / Zoom); x <= (visible.Right - Offset.X) / Zoom; x++)
+                    dc.DrawLine(pixelGrid, new Point(Offset.X + x * Zoom, visible.Top), new Point(Offset.X + x * Zoom, visible.Bottom));
+                for (int y = (int)Math.Ceiling((visible.Top - Offset.Y) / Zoom); y <= (visible.Bottom - Offset.Y) / Zoom; y++)
+                    dc.DrawLine(pixelGrid, new Point(visible.Left, Offset.Y + y * Zoom), new Point(visible.Right, Offset.Y + y * Zoom));
+            }
+        }
         foreach (var pending in PendingPaint)
             DrawStroke(dc, imageArea, pending.Stroke.Points, pending.Stroke.Size, pending.Stroke.Opacity,
                 pending.Stroke.Color, pending.Stroke.Erase, pending.Clip);
@@ -96,8 +125,40 @@ internal sealed class EditorCanvas : FrameworkElement
             }
             else DrawOutline(dc, ViewRect(new Rect(selection.X, selection.Y, selection.Width, selection.Height)));
         }
-        if (Marquee is { } marquee) DrawOutline(dc, ViewRect(marquee));
+        if (ShapePreview is { Length: > 1 } shapePoints)
+        {
+            var path = new StreamGeometry();
+            using (var writer = path.Open())
+            {
+                writer.BeginFigure(ToView(shapePoints[0]), false, ClosedShapePreview);
+                writer.PolyLineTo(shapePoints.Skip(1).Select(ToView).ToArray(), true, false);
+            }
+            dc.DrawGeometry(null, selectionLight, path);
+            dc.DrawGeometry(null, selectionDark, path);
+        }
+        else if (Marquee is { } marquee)
+        {
+            var r = ViewRect(marquee);
+            if (EllipticalMarquee)
+            {
+                var center = new Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
+                dc.DrawEllipse(null, selectionLight, center, r.Width / 2, r.Height / 2);
+                dc.DrawEllipse(null, selectionDark, center, r.Width / 2, r.Height / 2);
+            }
+            else DrawOutline(dc, r);
+        }
         dc.Pop();
+        if (BrushPointer is { } pointer && MouseCursorVisible())
+        {
+            double radius = BrushDiameter * Zoom / 2;
+            foreach (var pen in new[] { brushDark, brushLight })
+            {
+                dc.DrawEllipse(null, pen, pointer, radius, radius);
+                double arm = Math.Max(5, radius);
+                dc.DrawLine(pen, pointer - new Vector(arm, 0), pointer + new Vector(arm, 0));
+                dc.DrawLine(pen, pointer - new Vector(0, arm), pointer + new Vector(0, arm));
+            }
+        }
         foreach (var guide in Guides)
             if (guide.Id != DraggedGuide) DrawGuide(dc, guide, imageArea, guidePen);
         if (GhostGuide is { } ghost) DrawGuide(dc, ghost, imageArea, ghostGuidePen);
@@ -290,19 +351,21 @@ internal sealed class EditorCanvas : FrameworkElement
         return Frozen(BitmapSource.Create(pixels.Width, pixels.Height, 96, 96, PixelFormats.Bgra32, null, bgra, pixels.Width * 4));
     }
 
-    private static Brush CreateChecker()
+    private bool MouseCursorVisible() => Cursor == System.Windows.Input.Cursors.None && System.Windows.Input.Mouse.OverrideCursor is null;
+
+    private static Brush CreateChecker(int size)
     {
         var group = new DrawingGroup();
         using (var dc = group.Open())
         {
-            dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(170, 176, 185)), null, new Rect(0, 0, 16, 16));
+            dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(170, 176, 185)), null, new Rect(0, 0, size * 2, size * 2));
             var square = new SolidColorBrush(Color.FromRgb(123, 130, 143));
-            dc.DrawRectangle(square, null, new Rect(8, 0, 8, 8));
-            dc.DrawRectangle(square, null, new Rect(0, 8, 8, 8));
+            dc.DrawRectangle(square, null, new Rect(size, 0, size, size));
+            dc.DrawRectangle(square, null, new Rect(0, size, size, size));
         }
         return Frozen(new DrawingBrush(group)
         {
-            TileMode = TileMode.Tile, ViewportUnits = BrushMappingMode.Absolute, Viewport = new Rect(0, 0, 16, 16),
+            TileMode = TileMode.Tile, ViewportUnits = BrushMappingMode.Absolute, Viewport = new Rect(0, 0, size * 2, size * 2),
             Stretch = Stretch.None
         });
     }

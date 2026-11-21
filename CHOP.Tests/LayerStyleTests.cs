@@ -7,6 +7,22 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void EllipticalMarqueeAndVectorShapesUseReplayableCommands()
+    {
+        var engine = new CommandEngine(new SkiaRenderer());
+        engine.Execute(Command.Of("document.create", new NewArgs("test", 20, 20)));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(1, 1, 10, 8), SelectionMode.Replace, Ellipse: true)));
+        Assert.True(engine.Current!.Selected(5, 5));
+        Assert.False(engine.Current.Selected(1, 1));
+        engine.Execute(Command.Of("layer.createShape", new VectorShapeArgs("triangle", "Triangle", [new(1, 1), new(10, 10), new(1, 10)],
+            "#FFFFFFFF", Closed: true)));
+        Assert.Equal(EffectKind.PathFill, engine.Current.Layers[^1].Effects.Single().Kind);
+        Assert.True(engine.Current.Layers[^1].Contours.Single().Closed);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Empty(engine.Current.Layers);
+    }
+
+    [Fact]
     public void OuterMultiplyGlowBlendsWithTheUnderlyingLayer()
     {
         var renderer = new SkiaRenderer();
@@ -18,6 +34,11 @@ public sealed class LayerStyleTests
         int pixel = (16 * 32 + 8) * 4;
         Assert.True(Render(Blend.Normal)[pixel] > 128);
         Assert.True(Render(Blend.Multiply)[pixel] < 128);
+        var linear = renderer.Composite(new Document("test", 32, 32)
+        {
+            Layers = [background, shape with { Effects = [glow with { Mode = Blend.Multiply, ProfiledCmykStyle = true }] }]
+        });
+        Assert.True(linear.Rgba[pixel + 2] < Render(Blend.Multiply)[pixel + 2]);
     }
 
     [Fact]

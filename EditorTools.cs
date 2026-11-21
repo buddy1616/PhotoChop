@@ -23,6 +23,7 @@ public partial class MainWindow
     private Point panOrigin;
     private enum MarqueeStyle { Normal, FixedRatio, FixedSize }
     private MarqueeStyle marqueeStyle;
+    private bool ellipticalMarquee;
     private double marqueeWidth = 1;
     private double marqueeHeight = 1;
     private double fixedWidth = 100;
@@ -64,6 +65,15 @@ public partial class MainWindow
         };
         view.MouseDown += CanvasDown;
         view.MouseMove += CanvasMove;
+        view.PreviewMouseMove += (_, e) =>
+        {
+            if (sessions.FirstOrDefault(item => ReferenceEquals(item.View, view)) is not { } session) return;
+            view.BrushPointer = IsSamplingCanvas(session) || tool is not ("Brush" or "Eraser" or "Masker") ? null : e.GetPosition(view);
+            view.BrushDiameter = brushSize;
+            ShowPixelInfo(session, view.FromView(e.GetPosition(view)));
+            view.InvalidateVisual();
+        };
+        view.MouseLeave += (_, _) => { view.BrushPointer = null; view.InvalidateVisual(); };
         view.PreviewMouseMove += (_, _) => RefreshMarqueeCursor();
         view.PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
         view.PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
@@ -278,6 +288,10 @@ public partial class MainWindow
             case "Chop":
             case "Shape":
                 canvas.Marquee = GestureBounds(point);
+                canvas.EllipticalMarquee = gesture == "Selection" && ellipticalMarquee || gesture == "Shape" && shapeKind == ShapeToolKind.Ellipse;
+                canvas.ShapePreview = gesture == "Shape" && shapeKind is not (ShapeToolKind.Rectangle or ShapeToolKind.Ellipse)
+                    ? ShapePoints(canvas.Marquee.Value, point) : null;
+                canvas.ClosedShapePreview = shapeKind != ShapeToolKind.Line;
                 canvas.InvalidateVisual();
                 break;
             case "Move selection":
@@ -387,18 +401,43 @@ public partial class MainWindow
                 if (originalSelection is { } previous)
                     Run("selection.translate", new PointD(area.X - previous.X, area.Y - previous.Y));
                 else if (bounds.Width >= 1 && bounds.Height >= 1)
-                    Run("selection.rectangle", new RectangleSelection(area, mode));
+                    Run("selection.rectangle", new RectangleSelection(area, mode, ellipticalMarquee));
                 else if (mode == Chop.Core.SelectionMode.Replace) Run<Area?>("document.selection", null);
                 break;
             case "Chop":
                 if (bounds.Width >= 1 && bounds.Height >= 1) { Run("document.chop", area); Fit(); }
                 break;
             case "Shape":
-                if (bounds.Width >= 1 && bounds.Height >= 1)
-                    CreateLayer(shapeKind, new(x, y), area.Width, area.Height);
+                if (shapeKind == ShapeToolKind.Line ? (end - gestureStart).Length >= 1 : bounds.Width >= 1 && bounds.Height >= 1)
+                {
+                    if (shapeKind is ShapeToolKind.Rectangle or ShapeToolKind.Ellipse)
+                        CreateLayer(shapeKind == ShapeToolKind.Rectangle ? LayerKind.Rectangle : LayerKind.Ellipse,
+                            new(x, y), area.Width, area.Height);
+                    else
+                    {
+                        string shapeId = Format.Id();
+                        string? parent = DestinationGroup();
+                        if (parent is not null) active.Collapsed.Remove(parent);
+                        Run("layer.createShape", new VectorShapeArgs(shapeId, shapeKind.ToString(), ShapePoints(bounds, end),
+                            foreground, shapeKind != ShapeToolKind.Line, parent), selectId: shapeId);
+                    }
+                }
                 break;
         }
         e.Handled = true;
+    }
+
+    private PointD[] ShapePoints(Rect bounds, Point end)
+    {
+        if (shapeKind == ShapeToolKind.Line) return [new(gestureStart.X, gestureStart.Y), new(end.X, end.Y)];
+        int sides = shapeKind == ShapeToolKind.Triangle ? 3 : polygonSides;
+        if (sides == 3) return [new(bounds.X + bounds.Width / 2, bounds.Y), new(bounds.Right, bounds.Bottom), new(bounds.Left, bounds.Bottom)];
+        return Enumerable.Range(0, sides).Select(i =>
+        {
+            double angle = -Math.PI / 2 + i * 2 * Math.PI / sides;
+            return new PointD(bounds.X + bounds.Width / 2 * (1 + Math.Cos(angle)),
+                bounds.Y + bounds.Height / 2 * (1 + Math.Sin(angle)));
+        }).ToArray();
     }
 
     private Rect GestureBounds(Point current)
@@ -476,6 +515,7 @@ public partial class MainWindow
         canvas.LassoPath = null;
         canvas.Stroke = null;
         canvas.Marquee = null;
+        canvas.ShapePreview = null;
         if (canvas.IsMouseCaptured) canvas.ReleaseMouseCapture();
         canvas.InvalidateVisual();
     }
@@ -558,7 +598,13 @@ public partial class MainWindow
         tool = name;
         if (active?.VectorMaskTarget is not null && name is not ("Pen" or "Path Select")) FinishVectorMaskEditing();
         foreach (var session in sessions)
+        {
             session.View.Cursor = IsSamplingCanvas(session) ? ToolCursors.Eyedropper : ToolCursor(name);
+            session.View.BrushPointer = session.View.IsMouseOver && session.View.Cursor == Cursors.None
+                ? Mouse.GetPosition(session.View) : null;
+            session.View.BrushDiameter = brushSize;
+            session.View.InvalidateVisual();
+        }
         RefreshTools();
         RefreshPathOverlay();
     }
@@ -572,7 +618,7 @@ public partial class MainWindow
 
     private static Cursor ToolCursor(string name) => name switch
     {
-        "Move" => Cursors.SizeAll, "Brush" => Cursors.Pen, "Eraser" => ToolCursors.Eraser, "Masker" => ToolCursors.Masker,
+        "Move" => Cursors.SizeAll, "Brush" or "Eraser" or "Masker" => Cursors.None,
         "Bucket" => ToolCursors.Bucket, "Pen" => Cursors.Pen, "Path Select" => Cursors.Arrow,
         "Magic Wand" => Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ? ToolCursors.WandSubtract :
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? ToolCursors.WandAdd : ToolCursors.Wand,
@@ -682,9 +728,10 @@ public partial class MainWindow
         if (tool == "Selection") AddMarqueeOptions();
         if (tool == "Shape")
         {
-            var list = new ComboBox { ItemsSource = new[] { LayerKind.Rectangle, LayerKind.Ellipse }, SelectedItem = shapeKind };
-            list.SelectionChanged += (_, _) => { if (list.SelectedItem is LayerKind kind) shapeKind = kind; };
+            var list = new ComboBox { ItemsSource = Enum.GetValues<ShapeToolKind>(), SelectedItem = shapeKind };
+            list.SelectionChanged += (_, _) => { if (list.SelectedItem is ShapeToolKind kind) { shapeKind = kind; RefreshTools(); } };
             ToolOptions.Children.Add(list);
+            if (shapeKind == ShapeToolKind.Polygon) NumberOption("Sides", 3, 64, polygonSides, value => polygonSides = (int)Math.Round(value));
         }
         if (tool == "Transform")
         {
@@ -696,6 +743,10 @@ public partial class MainWindow
 
     private void AddMarqueeOptions()
     {
+        OptionLabel("Mode");
+        var mode = new ComboBox { ItemsSource = new[] { "Rectangular", "Elliptical" }, SelectedIndex = ellipticalMarquee ? 1 : 0 };
+        mode.SelectionChanged += (_, _) => ellipticalMarquee = mode.SelectedIndex == 1;
+        ToolOptions.Children.Add(mode);
         OptionLabel("Style");
         var styles = new ComboBox { ItemsSource = new[] { "Normal", "Fixed Ratio", "Fixed Size" }, SelectedIndex = (int)marqueeStyle };
         styles.SelectionChanged += (_, _) =>
@@ -808,6 +859,11 @@ public partial class MainWindow
 
     private void WorkspaceShortcuts(object sender, PreProcessInputEventArgs args)
     {
+        if (blockRenderInput && args.StagingItem.Input is KeyEventArgs or MouseButtonEventArgs or MouseWheelEventArgs or TextCompositionEventArgs)
+        {
+            args.Cancel();
+            return;
+        }
         if (args.StagingItem.Input is not KeyEventArgs e) return;
         if ((e.Key is Key.LeftAlt or Key.RightAlt || e.SystemKey is Key.LeftAlt or Key.RightAlt) &&
             (e.RoutedEvent == Keyboard.PreviewKeyDownEvent || e.RoutedEvent == Keyboard.PreviewKeyUpEvent))

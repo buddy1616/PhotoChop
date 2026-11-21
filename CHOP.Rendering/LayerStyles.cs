@@ -4,6 +4,9 @@ namespace Chop.Rendering;
 
 public sealed partial class SkiaRenderer
 {
+    // Increased attenuation approximates how the converted CMYK shadow inks darken the artwork.
+    private static double DarkenInkCoverage(double alpha) => 1 - Math.Pow(1 - Math.Clamp(alpha, 0, 1), 1.25);
+
     private static Frame OuterGlowFrame(Frame frame, Effect effect)
     {
         int spread = (int)Math.Round(effect.Size * effect.Spread / 100);
@@ -16,7 +19,9 @@ public sealed partial class SkiaRenderer
         for (int i = 0; i < pixels.Width * pixels.Height; i++)
         {
             double coverage = Math.Pow(PixelBuffer.Alpha(pixels, i), 50 / effect.GlowRange);
-            buffer.Set(i, ink with { A = ink.A * effect.Opacity * ContourCurve.Sample(effect.Contour, coverage) });
+            double alpha = ink.A * effect.Opacity * ContourCurve.Sample(effect.Contour, coverage);
+            if (effect.ProfiledCmykStyle && effect.Mode == Blend.Multiply) alpha = DarkenInkCoverage(alpha);
+            buffer.Set(i, ink with { A = alpha });
         }
         return halo with { Pixels = buffer.Finish() };
     }
@@ -145,8 +150,11 @@ public sealed partial class SkiaRenderer
                     outside = strength * effect.Opacity * color.A * edge;
                 }
             }
-            var blended = BlendRgb(original, color, mode);
-            var result = PixelValue.Lerp(original, blended, weight * color.A * effect.Opacity) with { A = original.A };
+            var blended = effect.ProfiledCmykStyle && mode is Blend.Multiply or Blend.Screen
+                ? BlendLinearStyle(original, color, mode) : BlendRgb(original, color, mode);
+            double mix = weight * color.A * effect.Opacity;
+            if (effect.ProfiledCmykStyle && mode == Blend.Multiply) mix = DarkenInkCoverage(mix);
+            var result = PixelValue.Lerp(original, blended, mix) with { A = original.A };
             if (outside > 0) result = result.Over(color with { A = outside });
             output.Set((y + pad) * width + x + pad, result);
         }
