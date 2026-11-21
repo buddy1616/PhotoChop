@@ -104,18 +104,22 @@ internal static class PsdDescriptorStyles
                         _ => StyleContour.Linear
                     };
                     partial |= contour == StyleContour.Linear && contourName is not (null or "Linear");
+                    if (type == EffectKind.Glow)
+                        partial |= style.Number("Nose", 0) != 0 || style.Number("ShdN", 0) != 0 || style.Flag("AntA");
                     effects.Add(new($"psd-style-{effects.Count + 1}", type.Value, Enabled: masterEnabled && style.Flag("enab"),
                         A: type == EffectKind.Stroke ? Math.Clamp(style.Number("Sz  ", 1), 1, 512) : angle,
                         B: type == EffectKind.BevelEmboss ? Math.Clamp((useGlobal ? globalAltitude : null) ?? style.Number("Lald", 30), 0, 90) : strokePaint == "GrFl" ? angle : Math.Clamp(style.Number("Dstn", 0), 0, 512),
                         Mode: style.Enum("Md  ") is { } mode ? blend(mode) : Blend.Normal, Ink: color ?? "#FFFFFFFF", Alignment: align,
                         Size: Math.Clamp(style.Number("blur", style.Number("Sz  ", 4)), type == EffectKind.BevelEmboss ? 1 : .1, 100),
                         Spread: Math.Clamp(style.Number("Ckmt", 0), 0, 100),
-                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops, Texture: texture, Lighting: lighting, UseGlobalLight: useGlobal && Effect.UsesLight(type.Value), Contour: contour, CmykInk: type == EffectKind.ColorOverlay ? ReadCmyk(colorDescriptor) : null));
+                        Opacity: Math.Clamp(style.Number("Opct", 100) / 100, 0, 1), Stops: stops, Texture: texture, Lighting: lighting, UseGlobalLight: useGlobal && Effect.UsesLight(type.Value), Contour: contour, CmykInk: type == EffectKind.ColorOverlay ? ReadCmyk(colorDescriptor) : null,
+                        PhotoshopStyle: true, GlowRange: Math.Clamp(style.Number("Inpr", 50), 1, 100),
+                        PreciseGlow: style.Enum("GlwT") == "PrBL"));
                 }
             }
         }
         catch (InvalidDataException) { partial = true; }
-        return effects.ToArray();
+        return effects.OrderBy(effect => effect.PhotoshopOrder()).ToArray();
     }
 
     private static GradientStop[]? ReadGradient(Descriptor? descriptor, CmykProfile? colorTransform)

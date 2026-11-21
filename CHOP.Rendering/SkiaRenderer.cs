@@ -197,6 +197,10 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (layer.RasterGrid is { } grid) world = SKMatrix.Concat(world, ToSkia(grid));
         var blend = bypass ? layer.Blend : CommandEngine.EffectiveBlend(layer);
         Effect[] effects = bypass ? [] : layer.Effects;
+        var glow = effects.LastOrDefault(ProcessesPixels);
+        if (glow is { Kind: EffectKind.Glow, Alignment: StrokeAlignment.Outside, Mode: not Blend.Normal })
+            effects = effects.Where(effect => !ReferenceEquals(effect, glow)).ToArray();
+        else glow = null;
         using var blender = CreateBlender(blend);
         double opacity = layer.Opacity * (layer.Kind == LayerKind.Group ? layer.FillOpacity : 1);
         using var paint = new SKPaint
@@ -208,6 +212,19 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (blender is not null) paint.Blender = blender;
         drawLeaf ??= precision is null ? DrawFrame : DrawNativeFrame;
 
+        void DrawStyled(Frame frame)
+        {
+            if (glow is not null)
+            {
+                using var glowBlender = CreateBlender(glow.Mode);
+                using var glowPaint = new SKPaint { Color = SKColors.White.WithAlpha(Byte(opacity)), BlendMode = ToSkiaBlend(glow.Mode) };
+                if (precision is not null) glowPaint.ColorF = new SKColorF(1, 1, 1, (float)opacity);
+                if (glowBlender is not null) glowPaint.Blender = glowBlender;
+                drawLeaf(canvas, OuterGlowFrame(frame, glow), glowPaint);
+            }
+            drawLeaf(canvas, frame, paint);
+        }
+
         var spatial = SpatialMatrix(layer);
         if (spatial != SKMatrix.Identity)
         {
@@ -218,7 +235,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 if (PrepareLayer(layer, effects, precision) is not { } frame) return;
                 canvas.Save();
                 canvas.Concat(SKMatrix.Concat(projection, world));
-                drawLeaf(canvas, frame, paint);
+                DrawStyled(frame);
                 canvas.Restore();
                 return;
             }
@@ -259,7 +276,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             groupCanvas.Translate(-region.X, -region.Y);
             DrawTier(group, groupCanvas, layer.Children, region, world, precision);
             groupCanvas.Flush();
-            if (!effects.Any(ProcessesPixels) && (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask))
+            if (glow is null && !effects.Any(ProcessesPixels) && (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask))
             {
                 canvas.DrawBitmap(group, region.X, region.Y, paint);
                 return;
@@ -284,15 +301,14 @@ public sealed partial class SkiaRenderer : IRasterBackend
             if (vectorCoverage is not null) groupCanvas.DrawBitmap(vectorCoverage, region.X, region.Y, maskPaint);
             groupCanvas.Flush();
             var frame = Evaluate(Unpremultiply(group, precision), effects, region.X, region.Y);
-            using var result = RasterBitmap(frame.Pixels, precision);
-            canvas.DrawBitmap(result, frame.X, frame.Y, paint);
+            DrawStyled(frame);
             return;
         }
 
         if (PrepareLayer(layer, effects, precision) is not { } evaluated) return;
         canvas.Save();
         canvas.Concat(world);
-        drawLeaf(canvas, evaluated, paint);
+        DrawStyled(evaluated);
         canvas.Restore();
     }
 
@@ -489,7 +505,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         {
             using var paint = new SKPaint
             {
-                Color = new SKColor(Format.Color(stroke.Ink)), IsAntialias = true, Style = SKPaintStyle.Stroke,
+                Color = new SKColor(Format.Color(stroke.Ink)).WithAlpha(Byte(PixelValue.FromArgb(Format.Color(stroke.Ink)).A * stroke.Opacity)), IsAntialias = true, Style = SKPaintStyle.Stroke,
                 StrokeWidth = (float)stroke.A, StrokeCap = SKStrokeCap.Round, StrokeJoin = SKStrokeJoin.Round
             };
             if (anyOpen) canvas.DrawPath(open, paint);
@@ -575,7 +591,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
             Evaluation? input = null;
             var silhouette = new Frame(source, x, y);
             bool trackSilhouette = effects.Any(effect => effect.Enabled && effect.Kind == EffectKind.BevelEmboss);
-            foreach (var effect in effects)
+            IEnumerable<Effect> sequence = effects;
+            if (effects.All(effect => effect.PhotoshopStyle) &&
+                effects.Select(effect => effect.PhotoshopOrder()).SequenceEqual(effects.Select(effect => effect.PhotoshopOrder()).Order()))
+                sequence = effects.OrderBy(effect => effect.Kind is EffectKind.ColorOverlay or EffectKind.GradientOverlay or EffectKind.PatternOverlay ? -1 : effect.PhotoshopOrder());
+            foreach (var effect in sequence)
             {
                 if (!ProcessesPixels(effect)) continue;
                 var node = cache.Nodes.Find(item => item.Effect == effect && ReferenceEquals(item.Input, input) && item.X == x && item.Y == y);

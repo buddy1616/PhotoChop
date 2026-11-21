@@ -31,7 +31,7 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
         SetHandle(transform);
     }
 
-    public static CmykProfile? Open(byte[] profile, bool fromSrgb = false)
+    public static CmykProfile? Open(byte[] profile, bool fromSrgb = false, bool exactSamples = false)
     {
         if (profile.Length < 128 || !profile.AsSpan(16, 4).SequenceEqual("CMYK"u8)) return null;
         if (OperatingSystem.IsLinux() ||
@@ -39,7 +39,7 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
         {
             try
             {
-                nint transform = OpenLittleCms(profile, fromSrgb);
+                nint transform = OpenLittleCms(profile, fromSrgb, exactSamples);
                 return transform == 0 ? null : new(transform, fromSrgb, false);
             }
             catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
@@ -83,14 +83,16 @@ public sealed class CmykProfile : SafeHandleZeroOrMinusOneIsInvalid
         return true;
     }
 
-    private static nint OpenLittleCms(byte[] profile, bool fromSrgb)
+    private static nint OpenLittleCms(byte[] profile, bool fromSrgb, bool exactSamples)
     {
         nint source = cmsOpenProfileFromMem(profile, (uint)profile.Length);
         if (source == 0) return 0;
         nint target = cmsCreate_sRGBProfile();
+        const uint NoOptimization = 0x0100;
+        uint flags = exactSamples ? NoOptimization : 0;
         try { return target == 0 ? 0 : fromSrgb
-            ? cmsCreateTransform(target, Rgb16, source, Cmyk16, Perceptual, 0)
-            : cmsCreateTransform(source, Cmyk16, target, Rgb16, Perceptual, 0); }
+            ? cmsCreateTransform(target, Rgb16, source, Cmyk16, Perceptual, flags)
+            : cmsCreateTransform(source, Cmyk16, target, Rgb16, Perceptual, flags); }
         finally
         {
             if (target != 0) cmsCloseProfile(target);

@@ -26,7 +26,7 @@ public static class PsdImport
         if (bytes.Length > MaxInputBytes) throw new InvalidDataException("The PSD exceeds the supported file size.");
         var file = PsdParser.Parse(bytes);
         byte[]? profile = file.IccProfile.Length is > 0 and <= 16 * 1024 * 1024 ? file.IccProfile.ToArray() : null;
-        using var colorTransform = file.Mode == 4 && profile is not null ? CmykProfile.Open(profile) : null;
+        using var colorTransform = file.Mode == 4 && profile is not null ? CmykProfile.Open(profile, exactSamples: true) : null;
         return new Importer(file, profile, colorTransform).Read(documentId, flattened);
     }
 

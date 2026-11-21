@@ -29,8 +29,22 @@ public sealed record Placement(double X = 0, double Y = 0, double ScaleX = 1, do
 public sealed record CmykColor(double Cyan, double Magenta, double Yellow, double Black);
 
 public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal, string Ink = "#FF000000", StrokeAlignment Alignment = StrokeAlignment.Outside,
-    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null, bool UseGlobalLight = false, StyleContour Contour = StyleContour.Linear, CmykColor? CmykInk = null)
+    double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null, bool UseGlobalLight = false, StyleContour Contour = StyleContour.Linear, CmykColor? CmykInk = null, bool PhotoshopStyle = false, double GlowRange = 50, bool PreciseGlow = false)
 {
+    public int PhotoshopOrder() => Kind switch
+    {
+        EffectKind.BevelEmboss => 0,
+        EffectKind.Stroke => 1,
+        EffectKind.InnerShadow => 2,
+        EffectKind.Glow when Alignment == StrokeAlignment.Inside => 3,
+        EffectKind.ColorOverlay => 4,
+        EffectKind.GradientOverlay => 5,
+        EffectKind.PatternOverlay => 6,
+        EffectKind.Glow => 7,
+        EffectKind.DropShadow => 8,
+        _ => 9
+    };
+
     public static bool UsesLight(EffectKind kind) => kind is EffectKind.BevelEmboss or EffectKind.DropShadow or EffectKind.InnerShadow;
     public static double LightAngle(EffectKind kind, double angle) => ((angle + (kind == EffectKind.DropShadow ? 180 : 0)) % 360 + 360) % 360;
 }
