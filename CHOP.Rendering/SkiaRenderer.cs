@@ -681,6 +681,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
             double r = sample.R, g = sample.G, b = sample.B;
             switch (effect.Kind)
             {
+                case EffectKind.Burn:
+                case EffectKind.Dodge:
+                    (r, g, b) = (ToneChannel(r, effect.A, effect.Kind == EffectKind.Dodge),
+                        ToneChannel(g, effect.A, effect.Kind == EffectKind.Dodge), ToneChannel(b, effect.A, effect.Kind == EffectKind.Dodge));
+                    break;
                 case EffectKind.ColorOverlay:
                     var blended = perceptualInk is { } lab ? PerceptualRecolor(sample, lab) : BlendRgb(sample, ink, effect.Mode);
                     (r, g, b) = (MixOverlay(r, blended.R, amount), MixOverlay(g, blended.G, amount), MixOverlay(b, blended.B, amount));
@@ -1387,7 +1392,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
         double radius = stroke.Size / 2;
         uint color = Format.Color(stroke.Color);
-        double opacity = stroke.Opacity * (stroke.Erase ? 1 : (color >> 24) / 255.0);
+        double opacity = stroke.Opacity * (stroke.Erase || stroke.Tone != TonalStroke.None ? 1 : (color >> 24) / 255.0);
         var selection = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
 
         var corners = inverse.MapRect(new SKRect(
@@ -1450,9 +1455,21 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var backdrop = buffer.Get(i);
             var foreground = PixelValue.FromArgb(color) with { A = alpha };
             if (stroke.Erase) buffer.CopyWithAlpha(buffer.Finish(), i, i, backdrop.A * (1 - alpha));
+            else if (stroke.Tone != TonalStroke.None)
+            {
+                bool dodge = stroke.Tone == TonalStroke.Dodge;
+                if (backdrop.A > 0) buffer.Set(i, new(ToneChannel(backdrop.R, alpha, dodge),
+                    ToneChannel(backdrop.G, alpha, dodge), ToneChannel(backdrop.B, alpha, dodge), backdrop.A));
+            }
             else buffer.Set(i, foreground.Over(backdrop));
         }
         return buffer.Finish();
+    }
+
+    private static double ToneChannel(double channel, double amount, bool dodge)
+    {
+        if (amount == 0 || channel is <= 0 or >= 1) return channel;
+        return dodge ? 1 - Math.Pow(1 - channel, 1 + amount) : Math.Pow(channel, 1 + amount);
     }
 
     /// <summary>Maps source coordinates onto the canvas for transformed brush strokes.</summary>

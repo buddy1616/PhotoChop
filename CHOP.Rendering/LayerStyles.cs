@@ -135,6 +135,8 @@ public sealed partial class SkiaRenderer
                 // Increase facet contrast without flattening the angular falloff around curved edges.
                 if (lighting?.Technique == BevelTechnique.ChiselHard)
                     magnitude = magnitude * magnitude * (3 - 2 * magnitude);
+                double contrast = lighting?.Contrast ?? 0;
+                if (contrast != 0) magnitude = 1 - Math.Pow(1 - Math.Clamp(magnitude, 0, 1), Math.Pow(4, contrast));
                 double strength = ContourCurve.Sample(effect.Contour, magnitude);
                 weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength * ShapeAlpha(x, y);
                 color = light < 0 ? shade : highlight;
