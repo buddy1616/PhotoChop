@@ -55,6 +55,7 @@ public partial class MainWindow
         else
         {
             fields.Add(Numeric("Thickness (px)", effect.A, 1, 512));
+            fields.Add(Numeric("Opacity (%)", effect.Opacity * 100, 0, 100));
             panel.Children.Add(new TextBlock { Text = "Position", Margin = new Thickness(0, 6, 0, 3) });
             alignment = new ComboBox { ItemsSource = Enum.GetValues<StrokeAlignment>(), SelectedItem = effect.Alignment };
             panel.Children.Add(alignment);
@@ -70,7 +71,7 @@ public partial class MainWindow
             if (overlay) return effect with { Mode = (Blend)blend!.SelectedItem, Opacity = v[0] / 100, Ink = ink,
                 CmykInk = Format.Color(ink) == Format.Color(effect.Ink) ? effect.CmykInk : null };
             return shadow ? effect with { A = Opposite(v[0]), B = v[1], Size = v[2], Spread = v[3], Opacity = v[4] / 100, Ink = ink, UseGlobalLight = shared.IsChecked == true, Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag }
-                : effect with { A = v[0], Alignment = (StrokeAlignment)alignment!.SelectedItem, Ink = ink };
+                : effect with { A = v[0], Opacity = v[1] / 100, Alignment = (StrokeAlignment)alignment!.SelectedItem, Ink = ink };
         }
         var engine = active?.Engine;
         var layer = ActiveLayer();

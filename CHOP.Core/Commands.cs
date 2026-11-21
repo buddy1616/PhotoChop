@@ -1618,6 +1618,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (!Enum.IsDefined(effect.Alignment)) throw new InvalidDataException("Unknown bevel position.");
                 goto case EffectKind.ColorOverlay;
             case EffectKind.Glow:
+                Range(effect.GlowRange, 1, 100);
+                goto case EffectKind.InnerShadow;
             case EffectKind.InnerShadow:
                 Range(effect.Size, .1, 100);
                 Range(effect.Spread, 0, 100);
@@ -1633,6 +1635,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case EffectKind.PathFill: Format.Color(effect.Ink); break;
             case EffectKind.Stroke:
                 Range(effect.A, 1, 512);
+                Range(effect.Opacity, 0, 1);
                 if (!Enum.IsDefined(effect.Alignment)) throw new InvalidDataException("Invalid stroke alignment.");
                 Format.Color(effect.Ink);
                 break;

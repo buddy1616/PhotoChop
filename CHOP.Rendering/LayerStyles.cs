@@ -4,8 +4,27 @@ namespace Chop.Rendering;
 
 public sealed partial class SkiaRenderer
 {
+    private static Frame OuterGlowFrame(Frame frame, Effect effect)
+    {
+        int spread = (int)Math.Round(effect.Size * effect.Spread / 100);
+        double sigma = Math.Max(.1, (effect.Size - spread) / 3);
+        if (effect.PreciseGlow) sigma *= .75;
+        var halo = Blur(AlphaEffect(frame, spread, true, 0xFFFFFFFF, 1, spread), sigma);
+        var pixels = halo.Pixels;
+        var buffer = new PixelBuffer(pixels.Width, pixels.Height, PixelBuffer.Settings(pixels));
+        var ink = PixelValue.FromArgb(Format.Color(effect.Ink));
+        for (int i = 0; i < pixels.Width * pixels.Height; i++)
+        {
+            double coverage = Math.Pow(PixelBuffer.Alpha(pixels, i), 50 / effect.GlowRange);
+            buffer.Set(i, ink with { A = ink.A * effect.Opacity * ContourCurve.Sample(effect.Contour, coverage) });
+        }
+        return halo with { Pixels = buffer.Finish() };
+    }
+
     private Frame RenderLayerStyle(Frame frame, Effect effect, Frame? silhouette = null)
     {
+        if (effect.Kind == EffectKind.Glow && effect.Alignment == StrokeAlignment.Outside)
+            return StackFrames(OuterGlowFrame(frame, effect), frame);
         var source = frame.Pixels;
         var precision = PixelBuffer.Settings(source);
         var gradient = effect.Stops is { Length: > 0 } stops ? GradientRamp.Sampler(stops) : null;
@@ -108,6 +127,9 @@ public sealed partial class SkiaRenderer
                 double light = -(gx * dx + gy * dy) * Math.Cos(altitude) / normalLength *
                     (lighting?.Down == true ? -1 : 1);
                 double magnitude = Math.Abs(light);
+                // Increase facet contrast without flattening the angular falloff around curved edges.
+                if (lighting?.Technique == BevelTechnique.ChiselHard)
+                    magnitude = magnitude * magnitude * (3 - 2 * magnitude);
                 double strength = ContourCurve.Sample(effect.Contour, magnitude);
                 weight = effect.Alignment == StrokeAlignment.Outside ? 0 : strength * ShapeAlpha(x, y);
                 color = light < 0 ? shade : highlight;

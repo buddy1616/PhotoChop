@@ -7,6 +7,20 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void OuterMultiplyGlowBlendsWithTheUnderlyingLayer()
+    {
+        var renderer = new SkiaRenderer();
+        var background = new Layer("background", "Background", LayerKind.Rectangle) { Width = 32, Height = 32, Color = "#FF808080" };
+        var shape = new Layer("shape", "Shape", LayerKind.Rectangle) { Width = 12, Height = 12, Transform = new(10, 10) };
+        var glow = new Effect("glow", EffectKind.Glow, Size: 8, Ink: "#FFC08040");
+        byte[] Render(Blend blend) => renderer.Composite(new Document("test", 32, 32)
+            { Layers = [background, shape with { Effects = [glow with { Mode = blend }] }] }).Rgba;
+        int pixel = (16 * 32 + 8) * 4;
+        Assert.True(Render(Blend.Normal)[pixel] > 128);
+        Assert.True(Render(Blend.Multiply)[pixel] < 128);
+    }
+
+    [Fact]
     public void ImportedCmykColorOverlayKeepsDarkTextureFromClippingToOneHue()
     {
         var renderer = new SkiaRenderer();

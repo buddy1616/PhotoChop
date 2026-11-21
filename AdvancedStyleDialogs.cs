@@ -145,6 +145,9 @@ public partial class MainWindow
         var distance = shadow ? NumberField("Distance (px)", effect.B, 0, 512) :
             bevel ? NumberField("Light altitude (degrees)", effect.B, 0, 90) : null;
         var spread = glow ? NumberField("Spread (%)", effect.Spread, 0, 100) : null;
+        var range = glow ? NumberField("Range (%)", effect.GlowRange, 1, 100) : null;
+        var glowTechnique = new ComboBox { ItemsSource = new[] { "Softer", "Precise" }, SelectedIndex = effect.PreciseGlow ? 1 : 0 };
+        if (glow) Field("Technique", glowTechnique);
         Action refreshPreview = () => { };
         var lighting = effect.Lighting ?? new();
         ComboBox? highlightMode = null, shadowMode = null;
@@ -231,7 +234,7 @@ public partial class MainWindow
             var edited = effect with { Ink = ink, Stops = gradient ? stops : null, Texture = chosen,
                 Mode = (Blend)blend.SelectedItem, Opacity = Read(opacity, 100) / 100,
                 Size = Read(size, effect.Size), A = Read(angle, effect.A), B = Read(distance, effect.B),
-                Spread = Read(spread, effect.Spread), Alignment = (StrokeAlignment)placement.SelectedItem,
+                Spread = Read(spread, effect.Spread), GlowRange = Read(range, effect.GlowRange), PreciseGlow = glowTechnique.SelectedIndex == 1, Alignment = (StrokeAlignment)placement.SelectedItem,
                 UseGlobalLight = Chop.Core.Effect.UsesLight(effect.Kind) && shared.IsChecked == true,
                 Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag };
             if (technique is not null)
