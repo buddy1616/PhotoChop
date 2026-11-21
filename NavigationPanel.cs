@@ -64,7 +64,9 @@ internal sealed class NavigationPanel : FrameworkElement
 public partial class MainWindow
 {
     private readonly NavigationPanel navigation = new() { MinHeight = 96 };
-    private readonly TextBlock navigationZoom = new() { VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBox navigationZoom = new() { Width = 76, Text = "100", VerticalAlignment = VerticalAlignment.Center };
+    private readonly Slider navigationSlider = new() { Minimum = 0, Maximum = Math.Log10(6400), Value = 2, MinWidth = 75 };
+    private bool updatingNavigation;
 
     private FrameworkElement BuildNavigation()
     {
@@ -78,7 +80,17 @@ public partial class MainWindow
         var container = new DockPanel { Margin = new Thickness(6) };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
         buttons.Children.Add(Button("−", () => ZoomBy(.8)));
+        NumericWheel.Enable(navigationZoom, 1, 6400, value =>
+        {
+            if (!updatingNavigation && active is not null) ZoomBy(value / (active.Zoom * 100));
+        });
+        navigationSlider.ValueChanged += (_, _) =>
+        {
+            if (!updatingNavigation && active is not null) ZoomBy(Math.Pow(10, navigationSlider.Value) / (active.Zoom * 100));
+        };
+        buttons.Children.Add(navigationSlider);
         buttons.Children.Add(navigationZoom);
+        buttons.Children.Add(new TextBlock { Text = "%", VerticalAlignment = VerticalAlignment.Center });
         buttons.Children.Add(Button("+", () => ZoomBy(1.25)));
         buttons.Children.Add(Button("Fit", Fit));
         DockPanel.SetDock(buttons, System.Windows.Controls.Dock.Bottom);
@@ -90,7 +102,14 @@ public partial class MainWindow
     private void RefreshNavigation()
     {
         navigation.Image = active?.View.Frame;
-        navigationZoom.Text = active is null ? "—" : $" {active.Zoom:P0} ";
+        updatingNavigation = true;
+        navigationZoom.IsEnabled = navigationSlider.IsEnabled = active is not null;
+        if (active is not null)
+        {
+            if (!navigationZoom.IsKeyboardFocused) navigationZoom.Text = (active.Zoom * 100).ToString("0.##");
+            navigationSlider.Value = Math.Log10(active.Zoom * 100);
+        }
+        updatingNavigation = false;
         if (active?.Engine.Current is { } doc)
             navigation.Viewport = new Rect(-active.Offset.X / (doc.Width * active.Zoom),
                 -active.Offset.Y / (doc.Height * active.Zoom),

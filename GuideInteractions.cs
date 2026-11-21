@@ -95,6 +95,9 @@ public partial class MainWindow
         uint argb = Format.Color(preferences.GuideColor);
         session.View.SetGuideColor(Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
         session.View.Guides = preferences.ShowGuides ? doc.Guides : [];
+        session.View.ShowPixelGrid = preferences.ShowPixelGrid;
+        session.View.SetCheckerSize(preferences.CheckerSize);
+        session.View.InvalidateVisual();
         session.View.InvalidateVisual();
     }
 

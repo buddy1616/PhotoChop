@@ -7,8 +7,30 @@ public sealed partial class SkiaRenderer
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<Blend, Lazy<SKRuntimeEffect>> ExtendedBlenders = new();
 
-    private static SKBlender? CreateBlender(Blend blend)
+    private static SKBlender? CreateBlender(Blend blend, bool profiledStyle = false)
     {
+        if (profiledStyle && blend is Blend.Multiply or Blend.Screen)
+            return LinearStyleBlenders.GetOrAdd(blend, mode => new Lazy<SKRuntimeEffect>(() =>
+            {
+                string operation = mode == Blend.Multiply ? "b * f" : "1.0 - (1.0 - b) * (1.0 - f)";
+                return SKRuntimeEffect.CreateBlender($$"""
+                    float linearize(float x) { return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }
+                    float encode(float x) { return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }
+                    float blend(float base, float front) {
+                        float b = linearize(clamp(base, 0.0, 1.0));
+                        float f = linearize(clamp(front, 0.0, 1.0));
+                        return encode({{operation}});
+                    }
+                    half4 main(half4 src, half4 dst) {
+                        if (src.a == 0.0 || dst.a == 0.0) return src + dst;
+                        float3 f = src.rgb / src.a, b = dst.rgb / dst.a;
+                        float3 color = float3(blend(b.r, f.r), blend(b.g, f.g), blend(b.b, f.b));
+                        float overlap = src.a * dst.a;
+                        return half4(src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a) + color * overlap,
+                            src.a + dst.a - overlap);
+                    }
+                    """, out var error) ?? throw new InvalidOperationException(error);
+            })).Value.ToBlender();
         if (blend == Blend.Add) return addBlend.Value.ToBlender();
         string? formula = blend switch
         {
@@ -41,6 +63,19 @@ public sealed partial class SkiaRenderer
                 """;
             return SKRuntimeEffect.CreateBlender(shader, out var error) ?? throw new InvalidOperationException(error);
         })).Value.ToBlender();
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Blend, Lazy<SKRuntimeEffect>> LinearStyleBlenders = new();
+
+    private static PixelValue BlendLinearStyle(PixelValue backdrop, PixelValue foreground, Blend mode)
+    {
+        double Channel(double b, double f)
+        {
+            double value = BlendComponent(LinearChannel(b), LinearChannel(f), mode);
+            return value <= .0031308 ? 12.92 * value : 1.055 * Math.Pow(value, 1 / 2.4) - .055;
+        }
+        return new(Channel(backdrop.R, foreground.R), Channel(backdrop.G, foreground.G),
+            Channel(backdrop.B, foreground.B), foreground.A);
     }
 
     private static SKBlendMode ToSkiaBlend(Blend blend) => blend switch

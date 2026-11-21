@@ -1,7 +1,7 @@
 namespace Chop.Core;
 
 public enum SelectionMode { Replace, Add, Subtract }
-public sealed record RectangleSelection(Area Area, SelectionMode Mode);
+public sealed record RectangleSelection(Area Area, SelectionMode Mode, bool Ellipse = false);
 public sealed record ColorSelection(string Color, double Fuzziness, bool Invert = false, SelectionMode Mode = SelectionMode.Replace);
 
 /// <summary>A binary selection in document pixel coordinates.</summary>

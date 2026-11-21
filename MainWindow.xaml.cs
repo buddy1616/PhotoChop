@@ -58,6 +58,8 @@ public partial class MainWindow : Window
         public bool CenterHorizontal { get; set; }
         public bool CenterVertical { get; set; }
         public bool ExperimentalGpu { get; set; }
+        public bool ShowPixelGrid { get; set; } = true;
+        public int CheckerSize { get; set; } = 8;
         public bool ShowRulers { get; set; } = true;
         public bool ShowGuides { get; set; } = true;
         public string GuideColor { get; set; } = "#FF48CDE9";
@@ -105,7 +107,9 @@ public partial class MainWindow : Window
         set { if (UsesMaskPalette) preferences.MaskBackground = value; else preferences.ArtworkBackground = value; }
     }
     private double brushSize = 24, hardness = .8, brushOpacity = 1;
-    private LayerKind shapeKind = LayerKind.Rectangle;
+    private enum ShapeToolKind { Rectangle, Ellipse, Line, Triangle, Polygon }
+    private ShapeToolKind shapeKind;
+    private int polygonSides = 5;
     private Point? lastCursor;
     private static readonly string[] ToolNames = ["Selection", "Lasso", "Magic Wand", "Pen", "Path Select", "Text", "Shape", "Eyedropper", "Transform", "Masker", "Move", "Brush", "Eraser", "Bucket", "Chop"];
 
@@ -206,6 +210,14 @@ public partial class MainWindow : Window
                     }
                 }
             }
+            if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Info") &&
+                Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Navigation")?.Parent is LayoutAnchorablePane navigationPane)
+                navigationPane.Children.Add(NewPanel("Info"));
+            if (Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Painting Tools")?.FindParent<LayoutAnchorablePaneGroup>() is { } toolbox)
+            {
+                toolbox.DockMinWidth = 54;
+                if (toolbox.DockWidth.IsAbsolute && toolbox.DockWidth.Value > 86) toolbox.DockWidth = new GridLength(86);
+            }
             if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Channels") &&
                 Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Layers")?.Parent is LayoutAnchorablePane rightPane)
                 rightPane.Children.Insert(rightPane.Children.IndexOf(rightPane.Children.First(panel => panel.ContentId == "Layers")) + 1, NewPanel("Channels"));
@@ -262,6 +274,8 @@ public partial class MainWindow : Window
         foreach (string title in new[] { "Layers", "Channels", "History", "Command Log" }) right.Children.Add(NewPanel(title));
         var upper = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
         upper.Children.Add(NewPanel("Navigation"));
+        upper.Children.Add(NewPanel("Info"));
+        upper.SelectedContentIndex = 0;
         var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
             Children = { upper, right } };
         Dock.Layout = new LayoutRoot { RootPanel = new LayoutPanel { Orientation = Orientation.Horizontal, Children = { CreateToolDocks(), center, sidebar } } };
@@ -271,7 +285,7 @@ public partial class MainWindow : Window
 
     private LayoutAnchorablePaneGroup CreateToolDocks(string[]? titles = null)
     {
-        var group = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(156) };
+        var group = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(86), DockMinWidth = 54 };
         foreach (string title in titles ?? ToolDockTitles)
         {
             var pane = new LayoutAnchorablePane();
@@ -306,7 +320,7 @@ public partial class MainWindow : Window
     private MenuItem? fileMenu;
     private void FileAccessKey(object sender, PreProcessInputEventArgs args)
     {
-        if (fileMenu is not { } menu || args.StagingItem.Input is not KeyEventArgs e ||
+        if (blockRenderInput || fileMenu is not { } menu || args.StagingItem.Input is not KeyEventArgs e ||
             e.RoutedEvent != Keyboard.PreviewKeyDownEvent || e.IsUp) return;
 
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
@@ -380,6 +394,8 @@ public partial class MainWindow : Window
         var stroke = Item(edit, "Stroke…", StrokeSelection);
         var textItem = Item(edit, "Edit text…", EditText);
         var shapeItem = Item(edit, "Edit shape…", EditShape);
+        edit.Items.Add(new Separator());
+        Item(edit, "Preferences…", EditPreferences);
         edit.SubmenuOpened += (_, _) =>
         {
             var selected = ActiveLayer();
@@ -454,32 +470,14 @@ public partial class MainWindow : Window
         foreach (var kind in new[] { EffectKind.GaussianBlur, EffectKind.MotionBlur })
             Item(blur, EffectName(kind), () => AddEffect(kind));
         var view = Menu("View");
-        var acceleration = new MenuItem { Header = "Experimental GPU Compositing", IsCheckable = true,
-            IsChecked = preferences.ExperimentalGpu, ToolTip = "Use Skia OpenGL for eligible canvas previews" };
-        acceleration.Click += (_, _) =>
-        {
-            preferences.ExperimentalGpu = acceleration.IsChecked;
-            Guard(SavePreferences);
-            if (!preferences.ExperimentalGpu)
-            {
-                gpu?.Dispose();
-                gpu = null;
-            }
-            foreach (var session in sessions) session.Rendered = null;
-            GpuStatus.Visibility = preferences.ExperimentalGpu ? Visibility.Visible : Visibility.Collapsed;
-            GpuStatus.Content = "CPU";
-            UpdateCanvas();
-        };
-        view.Items.Add(acceleration);
-        GpuStatus.Visibility = preferences.ExperimentalGpu ? Visibility.Visible : Visibility.Collapsed;
-        GpuStatus.Content = "CPU";
+        UpdateGpuPreference();
         BuildGuideMenus(view);
         Item(view, "Zoom in", () => ZoomBy(1.25), "Ctrl++");
         Item(view, "Zoom out", () => ZoomBy(.8), "Ctrl+-");
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Painting Tools", "Selection Tools", "Vector Tools", "Other Tools", PalettePane, "Navigation", "Layers", "Channels", "History", "Command Log" })
+        foreach (string title in new[] { "Painting Tools", "Selection Tools", "Vector Tools", "Other Tools", PalettePane, "Navigation", "Info", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -884,9 +882,13 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
-        bool firstFrame = active.Frame is null;
-        if (firstFrame) StartWaiting();
-        RenderStatus.Visibility = Visibility.Visible;
+        bool modalRender = gesture is null && preview is null && pencilGesture is null && effectDialog is not { IsVisible: true };
+        blockRenderInput = modalRender;
+        if (modalRender)
+        {
+            StartWaiting();
+            RenderStatus.Visibility = Visibility.Visible;
+        }
         try
         {
             while (active is { } session && session.Engine.Current is { } snapshot)
@@ -958,7 +960,8 @@ public partial class MainWindow : Window
         }
         finally
         {
-            if (firstFrame) StopWaiting();
+            if (modalRender) StopWaiting();
+            blockRenderInput = false;
             rendering = false;
             RenderStatus.Visibility = Visibility.Collapsed;
         }

@@ -21,6 +21,7 @@ internal static class NumericWheel
             commit?.Invoke(value);
         }
 
+        field.GotKeyboardFocus += (_, _) => { if (TryValue(out _)) accepted = field.Text; };
         field.LostKeyboardFocus += (_, _) => Commit();
         field.MouseLeave += (_, _) => wheel = 0;
         field.PreviewMouseWheel += (_, e) =>

@@ -31,6 +31,8 @@ public sealed record CmykColor(double Cyan, double Magenta, double Yellow, doubl
 public sealed record Effect(string Id, EffectKind Kind, bool Enabled = true, double A = 0, double B = 0, Transform? Spatial = null, Blend Mode = Blend.Normal, string Ink = "#FF000000", StrokeAlignment Alignment = StrokeAlignment.Outside,
     double Size = 0, double Spread = 0, double Opacity = 1, GradientStop[]? Stops = null, LayerTexture? Texture = null, BevelLighting? Lighting = null, bool UseGlobalLight = false, StyleContour Contour = StyleContour.Linear, CmykColor? CmykInk = null, bool PhotoshopStyle = false, double GlowRange = 50, bool PreciseGlow = false)
 {
+    [JsonIgnore] public bool ProfiledCmykStyle { get; init; }
+
     public int PhotoshopOrder() => Kind switch
     {
         EffectKind.BevelEmboss => 0,

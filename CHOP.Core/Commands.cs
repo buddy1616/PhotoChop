@@ -11,6 +11,7 @@ public sealed record Command(string Name, string? Target, JsonElement Args)
     public T Read<T>() => Args.Deserialize<T>(Format.Json) ?? throw new InvalidDataException($"Missing arguments for {Name}.");
 }
 
+public sealed record VectorShapeArgs(string Id, string Name, PointD[] Points, string Color, bool Closed, string? Parent = null);
 public sealed record NewArgs(string Id, int Width, int Height, string? Background = null, double PixelsPerInch = 72, bool StarterLayers = false, ColorSettings? Color = null);
 public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? Parent = null,
     Transform? Transform = null, string Text = "Text", string Font = "Liberation Sans", double Size = 48,
@@ -232,6 +233,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         "layer.createPath" => "Create Path",
         "layer.path" => "Edit Path",
         "selection.toPaths" => "Convert Selection to Paths",
+        "layer.createShape" => "Create Vector Shape",
         "layer.create" => $"Create {command.Read<LayerArgs>().Kind.ToString().ToLowerInvariant()} layer",
         "layer.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase pixels" : "Brush stroke",
         "mask.paintStroke" => command.Read<StrokeArgs>().Erase ? "Erase mask" : "Paint mask",
@@ -645,12 +647,23 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return doc with { Selection = selection is { } area ? Clip(area, doc) : null, SelectionMask = null };
             case "selection.rectangle":
                 var rect = command.Read<RectangleSelection>();
-                if (rect.Mode == SelectionMode.Replace)
+                if (rect.Mode == SelectionMode.Replace && !rect.Ellipse)
                     return WithSelection(doc, (Clip(rect.Area, doc), null));
                 return SelectPixels(doc, (x, y) =>
                 {
                     bool hit = Contains(rect.Area, x, y);
-                    return rect.Mode == SelectionMode.Add ? hit || doc.Selected(x, y) : !hit && doc.Selected(x, y);
+                    if (hit && rect.Ellipse)
+                    {
+                        double dx = (x + .5 - rect.Area.X) * 2 / rect.Area.Width - 1;
+                        double dy = (y + .5 - rect.Area.Y) * 2 / rect.Area.Height - 1;
+                        hit = dx * dx + dy * dy <= 1;
+                    }
+                    return rect.Mode switch
+                    {
+                        SelectionMode.Add => hit || doc.Selected(x, y),
+                        SelectionMode.Subtract => !hit && doc.Selected(x, y),
+                        _ => hit
+                    };
                 });
             case "selection.wand":
                 var wand = command.Read<WandArgs>();
@@ -745,6 +758,14 @@ public sealed class CommandEngine(IRasterBackend backend)
                     return cut.VectorMask ? layer with { VectorMask = layer.VectorMask! with { Contours = updated, Operations = null } } :
                         layer with { Contours = updated };
                 });
+            case "layer.createShape":
+                var vectorShape = command.Read<VectorShapeArgs>();
+                var created = Apply(doc, Command.Of("layer.create", new LayerArgs(vectorShape.Id, vectorShape.Name, LayerKind.Path, Parent: vectorShape.Parent)));
+                var shapeContour = new PathContour(vectorShape.Points.Select(point => new PathNode(point)).ToArray(), vectorShape.Closed);
+                var pathShape = Apply(created, Command.Of("layer.path", new[] { shapeContour }, vectorShape.Id));
+                return Apply(pathShape, Command.Of("effect.add", new Effect("shape-style",
+                    vectorShape.Closed ? EffectKind.PathFill : EffectKind.Stroke, A: 1, Ink: vectorShape.Color,
+                    Alignment: StrokeAlignment.Center), vectorShape.Id));
             case "layer.path":
                 var contours = command.Read<PathContour[]>();
                 CheckContours(contours);

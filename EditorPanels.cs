@@ -100,9 +100,10 @@ public partial class MainWindow
         BindLayerDrop(maskButton, "Add mask here", rows => Run("mask.add", 0, rows[0].Layer.Id, rows[0].Layer.Id), copy: false, single: true);
         layerButtons.Children.Add(maskButton);
         layerButtons.Children.Add(deleteButton);
-        DockPanel.SetDock(properties, System.Windows.Controls.Dock.Top);
+        var propertyScroll = new ScrollViewer { Content = properties, Height = 218, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        DockPanel.SetDock(propertyScroll, System.Windows.Controls.Dock.Top);
         DockPanel.SetDock(layerButtons, System.Windows.Controls.Dock.Bottom);
-        layersPanel.Children.Add(properties);
+        layersPanel.Children.Add(propertyScroll);
         layersPanel.Children.Add(layerButtons);
         layers.ItemTemplate = (DataTemplate)FindResource("LayerRowTemplate");
         var itemStyle = new Style(typeof(ListBoxItem));
@@ -135,11 +136,12 @@ public partial class MainWindow
         };
         layers.MouseDoubleClick += (_, e) =>
         {
-            if (RowAt(e.OriginalSource) is null || IsButton(e.OriginalSource)) return;
-            if (ActiveLayer() is { Kind: LayerKind.Fill } fill && ColorPickerDialog.Show(this, "Fill layer color", fill.Color) is { } color)
+            if (RowAt(e.OriginalSource) is not { Layer: var clicked } || IsButton(e.OriginalSource) || active is null) return;
+            active.ActiveId = clicked.Id;
+            if (clicked is { Kind: LayerKind.Fill } fill && ColorPickerDialog.Show(this, "Fill layer color", fill.Color) is { } color)
                 Run("layer.fill", color, fill.Id);
-            else if (ActiveLayer() is { Kind: LayerKind.Text } text) EditText(text);
-            else if (ActiveLayer()?.Kind != LayerKind.Fill) Rename();
+            else if (clicked.Kind == LayerKind.Text) EditText(clicked);
+            else if (clicked.Kind != LayerKind.Fill) Rename();
             e.Handled = true;
         };
         layers.PreviewMouseLeftButtonDown += (_, e) =>
@@ -221,12 +223,14 @@ public partial class MainWindow
         logPanel.Children.Add(commandLog);
         foreach (var section in ToolSections)
         {
-            var tools = new WrapPanel { Margin = new Thickness(4) };
+            var tools = new WrapPanel { Margin = new Thickness(2), MaxWidth = 62, HorizontalAlignment = HorizontalAlignment.Left };
             toolPanes.Add(section.Title, tools);
-            panelContent.Add(section.Title, new ScrollViewer { Content = tools, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+            panelContent.Add(section.Title, new ScrollViewer { Content = tools, MinWidth = 51, MaxWidth = 86, HorizontalAlignment = HorizontalAlignment.Left,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         }
         panelContent.Add(PalettePane, toolColors);
         panelContent.Add("Navigation", BuildNavigation());
+        panelContent.Add("Info", BuildInfo());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("Channels", BuildChannels());
         panelContent.Add("History", history);
