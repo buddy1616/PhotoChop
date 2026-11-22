@@ -7,6 +7,35 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void RichTextStylesAndWarpPersistThroughCommandsAndRender()
+    {
+        var renderer = new SkiaRenderer();
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("type", 220, 100)));
+        var layout = new RichText([new TextParagraph([new("Red", new(Size: 26, Color: "#FFFF0000")),
+            new("Blue", new(Size: 32, Color: "#FF0000FF", Weight: 700, Italic: true))], new(TextAlignmentMode.Center))],
+            new(TextWarpStyle.Flag, .35, HorizontalDistortion: .1), Width: 160);
+        engine.Execute(Command.Of("layer.create", new LayerArgs("text", "Text", LayerKind.Text, Typography: layout)));
+        var doc = engine.Current!;
+        Assert.Equal("RedBlue", doc.Layers[0].Text);
+        var before = renderer.Composite(doc).Rgba;
+        Assert.Contains(Enumerable.Range(0, before.Length / 4), i => before[i * 4] > 200 && before[i * 4 + 3] > 200);
+        Assert.Contains(Enumerable.Range(0, before.Length / 4), i => before[i * 4 + 2] > 200 && before[i * 4 + 3] > 200);
+        var straight = doc.ReplaceLayer("text", doc.Layers[0] with { Typography = layout with { Warp = null } });
+        Assert.False(before.SequenceEqual(renderer.Composite(straight).Rgba));
+
+        string path = Path.Combine(Path.GetTempPath(), $"chop-typography-{Guid.NewGuid():N}.chop");
+        try
+        {
+            ProjectFile.Save(path, doc);
+            var reopened = ProjectFile.Open(path);
+            Assert.Equal(TextWarpStyle.Flag, reopened.Layers[0].Typography!.Warp!.Style);
+            Assert.Equal(before, renderer.Composite(reopened).Rgba);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public async Task BackgroundStrokeMatchesSynchronousStrokeAndCommitsOneHistoryEntry()
     {
         var engine = new CommandEngine(new SkiaRenderer());

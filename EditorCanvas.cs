@@ -155,9 +155,15 @@ internal sealed class EditorCanvas : FrameworkElement
             foreach (var pen in new[] { brushDark, brushLight })
             {
                 dc.DrawEllipse(null, pen, pointer, radius, radius);
-                double arm = Math.Max(5, radius);
-                dc.DrawLine(pen, pointer - new Vector(arm, 0), pointer + new Vector(arm, 0));
-                dc.DrawLine(pen, pointer - new Vector(0, arm), pointer + new Vector(0, arm));
+                const double arm = 7;
+                if (radius < arm - 1)
+                {
+                    foreach (var axis in new[] { new Vector(1, 0), new Vector(0, 1) })
+                    {
+                        dc.DrawLine(pen, pointer - axis * arm, pointer - axis * (radius + 1));
+                        dc.DrawLine(pen, pointer + axis * (radius + 1), pointer + axis * arm);
+                    }
+                }
             }
         }
         foreach (var guide in Guides)

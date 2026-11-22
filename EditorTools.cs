@@ -145,7 +145,10 @@ public partial class MainWindow
             gestureStart = point;
             switch (tool)
             {
-                case "Text": EditTextAt(doc, new PointD(point.X, point.Y)); return;
+                case "Text":
+                    FinishTextEdit();
+                    if (active?.Engine.Current is { } textDoc) EditTextAt(textDoc, new PointD(point.X, point.Y));
+                    return;
                 case "Eyedropper": Sample(point); return;
                 case "Transform": ScaleLayer(); return;
                 case "Magic Wand":
@@ -646,6 +649,7 @@ public partial class MainWindow
         if (active is null) return;
         canvas.Zoom = active.Zoom;
         canvas.Offset = active.Offset;
+        PositionTextEditor();
         UpdateScrollBars(active);
         canvas.InvalidateVisual();
         RefreshNavigation();
@@ -671,6 +675,7 @@ public partial class MainWindow
 
     private void SetTool(string name)
     {
+        if (name != "Text") FinishTextEdit();
         CancelTransform();
         CancelPathEditing();
         CancelGesture();
@@ -825,6 +830,7 @@ public partial class MainWindow
             ToolOptions.Children.Add(opacity.Row);
         }
         if (tool == "Selection") AddMarqueeOptions();
+        if (tool == "Text") AddTypographyTools();
         if (tool == "Shape")
         {
             var list = new ComboBox { ItemsSource = Enum.GetValues<ShapeToolKind>(), SelectedItem = shapeKind };
@@ -1009,7 +1015,7 @@ public partial class MainWindow
             return;
         }
         if (e.Key == Key.Escape && (gesture is not null || guideDrag is not null)) { CancelGesture(); e.Handled = true; return; }
-        if (e.OriginalSource is TextBoxBase or PasswordBox) return;
+        if (editingText?.Editor.IsKeyboardFocusWithin == true || e.OriginalSource is TextBoxBase or PasswordBox) return;
         var modifiers = Keyboard.Modifiers;
         if (canvas.IsKeyboardFocusWithin && pathDrag is null && (tool is "Pen" or "Path Select") &&
             EditablePathLayer() is { Kind: LayerKind.Path } path)
