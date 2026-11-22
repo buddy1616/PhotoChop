@@ -84,6 +84,25 @@ public sealed class CommandEngine(IRasterBackend backend)
         return Current;
     }
 
+    // Compute a paint edit off the UI thread and commit only if the source is still current.
+    public async Task ExecutePaintStrokeAsync(Command command)
+    {
+        if (command.Name != "layer.paintStroke") throw new ArgumentException("Expected a raster stroke.", nameof(command));
+        var snapshot = Current ?? throw new InvalidOperationException("Open a document first.");
+        try
+        {
+            var result = await Task.Run(() => Apply(snapshot, command));
+            if (!ReferenceEquals(snapshot, Current)) throw new InvalidOperationException("The document changed before the stroke could be committed.");
+            CommitEdit(snapshot, result, command);
+        }
+        catch (Exception error)
+        {
+            Executed?.Invoke(new(DateTimeOffset.Now, snapshot.Id, command, false, error.Message));
+            throw;
+        }
+        Executed?.Invoke(new(DateTimeOffset.Now, snapshot.Id, command, true, null));
+    }
+
     private Command CaptureFileInputs(Command command)
     {
         switch (command.Name)
@@ -219,7 +238,11 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return;
         }
 
-        var result = Apply(current, command);
+        CommitEdit(current, Apply(current, command), command);
+    }
+
+    private void CommitEdit(Document current, Document result, Command command)
+    {
         if (ReferenceEquals(result, current)) return;
         history.RemoveRange(cursor + 1, history.Count - cursor - 1);
         history.Add(new(HistoryLabel(command), result, command));

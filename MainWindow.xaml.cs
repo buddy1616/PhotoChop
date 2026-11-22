@@ -234,6 +234,7 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
+        if (committingTonalStroke) { e.Cancel = true; return; }
         foreach (var item in sessions.ToArray())
         {
             if (CanClose(item)) continue;
@@ -327,7 +328,7 @@ public partial class MainWindow : Window
     private MenuItem? fileMenu;
     private void FileAccessKey(object sender, PreProcessInputEventArgs args)
     {
-        if (blockRenderInput || fileMenu is not { } menu || args.StagingItem.Input is not KeyEventArgs e ||
+        if (blockRenderInput || committingTonalStroke || fileMenu is not { } menu || args.StagingItem.Input is not KeyEventArgs e ||
             e.RoutedEvent != Keyboard.PreviewKeyDownEvent || e.IsUp) return;
 
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
@@ -952,6 +953,7 @@ public partial class MainWindow : Window
                 if (!isPreview)
                 {
                     session.KeepPaintFrame = false;
+                    session.View.TonalFrame = null;
                     session.View.PendingPaint.Clear();
                 }
                 session.View.InvalidateVisual();
@@ -962,6 +964,7 @@ public partial class MainWindow : Window
         catch (Exception error)
         {
             canvas.PendingPaint.Clear();
+            canvas.TonalFrame = null;
             canvas.InvalidateVisual();
             Say(error.Message);
         }

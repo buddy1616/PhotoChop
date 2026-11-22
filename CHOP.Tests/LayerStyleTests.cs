@@ -7,6 +7,25 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public async Task BackgroundStrokeMatchesSynchronousStrokeAndCommitsOneHistoryEntry()
+    {
+        var engine = new CommandEngine(new SkiaRenderer());
+        engine.Execute(Command.Of("document.create", new NewArgs("test", 8, 8)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("art", "Art", LayerKind.Raster)));
+        engine.Execute(Command.Of("layer.paintStroke", new StrokeArgs([new(3.5, 3.5)], 4, 1, 1, "#FF808080", false), "art"));
+        var before = engine.Current!;
+        var command = Command.Of("layer.paintStroke",
+            new StrokeArgs([new(3.5, 3.5)], 4, 1, 1, "#FFFFFFFF", false, Tone: TonalStroke.Dodge), "art");
+        var expected = engine.Preview(command);
+        int entries = engine.History.Count;
+        await engine.ExecutePaintStrokeAsync(command);
+        Assert.Equal(entries + 1, engine.History.Count);
+        Assert.Equal(expected.Layers[0].Pixels!.Rgba, engine.Current!.Layers[0].Pixels!.Rgba);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Same(before, engine.Current);
+    }
+
+    [Fact]
     public void BevelContrastDefaultsToFullAndCanBeTunedIndependently()
     {
         var renderer = new SkiaRenderer();
