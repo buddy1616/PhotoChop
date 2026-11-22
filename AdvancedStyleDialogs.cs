@@ -86,11 +86,25 @@ public partial class MainWindow
     {
         bool glow = effect.Kind == EffectKind.Glow, shadow = effect.Kind == EffectKind.InnerShadow, bevel = effect.Kind == EffectKind.BevelEmboss;
         bool gradient = effect.Kind == EffectKind.GradientOverlay, pattern = effect.Kind == EffectKind.PatternOverlay;
-        var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = EffectName(effect.Kind), Width = 390,
+        var workArea = SystemParameters.WorkArea;
+        var dialog = new Window { Owner = effectDialog ?? EditorOwner, Title = EffectName(effect.Kind),
+            Width = Math.Min(workArea.Width, 760 * preferences.UiScale), MaxHeight = workArea.Height * .85,
             SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner };
-        var panel = new StackPanel { Margin = new Thickness(14) };
-        dialog.Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        dialog.MaxHeight = SystemParameters.WorkArea.Height;
+        var shell = new DockPanel { Margin = new Thickness(12) };
+        var footer = new StackPanel();
+        DockPanel.SetDock(footer, System.Windows.Controls.Dock.Bottom);
+        shell.Children.Add(footer);
+        var columns = new Grid();
+        columns.ColumnDefinitions.Add(new ColumnDefinition());
+        columns.ColumnDefinitions.Add(new ColumnDefinition());
+        var primary = new StackPanel { Margin = new Thickness(0, 0, 10, 0) };
+        var details = new StackPanel { Margin = new Thickness(10, 0, 0, 0) };
+        Grid.SetColumn(details, 1);
+        columns.Children.Add(primary);
+        columns.Children.Add(details);
+        shell.Children.Add(new ScrollViewer { Content = columns, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        dialog.Content = shell;
+        var panel = primary;
         var shared = new CheckBox { Content = "Use global light", IsChecked = effect.UseGlobalLight };
         void Field(string label, Control item)
         {
@@ -125,7 +139,7 @@ public partial class MainWindow
         if (glow || bevel) Field("Position", placement);
         string[] techniques = ["Smooth", "Chisel Hard", "Chisel Soft"];
         ComboBox? technique = null;
-        TextBox? soften = null, reliefDepth = null, bevelContrast = null;
+        TextBox? soften = null, reliefDepth = null, highlightContrast = null, shadowContrast = null;
         if (bevel)
         {
             technique = new ComboBox { ItemsSource = techniques, SelectedIndex = (int)(effect.Lighting?.Technique ?? BevelTechnique.Smooth) };
@@ -134,10 +148,6 @@ public partial class MainWindow
             panel.Children.Add(new Label { Content = "Bevel depth (%)", Target = depthControl.Input });
             panel.Children.Add(depthControl.Row);
             reliefDepth = depthControl.Input;
-            var contrastControl = StyleFields.Range((effect.Lighting?.Contrast ?? 0) * 100, -100, 100);
-            panel.Children.Add(new Label { Content = "Bevel contrast (%)", Target = contrastControl.Input });
-            panel.Children.Add(contrastControl.Row);
-            bevelContrast = contrastControl.Input;
             soften = NumberField("Soften (px)", effect.Lighting?.Soften ?? 0, 0, 16);
         }
         var size = glow || shadow || bevel ? NumberField("Size (px)", effect.Size, bevel ? 1 : .1, 100) : null;
@@ -154,6 +164,14 @@ public partial class MainWindow
         if (glow) Field("Technique", glowTechnique);
         Action refreshPreview = () => { };
         var lighting = effect.Lighting ?? new();
+        panel = details;
+        TextBox ContrastField(string name, bool shadowSide)
+        {
+            var field = StyleFields.Range(lighting.ContrastFor(shadowSide) * 100, -100, 100);
+            panel.Children.Add(new Label { Content = name, Target = field.Input });
+            panel.Children.Add(field.Row);
+            return field.Input;
+        }
         ComboBox? highlightMode = null, shadowMode = null;
         TextBox? highlightOpacity = null, shadowOpacity = null;
         string highlight = lighting.Highlight, shade = lighting.Shadow;
@@ -172,11 +190,13 @@ public partial class MainWindow
             highlightMode = ModeField("Highlight blend mode", lighting.HighlightMode);
             panel.Children.Add(LightColor("Highlight color…", highlight, color => highlight = color));
             highlightOpacity = OpacityField("Highlight opacity (%)", lighting.HighlightOpacity * effect.Opacity);
+            highlightContrast = ContrastField("Highlight contrast (%)", false);
             panel.Children.Add(new Separator());
             panel.Children.Add(new TextBlock { Text = "Shadow", FontWeight = FontWeights.SemiBold });
             shadowMode = ModeField("Shadow blend mode", lighting.ShadowMode);
             panel.Children.Add(LightColor("Shadow color…", shade, color => shade = color));
             shadowOpacity = OpacityField("Shadow opacity (%)", lighting.ShadowOpacity * effect.Opacity);
+            shadowContrast = ContrastField("Shadow contrast (%)", true);
         }
         string ink = effect.Ink;
         if (glow || shadow)
@@ -191,6 +211,7 @@ public partial class MainWindow
         ComboBox? textureType = null;
         if (pattern || bevel)
         {
+            if (bevel) panel = primary;
             string[] choices = pattern ? ["Checker", "Grain", "Weave", "Image"] : ["None", "Checker", "Grain", "Weave", "Image"];
             textureType = new ComboBox { ItemsSource = choices,
                 SelectedItem = texture?.Png is not null ? "Image" : texture?.Preset.ToString() ?? (pattern ? "Checker" : "None") };
@@ -222,8 +243,8 @@ public partial class MainWindow
         Effect? result = null;
         var live = new CheckBox { Content = "Live preview", IsChecked = true, Margin = new Thickness(0, 8, 0, 0) };
         var errorText = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = Brushes.OrangeRed };
-        panel.Children.Add(live);
-        panel.Children.Add(errorText);
+        footer.Children.Add(live);
+        footer.Children.Add(errorText);
         Effect ReadEffect()
         {
             double Read(TextBox? box, double fallback) => box is null ? fallback : Number(box.Text);
@@ -243,7 +264,7 @@ public partial class MainWindow
                 Contour = (StyleContour)((ComboBoxItem)contour.SelectedItem).Tag };
             if (technique is not null)
                 edited = edited with { Lighting = lighting with
-                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0), Depth = Read(reliefDepth, 100) / 100, Contrast = Read(bevelContrast, 0) / 100,
+                    { Technique = (BevelTechnique)technique.SelectedIndex, Soften = Read(soften, 0), Depth = Read(reliefDepth, 100) / 100, Contrast = null, HighlightContrast = Read(highlightContrast, 100) / 100, ShadowContrast = Read(shadowContrast, 100) / 100,
                         Highlight = highlight, Shadow = shade, HighlightMode = (Blend)highlightMode!.SelectedItem,
                         ShadowMode = (Blend)shadowMode!.SelectedItem, HighlightOpacity = Read(highlightOpacity, 100) / 100,
                         ShadowOpacity = Read(shadowOpacity, 100) / 100 } };
@@ -266,12 +287,9 @@ public partial class MainWindow
             { errorText.Text = error.Message; }
             UpdateCanvas();
         };
-        foreach (var control in panel.Children.OfType<TextBox>()) control.TextChanged += (_, _) => refreshPreview();
-        foreach (var control in panel.Children.OfType<ComboBox>()) control.SelectionChanged += (_, _) => refreshPreview();
-        foreach (var field in new[] { opacity, highlightOpacity, shadowOpacity, reliefDepth, bevelContrast })
-            if (field is not null) field.TextChanged += (_, _) => refreshPreview();
+        columns.AddHandler(TextBox.TextChangedEvent, new TextChangedEventHandler((_, _) => refreshPreview()));
+        columns.AddHandler(ComboBox.SelectionChangedEvent, new SelectionChangedEventHandler((_, _) => refreshPreview()));
         shared.Click += (_, _) => refreshPreview();
-        if (angle is not null) angle.TextChanged += (_, _) => refreshPreview();
         live.Click += (_, _) => refreshPreview();
         dialog.Loaded += (_, _) => refreshPreview();
         dialog.Closed += (_, _) => { preview = null; UpdateCanvas(); };
@@ -291,7 +309,7 @@ public partial class MainWindow
         apply.IsDefault = true;
         actions.Children.Add(apply);
         actions.Children.Add(new Button { Content = "Cancel", IsCancel = true, Margin = new Thickness(3) });
-        panel.Children.Add(actions);
+        footer.Children.Add(actions);
         return dialog.ShowDialog() == true ? result : null;
     }
 }

@@ -136,6 +136,16 @@ public sealed partial class SkiaRenderer : IRasterBackend
             canvas.Flush();
             var original = Unpremultiply(surface, precision);
             var evaluated = Evaluate(original, layer.Effects, region.X, region.Y);
+            bool toneOnly = mode == Blend.Normal &&
+                layer.Effects.Where(ProcessesPixels).All(effect => effect.Kind is EffectKind.Burn or EffectKind.Dodge);
+            if (toneOnly && layer.Opacity == 1 && layer.FillOpacity == 1 &&
+                (!layer.MaskEnabled || layer.Mask is null) && !ActiveVectorMask(layer.VectorMask))
+            {
+                using var adjusted = RasterBitmap(evaluated.Pixels, precision);
+                using var replace = new SKPaint { BlendMode = SKBlendMode.Src };
+                canvas.DrawBitmap(adjusted, region.X, region.Y, replace);
+                continue;
+            }
             var maskMatrix = SKMatrix.Concat(parent, SpatialMatrix(layer));
             if (!maskMatrix.TryInvert(out var inverse)) continue;
             using var vectorCoverage = VectorCoverage(layer.VectorMask, region, maskMatrix);
@@ -155,6 +165,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 }
                 if (mix == 0) continue;
                 int dst = (y * region.Width + x) * 4;
+                if (toneOnly && working is null)
+                {
+                    var adjustedBytes = evaluated.Pixels.Rgba;
+                    for (int c = 0; c < 3; c++)
+                        bytes[dst + c] = (byte)Math.Round(bytes[dst + c] + (adjustedBytes[dst + c] - bytes[dst + c]) * mix);
+                    continue;
+                }
                 int sx = wx - evaluated.X, sy = wy - evaluated.Y;
                 bool inside = sx >= 0 && sy >= 0 && sx < evaluated.Pixels.Width && sy < evaluated.Pixels.Height;
                 int src = inside ? (sy * evaluated.Pixels.Width + sx) * 4 : 0;
@@ -661,6 +678,20 @@ public sealed partial class SkiaRenderer : IRasterBackend
             return frame with { Pixels = crushed.Finish() };
         }
 
+        if (effect.Kind is EffectKind.Burn or EffectKind.Dodge && source.Native is null)
+        {
+            if (effect.A == 0) return frame;
+            var lut = ToneLookup(effect.A, effect.Kind == EffectKind.Dodge);
+            byte[] rgba = new byte[source.Rgba.Length];
+            for (int i = 0; i < rgba.Length; i += 4)
+            {
+                rgba[i] = lut[source.Rgba[i]];
+                rgba[i + 1] = lut[source.Rgba[i + 1]];
+                rgba[i + 2] = lut[source.Rgba[i + 2]];
+                rgba[i + 3] = source.Rgba[i + 3];
+            }
+            return frame with { Pixels = new(source.Width, source.Height, rgba) };
+        }
         var buffer = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
         var ink = effect.Kind == EffectKind.ColorOverlay ? PixelValue.FromArgb(Format.Color(effect.Ink)) : default;
         double amount = ink.A * effect.Opacity;
@@ -1391,6 +1422,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
         world = SKMatrix.Concat(world, SKMatrix.CreateTranslation(raster?.X ?? layer.RasterX, raster?.Y ?? layer.RasterY));
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
         double radius = stroke.Size / 2;
+        double radiusSquared = radius * radius;
+        double feather = Math.Max(.5, radius * (1 - stroke.Hardness));
+        double solidRadius = Math.Max(0, radius - feather);
+        double solidSquared = solidRadius * solidRadius;
+        bool affine = world.Persp0 == 0 && world.Persp1 == 0 && world.Persp2 == 1;
         uint color = Format.Color(stroke.Color);
         double opacity = stroke.Opacity * (stroke.Erase || stroke.Tone != TonalStroke.None ? 1 : (color >> 24) / 255.0);
         var selection = doc.Selection ?? new Area(0, 0, doc.Width, doc.Height);
@@ -1418,13 +1454,18 @@ public sealed partial class SkiaRenderer : IRasterBackend
             for (int y = top; y < bottom; y++)
             for (int x = left; x < right; x++)
             {
-                var p = world.MapPoint(x + .5f, y + .5f);
+                float cx = x + .5f, cy = y + .5f;
+                var p = affine
+                    ? new SKPoint(world.ScaleX * cx + world.SkewX * cy + world.TransX,
+                        world.SkewY * cx + world.ScaleY * cy + world.TransY)
+                    : world.MapPoint(cx, cy);
                 if (p.X < selection.X || p.X >= selection.X + selection.Width ||
                     p.Y < selection.Y || p.Y >= selection.Y + selection.Height || (doc.SelectionMask is not null &&
                     !doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y)))) continue;
                 double dx = p.X - point.X, dy = p.Y - point.Y;
-                double distance = Math.Sqrt(dx * dx + dy * dy);
-                double amount = stroke.Pencil ? (distance <= radius ? 1 : 0) : Math.Clamp((radius - distance) / Math.Max(.5, radius * (1 - stroke.Hardness)), 0, 1);
+                double squared = dx * dx + dy * dy;
+                if (squared > radiusSquared) continue;
+                double amount = stroke.Pencil || squared <= solidSquared ? 1 : (radius - Math.Sqrt(squared)) / feather;
                 int i = (y - firstY) * stride + x - firstX;
                 coverage[i] = Math.Max(coverage[i], eightBit ? Byte(amount) : (float)amount);
             }
@@ -1446,12 +1487,25 @@ public sealed partial class SkiaRenderer : IRasterBackend
             previous = point;
         }
         if (remaining < spacing) Stamp(previous);
+        var painted = buffer.Finish();
+        var tonalRows = painted.Native is null && stroke.Tone != TonalStroke.None ? new byte[256][] : null;
         for (int y = firstY; y < lastY; y++)
         for (int x = firstX; x < lastX; x++)
         {
             double alpha = opacity * coverage[(y - firstY) * stride + x - firstX] / (eightBit ? 255 : 1);
             if (alpha == 0) continue;
             int i = y * width + x;
+            if (tonalRows is not null)
+            {
+                int pixel = i * 4;
+                if (painted.Rgba[pixel + 3] == 0) continue;
+                int coverageByte = (int)coverage[(y - firstY) * stride + x - firstX];
+                var row = tonalRows[coverageByte] ??= ToneLookup(alpha, stroke.Tone == TonalStroke.Dodge);
+                painted.Rgba[pixel] = row[painted.Rgba[pixel]];
+                painted.Rgba[pixel + 1] = row[painted.Rgba[pixel + 1]];
+                painted.Rgba[pixel + 2] = row[painted.Rgba[pixel + 2]];
+                continue;
+            }
             var backdrop = buffer.Get(i);
             var foreground = PixelValue.FromArgb(color) with { A = alpha };
             if (stroke.Erase) buffer.CopyWithAlpha(buffer.Finish(), i, i, backdrop.A * (1 - alpha));
@@ -1464,6 +1518,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
             else buffer.Set(i, foreground.Over(backdrop));
         }
         return buffer.Finish();
+    }
+
+    private static byte[] ToneLookup(double amount, bool dodge)
+    {
+        var table = new byte[256];
+        for (int i = 0; i < table.Length; i++) table[i] = Byte(ToneChannel(i / 255d, amount, dodge));
+        return table;
     }
 
     private static double ToneChannel(double channel, double amount, bool dodge)

@@ -56,7 +56,7 @@
     </Window.Resources>
     <DockPanel>
         <Menu x:Name="Menus" DockPanel.Dock="Top" />
-        <StatusBar DockPanel.Dock="Bottom" Background="#242730">
+        <StatusBar x:Name="WorkspaceStatus" DockPanel.Dock="Bottom" Background="#242730">
             <StatusBarItem x:Name="RenderStatus" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal">
                     <ProgressBar IsIndeterminate="True" Width="40" Height="4" Margin="0,0,6,0" />
@@ -66,7 +66,7 @@
             <StatusBarItem x:Name="GpuStatus" Visibility="Collapsed" />
             <TextBlock x:Name="Status" Foreground="#D4D9E4" Margin="6,2" />
         </StatusBar>
-        <Border DockPanel.Dock="Top" Background="#242730" Padding="8,4" Height="40">
+        <Border DockPanel.Dock="Top" Background="#242730" Padding="8,4" MinHeight="40">
             <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
                 <StackPanel x:Name="ToolOptions" Orientation="Horizontal" VerticalAlignment="Center" />
             </ScrollViewer>

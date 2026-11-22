@@ -7,6 +7,26 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void BevelContrastDefaultsToFullAndCanBeTunedIndependently()
+    {
+        var renderer = new SkiaRenderer();
+        var lighting = new BevelLighting(Technique: BevelTechnique.ChiselHard);
+        Assert.Equal(1, lighting.ContrastFor(false));
+        Assert.Equal(1, lighting.ContrastFor(true));
+        Assert.Equal(0, (lighting with { Contrast = 0 }).ContrastFor(true));
+        var layer = new Layer("art", "Art", LayerKind.Rectangle) { Width = 32, Height = 24, Color = "#FF808080" };
+        byte[] Render(BevelLighting light) => renderer.Composite(new Document("test", 32, 24)
+        {
+            Layers = [layer with { Effects = [new("bevel", EffectKind.BevelEmboss, Size: 8,
+                Alignment: StrokeAlignment.Inside, Lighting: light)] }]
+        }).Rgba;
+        var low = Render(lighting with { HighlightContrast = 0, ShadowContrast = 0 });
+        var dark = Render(lighting with { HighlightContrast = 0, ShadowContrast = 1 });
+        Assert.True(dark[(12 * 32 + 4) * 4] < low[(12 * 32 + 4) * 4]);
+        Assert.Equal(low[(12 * 32 + 27) * 4], dark[(12 * 32 + 27) * 4]);
+    }
+
+    [Fact]
     public void BurnAndDodgeStrokesPreserveAlphaAndBurnCanUseAnEffectMask()
     {
         var renderer = new SkiaRenderer();
@@ -85,7 +105,7 @@ public sealed class LayerStyleTests
     {
         var renderer = new SkiaRenderer();
         var bevel = new Effect("bevel", EffectKind.BevelEmboss, Size: 26, Alignment: StrokeAlignment.Inside,
-            Lighting: new(Depth: 10, Technique: BevelTechnique.ChiselHard));
+            Lighting: new(Depth: 10, Technique: BevelTechnique.ChiselHard, Contrast: 0));
         var disk = new Layer("art", "Art", LayerKind.Ellipse)
             { Width = 120, Height = 120, Color = "#FF808080", Effects = [bevel] };
         var rendered = renderer.Composite(new Document("test", 120, 120) { Layers = [disk] });
