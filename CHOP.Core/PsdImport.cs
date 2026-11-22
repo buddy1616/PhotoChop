@@ -181,7 +181,7 @@ public static class PsdImport
             string? fillColor = !group && (pixels is null || source.PixelDataIrrelevant)
                 ? PsdSolidFill.Read(source) : null;
             if (fillColor is not null) pixels = null;
-            var text = group ? null : PsdText.Read(source);
+            var text = group ? null : PsdText.Read(source, colorTransform);
             WarnAboutTags(source, pixels is not null, fillColor is not null, text is not null);
             bool partial = false;
             var effects = Array.Empty<Effect>();
@@ -206,7 +206,7 @@ public static class PsdImport
             {
                 Color = fillColor ?? (text is null ? "#FFFFFFFF" : TextInk(pixels)),
                 Text = text?.Text ?? "Text", Font = text?.Font ?? "Liberation Sans",
-                Size = text?.Size ?? 48, TextBend = text?.Bend ?? 0,
+                Size = text?.Size ?? 48, TextBend = text?.Bend ?? 0, Typography = text?.Typography,
                 Width = pixels?.Width ?? file.Width, Height = pixels?.Height ?? file.Height,
                 RasterX = pixels is not null || text is not null ? source.X : 0, RasterY = pixels is not null || text is not null ? source.Y : 0,
                 Pixels = pixels, Children = children, Effects = effects,

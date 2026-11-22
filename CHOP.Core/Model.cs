@@ -98,6 +98,7 @@ public sealed record Layer(string Id, string Name, LayerKind Kind)
     public PathContour[] Contours { get; init; } = [];
     public string Text { get; init; } = "Text";
     public string Font { get; init; } = "Liberation Sans";
+    public RichText? Typography { get; init; }
     public double TextBend { get; init; }
     public double Size { get; init; } = 48;
     public string Color { get; init; } = "#FFFFFFFF";

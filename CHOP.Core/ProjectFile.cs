@@ -226,6 +226,7 @@ public static class ProjectFile
                 layer = layer with { Transform = layer.Transform with { Warp = matrix == Projective.Identity ? null : matrix }, SpatialEdits = null };
             }
             Format.Color(layer.Color);
+            RichText.Check(layer.Typography);
             if (!double.IsFinite(layer.TextBend) || layer.TextBend is < -1 or > 1)
                 throw new InvalidDataException("Invalid text bend.");
             if (layer.Kind is LayerKind.Raster or LayerKind.Rectangle or LayerKind.Ellipse or LayerKind.Fill) Format.Dimensions(layer.Width, layer.Height);

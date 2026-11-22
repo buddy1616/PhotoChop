@@ -545,6 +545,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         using var paint = new SKPaint { Color = new SKColor(Format.Color(layer.Color)), IsAntialias = true };
         if (layer.Kind == LayerKind.Text)
         {
+            if (layer.Typography is { } rich) return RasterizeRichText(layer, rich);
             using var typeface = CreateTypeface(layer.Font);
             using var font = new SKFont(typeface, (float)layer.Size);
             string[] lines = layer.Text.Replace("\r", "").Split('\n');

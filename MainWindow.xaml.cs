@@ -220,6 +220,10 @@ public partial class MainWindow : Window
             if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Info") &&
                 Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Navigation")?.Parent is LayoutAnchorablePane navigationPane)
                 navigationPane.Children.Add(NewPanel("Info"));
+            if (Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Navigation")?.Parent is LayoutAnchorablePane typographyPane)
+                foreach (string title in new[] { "Character", "Paragraph" })
+                    if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == title))
+                        typographyPane.Children.Add(NewPanel(title));
             if (Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Tools")?.FindParent<LayoutAnchorablePaneGroup>() is { } toolbox)
             {
                 toolbox.DockMinWidth = 54;
@@ -235,6 +239,7 @@ public partial class MainWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         if (committingTonalStroke) { e.Cancel = true; return; }
+        FinishTextEdit();
         foreach (var item in sessions.ToArray())
         {
             if (CanClose(item)) continue;
@@ -283,6 +288,8 @@ public partial class MainWindow : Window
         var upper = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
         upper.Children.Add(NewPanel("Navigation"));
         upper.Children.Add(NewPanel("Info"));
+        upper.Children.Add(NewPanel("Character"));
+        upper.Children.Add(NewPanel("Paragraph"));
         upper.SelectedContentIndex = 0;
         var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
             Children = { upper, right } };
@@ -345,11 +352,11 @@ public partial class MainWindow : Window
         if (!menu.IsSubmenuOpen || Keyboard.Modifiers is not (ModifierKeys.None or ModifierKeys.Alt)) return;
         Action? action = key switch
         {
-            Key.A => () => Save(active, true),
+            Key.A when active is not null => () => Save(active, true),
             Key.N => NewDocument,
             Key.O => OpenDocument,
-            Key.S => () => Save(active),
-            Key.C => () => CloseSession(active),
+            Key.S when active is not null => () => Save(active),
+            Key.C when active is not null => () => CloseSession(active),
             _ => null
         };
         if (action is null) return;
@@ -368,8 +375,8 @@ public partial class MainWindow : Window
         recentMenu = new MenuItem { Header = "Recent files" };
         file.Items.Add(recentMenu);
         UpdateRecent();
-        Item(file, "_Save", () => Save(active), "Ctrl+S");
-        Item(file, "Save _As…", () => Save(active, true), "Ctrl+Shift+S");
+        var save = Item(file, "_Save", () => { FinishTextEdit(); Save(active); }, "Ctrl+S");
+        var saveAs = Item(file, "Save _As…", () => { FinishTextEdit(); Save(active, true); }, "Ctrl+Shift+S");
         var import = new MenuItem { Header = "_Import" };
         file.Items.Add(import);
         Item(import, "Image…", ImportImage);
@@ -381,7 +388,9 @@ public partial class MainWindow : Window
         Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", ImageExportFormat.Jpeg));
         Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", ImageExportFormat.WebP));
         Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", ImageExportFormat.Svg));
-        Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
+        var close = Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
+        save.IsEnabled = saveAs.IsEnabled = close.IsEnabled = false;
+        file.SubmenuOpened += (_, _) => save.IsEnabled = saveAs.IsEnabled = close.IsEnabled = active?.Engine.Current is not null;
 
         var edit = Menu("Edit");
         Item(edit, "Document Settings…", EditDocumentSettings);
@@ -449,6 +458,12 @@ public partial class MainWindow : Window
         Item(newLayer, "Raster Layer", () => CreateLayer(LayerKind.Raster));
         Item(newLayer, "Fill Layer…", () => CreateLayer(LayerKind.Fill));
         Item(newLayer, "Effect Layer", () => CreateLayer(LayerKind.Effect));
+        Item(newLayer, "Text Layer", () =>
+        {
+            if (active?.Engine.Current is not { } doc) return;
+            var point = canvas.FromView(new Point(canvas.ActualWidth / 2, canvas.ActualHeight / 2));
+            CreateLayer(LayerKind.Text, new PointD(Math.Clamp(point.X, 0, doc.Width - 1), Math.Clamp(point.Y, 0, doc.Height - 1)));
+        });
         Item(newLayer, "Chop Layer…", CreateChopLayer);
         Item(newLayer, "Path", () => CreateNewPath());
         Item(layer, "Duplicate selected layer", Duplicate);
@@ -485,7 +500,7 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", PalettePane, "Navigation", "Info", "Layers", "Channels", "History", "Command Log" })
+        foreach (string title in new[] { "Tools", PalettePane, "Navigation", "Info", "Character", "Paragraph", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));
@@ -668,6 +683,7 @@ public partial class MainWindow : Window
     private void Activate(Session? session)
     {
         if (ReferenceEquals(active, session)) return;
+        FinishTextEdit();
         CancelTransform();
         CancelPathEditing();
         CancelGesture();
@@ -710,6 +726,7 @@ public partial class MainWindow : Window
     private bool Save(Session? session, bool saveAs = false)
     {
         if (session is null) return false;
+        if (ReferenceEquals(session, editingText?.Session)) FinishTextEdit();
         string? path = saveAs ? null : session.Engine.Path;
         if (path is null)
         {
@@ -764,13 +781,18 @@ public partial class MainWindow : Window
 
     private bool CanClose(Session session)
     {
+        if (ReferenceEquals(session, editingText?.Session)) FinishTextEdit();
         if (!session.Engine.Dirty) return true;
         var result = MessageBox.Show(this, $"Save changes to {session.Title.TrimEnd(' ', '*')}?", "CHOP",
             MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
         return result == MessageBoxResult.No || (result == MessageBoxResult.Yes && Save(session));
     }
 
-    private void CloseSession(Session? session) => session?.Tab?.Close();
+    private void CloseSession(Session? session)
+    {
+        if (ReferenceEquals(session, editingText?.Session)) FinishTextEdit();
+        session?.Tab?.Close();
+    }
 
     private void RemoveSession(Session session)
     {

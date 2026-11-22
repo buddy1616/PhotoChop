@@ -227,6 +227,8 @@ public partial class MainWindow
         panelContent.Add(PalettePane, toolColors);
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Info", BuildInfo());
+        panelContent.Add("Character", BuildCharacterTypography());
+        panelContent.Add("Paragraph", BuildParagraphTypography());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("Channels", BuildChannels());
         panelContent.Add("History", history);
@@ -359,13 +361,7 @@ public partial class MainWindow
         string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), LayerKind.Group => NextLayerName("Group"), LayerKind.Effect => NextLayerName("Effect"), _ => kind.ToString() };
         var args = new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
             Width: width, Height: height, Text: text, Font: font, Size: size, Color: color);
-        if (kind == LayerKind.Text)
-        {
-            var edited = TextLayerDialog.Show(EditorOwner, "Create text layer", new TextArgs(text, font, size, color),
-                input => PreviewText(input, value => Command.Of("layer.create", ApplyText(args, value))));
-            if (edited is null) return;
-            args = ApplyText(args, edited);
-        }
+        if (kind == LayerKind.Text) { BeginTextEdit(args, null); return; }
         Run("layer.create", args, selectId: id);
     }
 
@@ -611,31 +607,7 @@ public partial class MainWindow
         if (ActiveLayer() is { Kind: LayerKind.Text } layer) EditText(layer);
     }
 
-    private void EditText(Layer layer)
-    {
-        if (active?.Engine.Current is not { } doc || !Editable(doc, layer.Id))
-        {
-            Say("Unlock the text layer to edit it.");
-            return;
-        }
-        if (TextLayerDialog.Show(EditorOwner, "Edit text layer", new TextArgs(layer.Text, layer.Font, layer.Size, layer.Color, layer.TextBend),
-            input => PreviewText(input, value => Command.Of("layer.text", value, layer.Id))) is { } values)
-            Run("layer.text", values, layer.Id, layer.Id);
-    }
-
-    private static LayerArgs ApplyText(LayerArgs layer, TextArgs text) =>
-        layer with { Text = text.Text, Font = text.Font, Size = text.Size, Color = text.Color, TextBend = text.Bend };
-
-    private void PreviewText(TextArgs? text, Func<TextArgs, Command> command)
-    {
-        preview = null;
-        try
-        {
-            if (text is not null) preview = active?.Engine.Preview(command(text));
-        }
-        catch (InvalidDataException) { }
-        UpdateCanvas();
-    }
+    private void EditText(Layer layer) => BeginTextEdit(null, layer);
 
     private void EditTextAt(Document doc, PointD point)
     {
