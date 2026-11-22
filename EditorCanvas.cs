@@ -31,6 +31,7 @@ internal sealed class EditorCanvas : FrameworkElement
     private static readonly Pen selectionLight = Frozen(new Pen(Brushes.White, 3));
     private static readonly Pen selectionDark = Frozen(new Pen(Brushes.Black, 2) { DashStyle = DashStyles.Dash });
     public BitmapSource? Frame { get; set; }
+    public BitmapSource? TonalFrame { get; set; }
     public double Zoom { get; set; } = 1;
     public Point Offset { get; set; }
     private PixelSelection? outlineSource;
@@ -90,7 +91,7 @@ internal sealed class EditorCanvas : FrameworkElement
         var imageArea = new Rect(Offset.X, Offset.Y, ImageWidth * Zoom, ImageHeight * Zoom);
         dc.DrawRectangle(checker, border, imageArea);
         dc.PushClip(new RectangleGeometry(imageArea));
-        if (Frame is { } frame) dc.DrawImage(frame, imageArea);
+        if ((TonalFrame ?? Frame) is { } frame) dc.DrawImage(frame, imageArea);
         if (ShowPixelGrid && Zoom >= 8)
         {
             var visible = Rect.Intersect(imageArea, new Rect(RenderSize));
