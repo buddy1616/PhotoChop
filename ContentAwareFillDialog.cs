@@ -78,6 +78,13 @@ public partial class MainWindow
         tools.Children.Add(size);
         tools.Children.Add(Button("Sample all", () => surface.Reset(true)));
         tools.Children.Add(Button("Clear sampling", () => surface.Reset(false)));
+        tools.Children.Add(Button("Invert sampling", surface.Invert, "Ctrl+I"));
+        dialog.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.I || Keyboard.Modifiers != ModifierKeys.Control || !surface.IsEnabled) return;
+            e.Handled = true;
+            surface.Invert();
+        };
 
         var footer = new DockPanel { Margin = new Thickness(0, 7, 0, 0), LastChildFill = true };
         DockPanel.SetDock(footer, System.Windows.Controls.Dock.Bottom);
@@ -197,6 +204,16 @@ public partial class MainWindow
             sampleAll = all;
             strokes.Clear();
             Array.Fill(mask, all ? (byte)1 : (byte)0);
+            PaintOverlay(new Area(0, 0, tint.PixelWidth, tint.PixelHeight));
+        }
+
+        public void Invert()
+        {
+            if (IsMouseCaptured) ReleaseMouseCapture();
+            sampleAll = !sampleAll;
+            // Complement every brush assignment so the inverted mask replays at full resolution.
+            for (int i = 0; i < strokes.Count; i++) strokes[i] = strokes[i] with { Include = !strokes[i].Include };
+            for (int i = 0; i < mask.Length; i++) mask[i] = (byte)(1 - mask[i]);
             PaintOverlay(new Area(0, 0, tint.PixelWidth, tint.PixelHeight));
         }
 

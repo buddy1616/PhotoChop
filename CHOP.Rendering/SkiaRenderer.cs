@@ -533,6 +533,28 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return [];
     }
 
+    public PointD[][] TextEditOutline(Document document, Layer layer)
+    {
+        if (WorldMatrix(document.Layers, layer.Id, SKMatrix.Identity) is not { } matrix) return [];
+        var rich = layer.Typography;
+        PointD[][] outline;
+        if (rich?.Shape is { } shape) outline = shape;
+        else
+        {
+            var pixels = rich is { Width: > 0, Height: > 0 } ? null : layer.Pixels ?? TextRaster(layer);
+            outline = TextRectangle(rich is { Width: > 0 } ? rich.Width : pixels!.Width,
+                rich is { Height: > 0 } ? rich.Height : pixels!.Height);
+        }
+        return outline.Select(ring => ring.Select(point =>
+        {
+            var mapped = matrix.MapPoint((float)(point.X + layer.RasterX), (float)(point.Y + layer.RasterY));
+            return new PointD(mapped.X, mapped.Y);
+        }).ToArray()).Where(ring => ring.All(point => double.IsFinite(point.X) && double.IsFinite(point.Y))).ToArray();
+    }
+
+    public static PointD[][] TextRectangle(double width, double height) =>
+        [[new(0, 0), new(width, 0), new(width, height), new(0, height)]];
+
     public static Area? BoundedTextBounds(Document doc, Layer layer)
     {
         if (layer.Kind != LayerKind.Text || layer.Typography is not { Width: > 0, Height: > 0 } text ||
