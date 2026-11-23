@@ -12,6 +12,7 @@
   <PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
   <ItemGroup>
     <Compile Remove="CHOP.*/**/*.cs" />
+    <None Update="license.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Resource Include="$(ApplicationIcon)" />
     <Resource Include="Cursors/*.cur;Cursors/*.png" />
     <ProjectReference Include="CHOP.Rendering/CHOP.Rendering.csproj" />
