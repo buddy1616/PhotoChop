@@ -148,6 +148,23 @@ public sealed class PixelBuffer
             }
             return;
         }
+        if (source.Native is null && pixels.Native is { Settings.Mode: ChannelColorMode.Rgb, Settings.Depth: ChannelDepth.Bit16 } rgb16)
+        {
+            var rgba = source.Rgba.AsSpan(from * 4, count * 4);
+            rgba.CopyTo(pixels.Rgba.AsSpan(to * 4));
+            int offset = to * 2, length = count * 2;
+            for (int channel = 0; channel < 4; channel++)
+            {
+                var plane = rgb16.Planes[channel].AsSpan(offset, length);
+                for (int sample = 0; sample < count; sample++)
+                {
+                    // Expanding an 8-bit sample to 16 bits repeats its byte in both positions.
+                    byte value = rgba[sample * 4 + channel];
+                    plane[sample * 2] = plane[sample * 2 + 1] = value;
+                }
+            }
+            return;
+        }
         if (source.Native is { } sourcePlanes && pixels.Native is { } targetPlanes &&
             sourcePlanes.Settings.Mode == targetPlanes.Settings.Mode)
         {

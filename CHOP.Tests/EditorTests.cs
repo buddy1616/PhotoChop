@@ -25,6 +25,16 @@ public sealed class EditorTests : IDisposable
     private byte[] Composite(CommandEngine engine) => renderer.Composite(engine.Current!).Rgba;
 
     [Fact]
+    public void BannerDimensionsAreAcceptedAndCanvasLimitsStillApply()
+    {
+        var engine = NewEngine(17008, 8504);
+        Assert.Equal(17008, engine.Current!.Width);
+        Assert.Equal(8504, engine.Current.Height);
+        Assert.Throws<InvalidDataException>(() => Format.Dimensions(Format.MaxDimension + 1, 1));
+        Assert.Throws<InvalidDataException>(() => Format.Dimensions(Format.MaxDimension, Format.MaxDimension));
+    }
+
+    [Fact]
     public void BreakPathRemovesAnchorWithoutJoiningItsNeighbors()
     {
         var engine = NewEngine();

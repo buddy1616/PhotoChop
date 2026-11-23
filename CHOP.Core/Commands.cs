@@ -89,11 +89,27 @@ public sealed class CommandEngine(IRasterBackend backend)
     {
         if (command.Name is not ("layer.paintStroke" or "mask.paintStroke"))
             throw new ArgumentException("Expected a raster or mask stroke.", nameof(command));
+        await ExecuteEditAsync(command);
+    }
+
+    public Task ExecuteImageImportAsync(ImageImportArgs args) => ExecuteEditAsync(Command.Of("layer.importImage", args));
+
+    public Task ExecuteContentAwareFillAsync(ContentAwareFillArgs args, string target) =>
+        ExecuteEditAsync(Command.Of("layer.contentAwareFill", args, target));
+
+    private async Task ExecuteEditAsync(Command command)
+    {
         var snapshot = Current ?? throw new InvalidOperationException("Open a document first.");
         try
         {
-            var result = await Task.Run(() => Apply(snapshot, command));
-            if (!ReferenceEquals(snapshot, Current)) throw new InvalidOperationException("The document changed before the stroke could be committed.");
+            var edit = await Task.Run(() =>
+            {
+                var captured = CaptureFileInputs(command);
+                return (Command: captured, Result: Apply(snapshot, captured));
+            });
+            command = edit.Command;
+            if (!ReferenceEquals(snapshot, Current)) throw new InvalidOperationException("The document changed before the edit could be committed.");
+            var result = edit.Result;
             CommitEdit(snapshot, result, command);
         }
         catch (Exception error)
@@ -123,6 +139,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (snapshot.Png is null && snapshot.Native is null)
                     return Command.Of(command.Name, CaptureChopSnapshot(snapshot.SourcePath), command.Target);
                 break;
+            case "document.importImage":
             case "layer.importImage":
                 var image = command.Read<ImageImportArgs>();
                 if (image is { Path: { } path, Data: null })
@@ -272,6 +289,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         "document.globalLight" => "Set Global Light",
         "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
         "layer.scale" => "Scale",
+        "layer.contentAwareFill" => "Content-Aware Fill",
         "layer.move" => "Move layer",
         "layer.moveSelection" => "Move floating pixels",
         "selection.wand" => "Magic Wand",
@@ -847,6 +865,22 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var png = import.Png ?? File.ReadAllBytes(import.Path!);
                 return With(Insert(layers, import.Parent, null, new(import.Id, Name(import.Name), LayerKind.Raster)
                     { Pixels = backend.DecodePng(png) }));
+            case "layer.contentAwareFill":
+                var contentFill = command.Read<ContentAwareFillArgs>();
+                NewId(contentFill.Id);
+                if (doc.Selection is not { } contentBounds || (long)contentBounds.Width * contentBounds.Height > ContentAwareFill.MaxTargetPixels)
+                    throw new InvalidDataException($"Select an area with bounds of at most {ContentAwareFill.MaxTargetPixels:N0} pixels to fill.");
+                var fillAnchor = Wanted();
+                var (fillParent, fillBefore) = PathDestination(fillAnchor.Id, null);
+                var filled = ContentAwareFill.Synthesize(doc, backend.Composite(doc), contentFill);
+                var generated = new Layer(contentFill.Id, "Content-Aware Fill", LayerKind.Raster)
+                {
+                    Pixels = PixelBuffer.Convert(filled.Pixels, doc.Color), Width = filled.Pixels.Width, Height = filled.Pixels.Height
+                };
+                var output = With(Insert(layers, fillParent, fillBefore, generated));
+                var placement = new Projective(1, 0, filled.X, 0, 1, filled.Y);
+                if (fillParent is not null) placement = placement.Then(backend.ParentCoordinates(output, generated).Inverse());
+                return output.ReplaceLayer(generated.Id, generated with { RasterGrid = placement });
             case "layer.pastePixels":
                 var paste = command.Read<PastePixelsArgs>();
                 NewId(paste.Id);

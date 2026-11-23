@@ -8,8 +8,8 @@ public sealed record PsdImportResult(Document Document, IReadOnlyList<string> Wa
 /// <summary>Imports Adobe Photoshop documents using the public PSD file format specification.</summary>
 public static class PsdImport
 {
-    private const int MaxInputBytes = 512 * 1024 * 1024;
-    private const long MaxDecodedBytes = 512L * 1024 * 1024;
+    private const int MaxInputBytes = 1024 * 1024 * 1024;
+    private const long MaxDecodedBytes = 4L * 1024 * 1024 * 1024;
 
     public static byte[] ReadFile(string path)
     {
