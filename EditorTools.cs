@@ -83,7 +83,7 @@ public partial class MainWindow
         view.LostMouseCapture += (_, _) =>
         {
             if (interactiveTransform is { } transform) transform.Start = null;
-            CancelGesture();
+            if (gesture is not null || guideDrag is not null) CancelGesture();
             if (pathDrag is not null)
             {
                 pathDrag = null;
@@ -188,7 +188,7 @@ public partial class MainWindow
                     break;
                 case "Move":
                     if (ActiveLayer() is not { Locked: false } target || !Editable(doc, target.Id)) { Say("Select an unlocked layer to move."); return; }
-                    if (target.Kind is not (LayerKind.Chop or LayerKind.Path) && doc.Selection is { } selected)
+                    if (target.Kind is not (LayerKind.Chop or LayerKind.Path or LayerKind.Text) && doc.Selection is { } selected)
                     {
                         if (target.Kind != LayerKind.Raster || !doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y)) || point.X < selected.X || point.X >= selected.X + selected.Width ||
                             point.Y < selected.Y || point.Y >= selected.Y + selected.Height) return;
@@ -208,6 +208,7 @@ public partial class MainWindow
                     var moveSpace = SKMatrix.Concat(parentWorld,
                         SKMatrix.CreateScale((float)target.Placement.ScaleX, (float)target.Placement.ScaleY));
                     if (moveSpace.TryInvert(out var inverted)) moveParentInverse = inverted;
+                    if (target.Kind == LayerKind.Text) ShowTextMovePreview(active, doc, target);
                     break;
                 case "Burn":
                 case "Dodge":
@@ -311,16 +312,7 @@ public partial class MainWindow
                 UpdateCanvas();
                 break;
             case "Move":
-                var delta = point - gestureStart;
-                var mapped = moveParentInverse.MapVector((float)delta.X, (float)delta.Y);
-                var placement = moveOriginal! with { X = Math.Round(moveOriginal!.X + mapped.X, 2),
-                    Y = Math.Round(moveOriginal.Y + mapped.Y, 2) };
-                if (placement != (movePreview ?? moveOriginal))
-                {
-                    movePreview = placement;
-                    preview = doc with { Layers = PreviewMove(doc.Layers, moveId!, placement) };
-                    UpdateCanvas();
-                }
+                PreviewLayerMove(doc, point);
                 break;
         }
         Say();
@@ -362,6 +354,8 @@ public partial class MainWindow
         tonal?.Add(new(end.X, end.Y), finish: true);
         var points = stroke.ToArray();
         var lasso = completed == "Lasso" ? lassoPoints.Append(new PointD(end.X, end.Y)).ToArray() : [];
+        if (completed == "Move" && active.Engine.Current is { } movingDoc)
+            PreviewLayerMove(movingDoc, end);
         var moved = movePreview;
         var original = moveOriginal;
         string? id = moveId;
@@ -371,7 +365,8 @@ public partial class MainWindow
         var mode = selectionMode;
         var moveSelection = new PointD(Math.Round(motion.X), Math.Round(motion.Y));
         bool mask = active.MaskTarget is { } maskId && ActiveLayer() is { Mask: not null } layer && layer.Id == maskId;
-        CancelGesture(keepPaintFrame: renderedStroke);
+        bool textMoved = completed == "Move" && canvas.MovingText is not null && moved != original && moved is not null;
+        CancelGesture(keepPaintFrame: renderedStroke, keepTextPreview: textMoved);
         switch (completed)
         {
             case "Gradient":
@@ -390,7 +385,7 @@ public partial class MainWindow
                     var paint = new StrokeArgs(points, brushSize, hardness, StrokeOpacity(completed), foreground, completed == "Eraser", Pencil: completed == "Brush" && pencilMode, Tone: StrokeTone(completed));
                     if (renderedStroke)
                     {
-                        if (tonal is not null)
+                        if (paint.Tone != TonalStroke.None)
                         {
                             e.Handled = true;
                             await CommitTonalStroke(active, paintTarget, paint);
@@ -420,7 +415,10 @@ public partial class MainWindow
                 break;
             case "Move":
                 if (moved is not null && original is not null && moved != original)
-                    Run("layer.move", new PointD(moved.X - original.X, moved.Y - original.Y), id);
+                {
+                    if (!Run("layer.move", new PointD(moved.X - original.X, moved.Y - original.Y), id) && active is { } moveSession)
+                        ClearTextMovePreview(moveSession);
+                }
                 break;
             case "Selection":
                 if (originalSelection is { } previous)
@@ -522,24 +520,34 @@ public partial class MainWindow
     private async Task CommitTonalStroke(Session session, string target, StrokeArgs paint)
     {
         session.KeepPaintFrame = true;
+        session.CommittedTonalFrame = session.View.TonalFrame;
         committingTonalStroke = true;
-        StartWaiting();
+        bool committed = false;
         try
         {
             await session.Engine.ExecutePaintStrokeAsync(Command.Of("layer.paintStroke", paint, target));
+            session.TonalDocument = session.Engine.Current;
+            committed = true;
         }
         catch (Exception error)
         {
             session.KeepPaintFrame = false;
-            session.View.TonalFrame = null;
+            session.View.TonalFrame = session.CommittedTonalFrame = null;
             Guard(() => throw error);
         }
         finally
         {
             committingTonalStroke = false;
-            StopWaiting();
-            Refresh();
+            Refresh(updateCanvas: !committed || session.CommittedTonalFrame is null);
         }
+
+        if (!committed || session.CommittedTonalFrame is null) return;
+        var snapshot = session.TonalDocument;
+        await Task.Delay(150);
+        // The next stroke or document activation schedules its own exact render.
+        if (ReferenceEquals(active, session) && ReferenceEquals(snapshot, session.TonalDocument) &&
+            !committingTonalStroke && paintGesture is null)
+            UpdateCanvas();
     }
 
     private void PreviewStroke(string id)
@@ -552,13 +560,15 @@ public partial class MainWindow
         }
 
         var tone = StrokeTone(tool);
-        if (tone != TonalStroke.None && active is { Composite: { } source, Frame: { } frame, ChannelView: null or "composite" } session &&
-            session.Engine.Current is { } document && session.Rendered is { } rendered && SameComposite(document, rendered) &&
+        if (tone != TonalStroke.None && active is { ChannelView: null or "composite", MaskOnly: null, VectorMaskOnly: false } session &&
+            session.Engine.Current is { } document &&
+            (session.CommittedTonalFrame ?? (session.Rendered is { } rendered && SameComposite(document, rendered)
+                ? session.Frame : null)) is { } frame &&
             ActiveLayer() is { } layer && renderer.ResolveRaster(layer) is { } raster &&
             SkiaRenderer.WorldMatrix(document.Layers, id, SKMatrix.Identity) is { } world && world.TryInvert(out var inverse))
         {
             var settings = new StrokeArgs([], brushSize, hardness, StrokeOpacity(tool), foreground, false, Tone: tone);
-            tonalDrag = new TonalDragPreview(document, source, frame, layer, raster, inverse, settings);
+            tonalDrag = new TonalDragPreview(document, frame, layer, raster, inverse, settings);
             session.View.TonalFrame = tonalDrag.Bitmap;
             tonalDrag.Add(stroke[^1]);
             session.View.InvalidateVisual();
@@ -569,16 +579,17 @@ public partial class MainWindow
         UpdateCanvas();
     }
 
-    private void CancelGesture(bool keepPaintFrame = false)
+    private void CancelGesture(bool keepPaintFrame = false, bool keepTextPreview = false)
     {
         bool wasPainting = paintGesture is not null;
         paintGesture = null;
         paintPreview = null;
         tonalDrag = null;
-        if (!keepPaintFrame) canvas.TonalFrame = null;
+        if (!keepPaintFrame) canvas.TonalFrame = active?.CommittedTonalFrame;
         if (wasPainting && !keepPaintFrame) UpdateCanvas();
         canvas.GradientGuide = null;
         if (guideDrag is not null) CancelGuide();
+        if (gesture == "Move" && !keepTextPreview && active is { } moveSession) ClearTextMovePreview(moveSession);
         gesture = null;
         if (selectionOrigin is not null && active?.Engine.Current is { } document)
         {

@@ -42,6 +42,8 @@ public partial class MainWindow : Window
         public Document? Rendered { get; set; }
         public bool NeedsFit { get; set; } = true;
         public bool KeepPaintFrame { get; set; }
+        public System.Windows.Media.Imaging.BitmapSource? CommittedTonalFrame { get; set; }
+        public Document? TonalDocument { get; set; }
         public string Title => (Engine.Path is { } path ? Path.GetFileName(path) : InitialTitle ?? "Untitled") + (Engine.Dirty ? " *" : "");
     }
 
@@ -823,7 +825,7 @@ public partial class MainWindow : Window
         foreach (var path in preferences.Recent) Item(recentMenu, path, () => OpenPath(path));
     }
 
-    private bool Run<T>(string action, T args, string? target = null, string? selectId = null)
+    private bool Run<T>(string action, T args, string? target = null, string? selectId = null, Action<Session>? beforeRefresh = null)
     {
         if (active is not { } session) return false;
         if (interactiveTransform is not null) CancelTransform();
@@ -842,6 +844,7 @@ public partial class MainWindow : Window
                 .Any(layer => layer.Id == session.VectorMaskTarget && layer.VectorMask is not null) != true)
                 session.VectorMaskTarget = null;
         });
+        if (ok) beforeRefresh?.Invoke(session);
         Refresh();
         return ok;
     }
@@ -861,7 +864,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Refresh()
+    private void Refresh(bool updateCanvas = true)
     {
         syncing = true;
         try
@@ -881,7 +884,7 @@ public partial class MainWindow : Window
         RefreshTools();
         RefreshPathOverlay();
         UpdateGuideMenu();
-        UpdateCanvas();
+        if (updateCanvas) UpdateCanvas();
         RefreshNavigation();
         Say();
     }
@@ -901,6 +904,12 @@ public partial class MainWindow : Window
             canvas.InvalidateVisual();
             return;
         }
+        if (active.TonalDocument is { } toned && !SameComposite(doc, toned))
+        {
+            active.TonalDocument = null;
+            active.CommittedTonalFrame = null;
+            if (tonalDrag is null) canvas.TonalFrame = null;
+        }
         canvas.ImageWidth = doc.Width;
         canvas.ImageHeight = doc.Height;
         if (preview is null && editingText?.Layer is null && paintGesture is null && !active.KeepPaintFrame) canvas.Frame = active.Frame is { } priorFrame &&
@@ -917,7 +926,7 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
-        bool modalRender = gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
+        bool modalRender = active.CommittedTonalFrame is null && canvas.MovingText is null && gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
         blockRenderInput = modalRender;
         if (modalRender)
         {
@@ -985,9 +994,15 @@ public partial class MainWindow : Window
                 session.View.Frame = frame.Frame;
                 if (!isPreview)
                 {
-                    session.KeepPaintFrame = false;
-                    session.View.TonalFrame = null;
-                    session.View.PendingPaint.Clear();
+                    if (!committingTonalStroke && paintGesture is null)
+                    {
+                        session.KeepPaintFrame = false;
+                        session.View.TonalFrame = null;
+                        session.CommittedTonalFrame = null;
+                        session.TonalDocument = null;
+                        session.View.PendingPaint.Clear();
+                    }
+                    if (gesture != "Move" && session.View.MovingText is not null) ClearTextMovePreview(session);
                 }
                 session.View.InvalidateVisual();
                 if (paintCommand is null && !currentMove) RefreshNavigation();
@@ -997,7 +1012,6 @@ public partial class MainWindow : Window
         catch (Exception error)
         {
             canvas.PendingPaint.Clear();
-            canvas.TonalFrame = null;
             canvas.InvalidateVisual();
             Say(error.Message);
         }

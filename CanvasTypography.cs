@@ -140,8 +140,18 @@ public partial class MainWindow
         {
             CharacterStyle style = text.Paragraphs.SelectMany(p => p.Runs).FirstOrDefault()?.Style ?? textDefaults;
             if (edit.Create is { } create)
+            {
+                var previous = edit.Session.Engine.Current;
                 Run("layer.create", create with { Text = text.PlainText, Font = style.Font, Size = style.Size, Color = style.Color,
-                    Typography = text }, selectId: create.Id);
+                    Typography = text }, selectId: create.Id, beforeRefresh: session =>
+                    {
+                        if (session.Engine.Current is not { } document || ActiveLayer() is not { } added) return;
+                        var underlay = previous is not null && session.Rendered is { } rendered &&
+                            SameComposite(previous, rendered) && SkiaRenderer.IsTopText(document.Layers, added.Id)
+                            ? session.Frame : null;
+                        ShowTextMovePreview(session, document, added, underlay, newlyCreated: true);
+                    });
+            }
             else if (edit.Layer is { } layer)
                 Run("layer.text", new TextArgs(text.PlainText, style.Font, style.Size, style.Color, Typography: text), layer.Id, layer.Id);
         }
