@@ -74,6 +74,23 @@ public sealed class LayerStyleTests
     }
 
     [Fact]
+    public async Task BackgroundMaskStrokeMatchesTheScriptedMaskStroke()
+    {
+        var engine = new CommandEngine(new SkiaRenderer());
+        engine.Execute(Command.Of("document.create", new NewArgs("test", 8, 8)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("art", "Art", LayerKind.Raster)));
+        engine.Execute(Command.Of("mask.add", 0, "art"));
+        var command = Command.Of("mask.paintStroke",
+            new StrokeArgs([new(3.5, 3.5)], 4, 1, 1, "#FF000000", false), "art");
+        var expected = engine.Preview(command).Layers[0].Mask!.Alpha;
+        int entries = engine.History.Count;
+        await engine.ExecutePaintStrokeAsync(command);
+        Assert.Equal(entries + 1, engine.History.Count);
+        Assert.Equal(expected, engine.Current!.Layers[0].Mask!.Alpha);
+        Assert.Contains(expected, alpha => alpha < 255);
+    }
+
+    [Fact]
     public void TonalStrokeAfterClearingPixelsUsesTheResolvedRasterAndCanBeUndone()
     {
         var renderer = new SkiaRenderer();

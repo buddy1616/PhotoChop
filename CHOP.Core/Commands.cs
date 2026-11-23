@@ -87,7 +87,8 @@ public sealed class CommandEngine(IRasterBackend backend)
     // Compute a paint edit off the UI thread and commit only if the source is still current.
     public async Task ExecutePaintStrokeAsync(Command command)
     {
-        if (command.Name != "layer.paintStroke") throw new ArgumentException("Expected a raster stroke.", nameof(command));
+        if (command.Name is not ("layer.paintStroke" or "mask.paintStroke"))
+            throw new ArgumentException("Expected a raster or mask stroke.", nameof(command));
         var snapshot = Current ?? throw new InvalidOperationException("Open a document first.");
         try
         {

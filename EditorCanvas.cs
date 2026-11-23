@@ -77,6 +77,8 @@ internal sealed class EditorCanvas : FrameworkElement
     public Area? Selection { get; set; }
     public Rect? Marquee { get; set; }
     internal sealed record PaintOverlay(StrokeArgs Stroke, Area? Clip);
+    public BrushDragPreview? ActiveBrush { get; set; }
+    public List<BrushDragPreview> PendingBrush { get; } = [];
     public List<PaintOverlay> PendingPaint { get; } = [];
     public IReadOnlyList<PointD>? Stroke { get; set; }
     public string StrokeColor { get; set; } = "#FFFFFFFF";
@@ -128,6 +130,8 @@ internal sealed class EditorCanvas : FrameworkElement
                     dc.DrawLine(pixelGrid, new Point(visible.Left, Offset.Y + y * Zoom), new Point(visible.Right, Offset.Y + y * Zoom));
             }
         }
+        foreach (var brush in PendingBrush) brush.Draw(dc, Offset, Zoom);
+        ActiveBrush?.Draw(dc, Offset, Zoom);
         foreach (var pending in PendingPaint)
             DrawStroke(dc, imageArea, pending.Stroke.Points, pending.Stroke.Size, pending.Stroke.Opacity,
                 pending.Stroke.Color, pending.Stroke.Erase, pending.Clip);
@@ -378,8 +382,8 @@ internal sealed class EditorCanvas : FrameworkElement
 
     public static BitmapSource Bitmap(Pixels pixels)
     {
-        var bgra = (byte[])pixels.Rgba.Clone();
-        for (int i = 0; i < bgra.Length; i += 4) (bgra[i], bgra[i + 2]) = (bgra[i + 2], bgra[i]);
+        var bgra = GC.AllocateUninitializedArray<byte>(pixels.Rgba.Length);
+        SkiaSharp.SKSwizzle.SwapRedBlue(bgra, pixels.Rgba, pixels.Width * pixels.Height);
         return Frozen(BitmapSource.Create(pixels.Width, pixels.Height, 96, 96, PixelFormats.Bgra32, null, bgra, pixels.Width * 4));
     }
 
