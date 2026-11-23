@@ -624,7 +624,7 @@ public partial class MainWindow
 
         if (Hit(doc.Layers) is { } text)
         {
-            SelectLayer(text.Id);
+            if (active?.ActiveId != text.Id) SelectLayer(text.Id);
             EditText(text);
         }
         else CreateLayer(LayerKind.Text, new PointD(Math.Floor(point.X), Math.Floor(point.Y)));

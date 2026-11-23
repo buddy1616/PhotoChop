@@ -13,13 +13,28 @@ namespace PhotoChop;
 
 public partial class MainWindow
 {
-    private sealed class TextEditSession(Session session, RichTextBox editor, LayerArgs? create, Layer? layer, PointD location, RichText text)
+    private sealed class TextEditSession(Session session, RichTextBox editor, LayerArgs? create, Layer? layer, Canvas host, SKMatrix placement, RichText text)
     {
         public Session Session { get; } = session;
         public RichTextBox Editor { get; } = editor;
         public LayerArgs? Create { get; } = create;
         public Layer? Layer { get; } = layer;
-        public PointD Location { get; } = location;
+        public Canvas Host { get; } = host;
+        public SKMatrix Placement { get; } = placement;
+        private Document? source;
+        private Document? background;
+
+        public Document? BackgroundFor(Document document)
+        {
+            if (Layer is null) return null;
+            if (!ReferenceEquals(source, document))
+            {
+                source = document;
+                background = document.AllLayers().FirstOrDefault(item => item.Id == Layer.Id) is { } layer
+                    ? document.ReplaceLayer(layer.Id, layer with { Visible = false }) : null;
+            }
+            return background;
+        }
         public TextWarp? Warp { get; set; } = text.Warp;
         public double Width { get; set; } = text.Width;
         public bool Modified { get; set; }
@@ -42,17 +57,11 @@ public partial class MainWindow
             new(layer.Font, layer.Size, layer.Color);
         var rich = layer?.Typography ?? RichText.FromPlain(layer?.Text ?? "", style,
             layer is { TextBend: not 0 } ? new(TextWarpStyle.Arc, layer.TextBend) : null);
-        PointD origin = new(create?.Transform?.X ?? 0, create?.Transform?.Y ?? 0);
+        var placement = SKMatrix.CreateTranslation((float)(create?.Transform?.X ?? 0), (float)(create?.Transform?.Y ?? 0));
         if (create?.Parent is { } parent && SkiaRenderer.WorldMatrix(doc.Layers, parent, SKMatrix.Identity) is { } parentWorld)
-        {
-            var mapped = parentWorld.MapPoint((float)origin.X, (float)origin.Y);
-            origin = new(mapped.X, mapped.Y);
-        }
+            placement = SKMatrix.Concat(parentWorld, placement);
         if (layer is not null && SkiaRenderer.WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) is { } world)
-        {
-            var mapped = world.MapPoint(layer.RasterX, layer.RasterY);
-            origin = new(mapped.X, mapped.Y);
-        }
+            placement = SKMatrix.Concat(world, SKMatrix.CreateTranslation(layer.RasterX, layer.RasterY));
 
         var flow = new FlowDocument { PagePadding = new Thickness(0), FontFamily = new FontFamily(ResolveEditorFamily(style.Font)),
             FontSize = style.Size, Foreground = Ink(style.Color), TextAlignment = TextAlignment.Left };
@@ -67,17 +76,20 @@ public partial class MainWindow
         }
         var editor = new RichTextBox(flow)
         {
-            Padding = new Thickness(2), BorderThickness = new Thickness(1), BorderBrush = Brushes.DeepSkyBlue,
+            Padding = new Thickness(2), BorderThickness = new Thickness(0),
             Background = Brushes.Transparent, Foreground = Ink(style.Color), CaretBrush = Brushes.White,
             HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
-            AcceptsReturn = true, IsInactiveSelectionHighlightEnabled = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, IsUndoEnabled = true
+            AcceptsReturn = true, IsInactiveSelectionHighlightEnabled = true, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            HorizontalScrollBarVisibility = rich.Width == 0 ? ScrollBarVisibility.Hidden : ScrollBarVisibility.Disabled,
+            FocusVisualStyle = null, IsUndoEnabled = true
         };
-        editingText = new(active, editor, create, layer, origin, rich);
-        Grid.SetColumn(editor, 1);
-        Grid.SetRow(editor, 1);
-        Panel.SetZIndex(editor, 10);
-        active.Viewport.Children.Add(editor);
-        if (layer is not null) preview = doc.ReplaceLayer(layer.Id, layer with { Visible = false });
+        var host = new Canvas { ClipToBounds = true };
+        host.Children.Add(editor);
+        editingText = new(active, editor, create, layer, host, placement, rich);
+        Grid.SetColumn(host, 1);
+        Grid.SetRow(host, 1);
+        Panel.SetZIndex(host, 10);
+        active.Viewport.Children.Add(host);
         editor.TextChanged += (_, _) => { if (editingText is { } edit) edit.Modified = true; };
         editor.SelectionChanged += (_, _) => syncTypographyToolbar?.Invoke();
         editor.PreviewKeyDown += (_, e) =>
@@ -87,7 +99,7 @@ public partial class MainWindow
             { e.Handled = true; FinishTextEdit(); }
         };
         PositionTextEditor();
-        UpdateCanvas();
+        if (layer is not null) UpdateCanvas();
         RefreshTools();
         editor.Focus();
         editor.CaretPosition = flow.ContentEnd;
@@ -97,16 +109,21 @@ public partial class MainWindow
     private void PositionTextEditor()
     {
         if (editingText is not { } edit) return;
-        var view = edit.Session.View;
         var editor = edit.Editor;
         double zoom = edit.Session.Zoom;
         var offset = edit.Session.Offset;
-        double left = edit.Location.X * zoom + offset.X, top = edit.Location.Y * zoom + offset.Y;
-        editor.Margin = new Thickness(left, top, 0, 0);
-        editor.LayoutTransform = new ScaleTransform(zoom, zoom);
-        editor.Width = edit.Width > 0 ? edit.Width : Math.Clamp((view.ActualWidth - left - 8) / zoom, 80, 16384);
-        editor.MinHeight = 28;
-        editor.MaxHeight = Math.Max(40, (view.ActualHeight - top) / zoom);
+        var placement = edit.Placement;
+        Canvas.SetLeft(editor, placement.TransX * zoom + offset.X);
+        Canvas.SetTop(editor, placement.TransY * zoom + offset.Y);
+        editor.RenderTransform = new MatrixTransform(new Matrix(
+            placement.ScaleX * zoom, placement.SkewY * zoom,
+            placement.SkewX * zoom, placement.ScaleY * zoom, 0, 0));
+        editor.HorizontalScrollBarVisibility = edit.Width > 0 ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Hidden;
+        editor.Width = edit.Width > 0 ? edit.Width : double.NaN;
+        editor.MinWidth = 16;
+        editor.MinHeight = 16;
+        editor.MaxWidth = edit.Width > 0 ? double.PositiveInfinity : 16384;
+
     }
 
     private void FinishTextEdit(bool cancel = false)
@@ -115,7 +132,8 @@ public partial class MainWindow
         RichText? text = cancel ? null : ReadRichText(edit);
         editingText = null;
         syncTypographyToolbar = null;
-        edit.Session.Viewport.Children.Remove(edit.Editor);
+        edit.Session.Viewport.Children.Remove(edit.Host);
+        bool previewWasVisible = preview is not null;
         preview = null;
         if (text is not null && ReferenceEquals(active, edit.Session) &&
             (edit.Layer is not null && edit.Modified || edit.Create is not null && text.PlainText.Length > 0))
@@ -127,7 +145,11 @@ public partial class MainWindow
             else if (edit.Layer is { } layer)
                 Run("layer.text", new TextArgs(text.PlainText, style.Font, style.Size, style.Color, Typography: text), layer.Id, layer.Id);
         }
-        else { UpdateCanvas(); RefreshTools(); }
+        else
+        {
+            if (edit.Layer is not null || previewWasVisible) UpdateCanvas();
+            RefreshTools();
+        }
     }
 
     private static Brush Ink(string hex) => new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)!);

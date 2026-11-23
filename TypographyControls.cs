@@ -1,4 +1,5 @@
 using System.IO;
+using System.Collections.Concurrent;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -14,7 +15,9 @@ public partial class MainWindow
         Fonts.SystemFontFamilies.OrderBy(f => f.Source, StringComparer.CurrentCultureIgnoreCase).ToArray());
 
     private Action? syncTypographyToolbar;
-    private static string ResolveEditorFamily(string font) => RichText.ResolveFamily(font, InstalledFonts.Value.Select(family => family.Source));
+    private static readonly ConcurrentDictionary<string, string> EditorFamilies = new();
+    private static string ResolveEditorFamily(string font) => EditorFamilies.GetOrAdd(font,
+        name => RichText.ResolveFamily(name, InstalledFonts.Value.Select(family => family.Source)));
 
     private void AddTypographyTools()
     {
@@ -28,14 +31,20 @@ public partial class MainWindow
         font.ItemTemplate = new DataTemplate { VisualTree = sample };
         var face = new ComboBox { Width = 108, DisplayMemberPath = "Label" };
         bool updating = false;
+        FontFamily? listedFamily = null;
+        FontChoice[] choices = [];
         void Faces(FontFamily family)
         {
             bool previous = updating;
             updating = true;
-            var choices = family.GetTypefaces().Select(type => new FontChoice(
-                type.FaceNames.Values.FirstOrDefault() ?? $"{type.Weight} {type.Style}", type.Weight.ToOpenTypeWeight(),
-                type.Style != FontStyles.Normal)).DistinctBy(c => (c.Weight, c.Italic)).ToArray();
-            face.ItemsSource = choices;
+            if (listedFamily != family)
+            {
+                listedFamily = family;
+                choices = family.GetTypefaces().Select(type => new FontChoice(
+                    type.FaceNames.Values.FirstOrDefault() ?? $"{type.Weight} {type.Style}", type.Weight.ToOpenTypeWeight(),
+                    type.Style != FontStyles.Normal)).DistinctBy(c => (c.Weight, c.Italic)).ToArray();
+                face.ItemsSource = choices;
+            }
             var style = CurrentTextStyle();
             face.SelectedItem = choices.FirstOrDefault(c => c.Weight == style.Weight && c.Italic == style.Italic) ?? choices.FirstOrDefault();
             updating = previous;
@@ -74,15 +83,20 @@ public partial class MainWindow
         ToolOptions.Children.Add(size);
         ToolOptions.Children.Add(align);
         ToolOptions.Children.Add(swatch);
+        CharacterStyle? lastStyle = null;
         syncTypographyToolbar = () =>
         {
             if (updating) return;
             updating = true;
             var style = CurrentTextStyle();
-            font.SelectedValue = ResolveEditorFamily(style.Font);
-            if (font.SelectedItem is FontFamily selected) Faces(selected);
-            if (!size.IsKeyboardFocusWithin) size.Text = style.Size.ToString("0.##");
-            chip.Background = Ink(style.Color);
+            if (style != lastStyle)
+            {
+                lastStyle = style;
+                font.SelectedValue = ResolveEditorFamily(style.Font);
+                if (font.SelectedItem is FontFamily selected) Faces(selected);
+                if (!size.IsKeyboardFocusWithin) size.Text = style.Size.ToString("0.##");
+                chip.Background = Ink(style.Color);
+            }
             align.SelectedItem = editingText?.Editor.Selection.Start.Paragraph?.TextAlignment ?? TextAlignment.Left;
             updating = false;
         };
@@ -258,8 +272,7 @@ public partial class MainWindow
         dialog.Loaded += (_, _) => PreviewWarp();
         if (dialog.ShowDialog() == true) { edit.Warp = Read(); edit.Modified = true; }
         edit.Editor.Visibility = Visibility.Visible;
-        preview = edit.Layer is { } old && edit.Session.Engine.Current is { } snapshot
-            ? snapshot.ReplaceLayer(old.Id, old with { Visible = false }) : null;
+        preview = null;
         UpdateCanvas();
         edit.Editor.Focus();
     }

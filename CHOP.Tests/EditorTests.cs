@@ -172,7 +172,7 @@ public sealed class EditorTests : IDisposable
     }
 
     [Fact]
-    public void GpuPreviewEligibilityKeepsBackdropEffectsClippingAndGroupMasksOnCpu()
+    public void GpuPreviewEligibilityAllowsIsolatedCpuGroupsAndKeepsBackdropEffectsOnCpu()
     {
         var first = new Layer("one", "One", LayerKind.Rectangle);
         var second = new Layer("two", "Two", LayerKind.Ellipse)
@@ -190,6 +190,11 @@ public sealed class EditorTests : IDisposable
             { Mask = new AlphaMask(1, 1, [128]) }] }));
         Assert.True(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [group with
             { Mask = new AlphaMask(1, 1, [128]), MaskEnabled = false }] }));
+        var isolated = group with { Mask = new AlphaMask(1, 1, [128]),
+            Children = [first, second with { Clipped = true }] };
+        Assert.True(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [first, isolated] }));
+        Assert.False(SkiaRenderer.CanCompositeOnGpu(document with { Layers = [first, isolated],
+            Color = new(ChannelColorMode.Cmyk, ChannelDepth.Bit8), IccProfile = [1] }));
     }
 
     [Fact]

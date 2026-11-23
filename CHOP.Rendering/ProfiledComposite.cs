@@ -7,17 +7,22 @@ public sealed partial class SkiaRenderer
 {
     private readonly ConditionalWeakTable<byte[], ConditionalWeakTable<Pixels, Pixels>> profilePreviews = new();
 
+    private readonly ConditionalWeakTable<byte[], ConditionalWeakTable<Layer, Layer>> profiledLayers = new();
+
     private Layer[] ProfiledLayers(Document document)
     {
         if (document.Color.Mode != ChannelColorMode.Cmyk || document.IccProfile is not { } profile)
             return document.Layers;
 
         var cache = profilePreviews.GetOrCreateValue(profile);
+        var layers = profiledLayers.GetOrCreateValue(profile);
         var transform = new Lazy<CmykProfile?>(() => CmykProfile.Open(profile));
         try { return document.Layers.Select(Convert).ToArray(); }
         finally { if (transform.IsValueCreated) transform.Value?.Dispose(); }
 
-        Layer Convert(Layer layer)
+        Layer Convert(Layer layer) => layers.GetValue(layer, ConvertLayer);
+
+        Layer ConvertLayer(Layer layer)
         {
             if (!layer.Visible || layer.Opacity == 0) return layer;
             if (layer.Effects.Any(effect => effect.PhotoshopStyle))

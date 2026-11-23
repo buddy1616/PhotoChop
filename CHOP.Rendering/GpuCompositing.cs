@@ -21,14 +21,22 @@ public sealed partial class SkiaRenderer
                 leaves++;
                 return true;
             }
-            return layer.Placement == new Placement() && SpatialMatrix(layer) == SKMatrix.Identity &&
-                (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask) &&
-                (!layer.TransformsEnabled || !layer.Effects.Any(ProcessesPixels)) &&
-                (layer.TransformsEnabled ? CommandEngine.EffectiveBlend(layer) : layer.Blend) == Blend.Normal &&
-                layer.Children.All(Supported);
+            if (!CanDrawGroupDirectly(layer))
+            {
+                leaves++;
+                return true;
+            }
+            return layer.Children.All(Supported);
         }
         return document.Layers.All(Supported) && leaves >= 2;
     }
+
+    // An isolated group can be prepared on the CPU without reading the GPU backdrop.
+    private static bool CanDrawGroupDirectly(Layer layer) =>
+        layer.Placement == new Placement() && SpatialMatrix(layer) == SKMatrix.Identity &&
+        (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask) &&
+        (!layer.TransformsEnabled || !layer.Effects.Any(ProcessesPixels)) &&
+        (layer.TransformsEnabled ? CommandEngine.EffectiveBlend(layer) : layer.Blend) == Blend.Normal;
 
     /// <summary>Uses the caller's current, thread-affine OpenGL context. The caller owns that context.</summary>
     public GpuCompositor CreateGpuCompositor(GRContext context) => new(this, context);
@@ -63,7 +71,7 @@ public sealed partial class SkiaRenderer
             void DrawLayer(Layer layer, SKMatrix parent)
             {
                 if (!layer.Visible || layer.Opacity == 0) return;
-                if (layer.Kind != LayerKind.Group)
+                if (layer.Kind != LayerKind.Group || !CanDrawGroupDirectly(layer))
                 {
                     renderer.Draw(canvas, layer, region, parent, DrawGpuFrame);
                     return;
