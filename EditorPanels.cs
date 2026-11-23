@@ -227,8 +227,6 @@ public partial class MainWindow
         panelContent.Add(PalettePane, toolColors);
         panelContent.Add("Navigation", BuildNavigation());
         panelContent.Add("Info", BuildInfo());
-        panelContent.Add("Character", BuildCharacterTypography());
-        panelContent.Add("Paragraph", BuildParagraphTypography());
         panelContent.Add("Layers", layersPanel);
         panelContent.Add("Channels", BuildChannels());
         panelContent.Add("History", history);
@@ -335,7 +333,7 @@ public partial class MainWindow
 
     private Layer? ActiveLayer() => active?.Engine.Current?.AllLayers().FirstOrDefault(layer => layer.Id == active.ActiveId);
 
-    private void CreateLayer(LayerKind kind, PointD? point = null, int width = 100, int height = 100)
+    private void CreateLayer(LayerKind kind, PointD? point = null, int width = 100, int height = 100, RichText? typography = null)
     {
         var origin = point ?? new PointD(0, 0);
         string id = Format.Id();
@@ -351,7 +349,7 @@ public partial class MainWindow
         if (parent is not null)
         {
             active.Collapsed.Remove(parent);
-            if (point is not null && Chop.Rendering.SkiaRenderer.WorldMatrix(doc.Layers, parent, SkiaSharp.SKMatrix.Identity) is { } matrix &&
+            if (typography is null && point is not null && Chop.Rendering.SkiaRenderer.WorldMatrix(doc.Layers, parent, SkiaSharp.SKMatrix.Identity) is { } matrix &&
                 matrix.TryInvert(out var inverse))
             {
                 var local = inverse.MapPoint((float)origin.X, (float)origin.Y);
@@ -360,7 +358,8 @@ public partial class MainWindow
         }
         string name = kind switch { LayerKind.Raster => NextLayerName("Layer"), LayerKind.Fill => NextLayerName("Fill"), LayerKind.Group => NextLayerName("Group"), LayerKind.Effect => NextLayerName("Effect"), _ => kind.ToString() };
         var args = new LayerArgs(id, name, kind, Parent: parent, Transform: new(origin.X, origin.Y),
-            Width: width, Height: height, Text: text, Font: font, Size: size, Color: color);
+            Width: width, Height: height, Text: text, Font: font, Size: size, Color: color, Typography: typography,
+            CanvasAlignedText: typography is not null);
         if (kind == LayerKind.Text) { BeginTextEdit(args, null); return; }
         Run("layer.create", args, selectId: id);
     }
@@ -627,7 +626,32 @@ public partial class MainWindow
             if (active?.ActiveId != text.Id) SelectLayer(text.Id);
             EditText(text);
         }
+        else if (doc.Selection is { } bounds && doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y)))
+        {
+            Guard(() =>
+            {
+                if (doc.SelectionMask is null) { CreateBoundedText(bounds); return; }
+                var regions = SelectionContours.Trace(doc);
+                if (regions.Length == 1)
+                {
+                    var shape = regions[0].Select(contour => contour.Nodes.Select(node =>
+                        new PointD(node.Point.X - bounds.X, node.Point.Y - bounds.Y)).ToArray()).ToArray();
+                    CreateBoundedText(bounds, shape);
+                }
+                else Say("Text wrapping requires a single connected selection.");
+            });
+        }
         else CreateLayer(LayerKind.Text, new PointD(Math.Floor(point.X), Math.Floor(point.Y)));
+    }
+
+    private void CreateBoundedText(Area area, PointD[][]? shape = null)
+    {
+        var typography = RichText.FromPlain("", textDefaults) with { Width = area.Width, Height = area.Height, Shape = shape };
+        Guard(() =>
+        {
+            RichText.Check(typography);
+            CreateLayer(LayerKind.Text, new PointD(area.X, area.Y), typography: typography);
+        });
     }
 
     private void EditShape()

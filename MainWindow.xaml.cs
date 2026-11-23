@@ -63,6 +63,7 @@ public partial class MainWindow : Window
         public double UiScale { get; set; } = 1;
         public bool ExperimentalGpu { get; set; }
         public bool ShowPixelGrid { get; set; } = true;
+        public double FillSamplingDiameter { get; set; } = 48;
         public int CheckerSize { get; set; } = 8;
         public bool ShowRulers { get; set; } = true;
         public bool ShowGuides { get; set; } = true;
@@ -226,10 +227,6 @@ public partial class MainWindow : Window
             if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == "Info") &&
                 Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Navigation")?.Parent is LayoutAnchorablePane navigationPane)
                 navigationPane.Children.Add(NewPanel("Info"));
-            if (Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Navigation")?.Parent is LayoutAnchorablePane typographyPane)
-                foreach (string title in new[] { "Character", "Paragraph" })
-                    if (!Dock.Layout.Descendents().OfType<LayoutAnchorable>().Any(panel => panel.ContentId == title))
-                        typographyPane.Children.Add(NewPanel(title));
             if (Dock.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(panel => panel.ContentId == "Tools")?.FindParent<LayoutAnchorablePaneGroup>() is { } toolbox)
             {
                 toolbox.DockMinWidth = 54;
@@ -294,8 +291,6 @@ public partial class MainWindow : Window
         var upper = new LayoutAnchorablePane { DockHeight = new GridLength(1, GridUnitType.Star) };
         upper.Children.Add(NewPanel("Navigation"));
         upper.Children.Add(NewPanel("Info"));
-        upper.Children.Add(NewPanel("Character"));
-        upper.Children.Add(NewPanel("Paragraph"));
         upper.SelectedContentIndex = 0;
         var sidebar = new LayoutAnchorablePaneGroup { Orientation = Orientation.Vertical, DockWidth = new GridLength(400),
             Children = { upper, right } };
@@ -508,7 +503,7 @@ public partial class MainWindow : Window
         Item(view, "Fit canvas", Fit, "Ctrl+0");
         Item(view, "Actual pixels", ActualPixels, "Ctrl+1");
         var window = Menu("Window");
-        foreach (string title in new[] { "Tools", PalettePane, "Navigation", "Info", "Character", "Paragraph", "Layers", "Channels", "History", "Command Log" })
+        foreach (string title in new[] { "Tools", PalettePane, "Navigation", "Info", "Layers", "Channels", "History", "Command Log" })
             Item(window, title, () => TogglePanel(title));
         Item(window, "Split document to the right", SplitDocument);
         Item(window, "Float document", () => FloatDocument(WindowState.Normal));

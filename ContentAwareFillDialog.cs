@@ -67,8 +67,14 @@ public partial class MainWindow
         dialog.AddHandler(Keyboard.PreviewKeyUpEvent, new KeyEventHandler(UpdateAltCursor), handledEventsToo: true);
         tools.Children.Add(mode);
         tools.Children.Add(new TextBlock { Text = "Brush diameter (px)", Margin = new Thickness(8, 0, 3, 0), VerticalAlignment = VerticalAlignment.Center });
-        var size = new TextBox { Text = "48", Width = 62, VerticalContentAlignment = VerticalAlignment.Center };
-        NumericWheel.Enable(size, 1, 4096, value => surface.Radius = value / 2);
+        double diameter = double.IsFinite(preferences.FillSamplingDiameter) ? Math.Clamp(preferences.FillSamplingDiameter, 1, 4096) : 48;
+        surface.Radius = diameter / 2;
+        var size = new TextBox { Text = diameter.ToString("0.##"), Width = 62, VerticalContentAlignment = VerticalAlignment.Center };
+        NumericWheel.Enable(size, 1, 4096, value =>
+        {
+            preferences.FillSamplingDiameter = value;
+            surface.Radius = value / 2;
+        });
         tools.Children.Add(size);
         tools.Children.Add(Button("Sample all", () => surface.Reset(true)));
         tools.Children.Add(Button("Clear sampling", () => surface.Reset(false)));
@@ -149,7 +155,7 @@ public partial class MainWindow
         private readonly List<SamplingStroke> strokes = [];
         private readonly double scale;
         private List<PointD>? points;
-        private bool sampleAll = true, strokeInclude;
+        private bool sampleAll, strokeInclude;
         private double strokeRadius;
         private Point? brush;
         public bool Include { get; set; } = true;
@@ -169,7 +175,7 @@ public partial class MainWindow
             mask = new byte[thumbnail.Width * thumbnail.Height];
             overlay = new byte[mask.Length * 4];
             RefreshCursor();
-            Reset(true);
+            Reset(false);
         }
 
         public static Pixels Thumbnail(Pixels source)

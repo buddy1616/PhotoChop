@@ -15,7 +15,7 @@ public sealed record VectorShapeArgs(string Id, string Name, PointD[] Points, st
 public sealed record NewArgs(string Id, int Width, int Height, string? Background = null, double PixelsPerInch = 72, bool StarterLayers = false, ColorSettings? Color = null);
 public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? Parent = null,
     Transform? Transform = null, string Text = "Text", string Font = "Liberation Sans", double Size = 48,
-    string Color = "#FFFFFFFF", int Width = 100, int Height = 100, double TextBend = 0, RichText? Typography = null);
+    string Color = "#FFFFFFFF", int Width = 100, int Height = 100, double TextBend = 0, RichText? Typography = null, bool CanvasAlignedText = false);
 public sealed record ImportArgs(string Id, string Name, byte[]? Png = null, string? Parent = null, string? Path = null);
 public sealed record PathArgs(string Path);
 public enum ImageExportFormat { Png, Jpeg, WebP, Svg }
@@ -619,7 +619,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             EnsureEditable(layers, layer.Id);
             if (layer.Kind == LayerKind.Effect) throw new InvalidDataException("Effect layers do not have transforms.");
             if (transform == Projective.Identity) return doc;
-            if (layer.Kind is not (LayerKind.Chop or LayerKind.Path) && doc.Selection is { } area)
+            if (layer.Kind is not (LayerKind.Chop or LayerKind.Path or LayerKind.Text) && doc.Selection is { } area)
                 return TransformSelected(doc, layer, area, transform);
             var local = backend.ToParentSpace(doc, layer, transform);
             var combined = (layer.Transform.Warp ?? Projective.Identity).Then(local);
@@ -845,10 +845,23 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Range(create.TextBend, -1, 1);
                 RichText.Check(create.Typography);
                 if (create.Text is null || string.IsNullOrWhiteSpace(create.Font)) throw new InvalidDataException("Invalid text settings.");
-                return With(Insert(layers, create.Parent, null, new(create.Id, Name(create.Name), create.Kind)
-                { Transform = create.Transform ?? new(), Text = create.Typography?.PlainText ?? create.Text, Typography = create.Typography, Font = create.Font, Size = create.Size, TextBend = create.TextBend,
-                    Color = create.Color, Width = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Width : create.Width,
-                    Height = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Height : create.Height }));
+                var createdLayer = new Layer(create.Id, Name(create.Name), create.Kind)
+                {
+                    Transform = create.Transform ?? new(), Text = create.Typography?.PlainText ?? create.Text, Typography = create.Typography,
+                    Font = create.Font, Size = create.Size, TextBend = create.TextBend, Color = create.Color,
+                    Width = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Width : create.Width,
+                    Height = create.Kind is LayerKind.Raster or LayerKind.Fill ? doc.Height : create.Height
+                };
+                var createdDocument = With(Insert(layers, create.Parent, null, createdLayer));
+                if (create.CanvasAlignedText && create.Kind == LayerKind.Text && create.Parent is not null)
+                {
+                    var textLocation = createdLayer.Transform;
+                    var grid = new Projective(1, 0, textLocation.X, 0, 1, textLocation.Y);
+                    var local = grid.Then(backend.ParentCoordinates(createdDocument, createdLayer).Inverse());
+                    return createdDocument.ReplaceLayer(createdLayer.Id, createdLayer with
+                    { Transform = textLocation with { X = 0, Y = 0 }, RasterGrid = local });
+                }
+                return createdDocument;
             case "layer.importImage":
                 var genericImport = command.Read<ImageImportArgs>();
                 NewId(genericImport.Id);
@@ -1023,13 +1036,13 @@ public sealed class CommandEngine(IRasterBackend backend)
                 Range(scale.Y, .001, 1000);
                 if (scale.AnchorX is < 0 or > 2 || scale.AnchorY is < 0 or > 2)
                     throw new InvalidDataException("Choose a transform anchor.");
-                var scaleArea = (Wanted().Kind is LayerKind.Chop or LayerKind.Path ? null : doc.Selection)
+                var scaleArea = (Wanted().Kind is LayerKind.Chop or LayerKind.Path or LayerKind.Text ? null : doc.Selection)
                     ?? new Area(0, 0, doc.Width, doc.Height);
                 return ApplySpatial(Projective.Anchored(scale.X, scale.Y,
                     scaleArea.X + scaleArea.Width * scale.AnchorX / 2d, scaleArea.Y + scaleArea.Height * scale.AnchorY / 2d));
             case "layer.flip":
                 bool horizontal = command.Read<FlipArgs>().Horizontal;
-                var flipArea = (Wanted().Kind is LayerKind.Chop or LayerKind.Path ? null : doc.Selection)
+                var flipArea = (Wanted().Kind is LayerKind.Chop or LayerKind.Path or LayerKind.Text ? null : doc.Selection)
                     ?? new Area(0, 0, doc.Width, doc.Height);
                 return ApplySpatial(Projective.Anchored(horizontal ? -1 : 1, horizontal ? 1 : -1,
                         flipArea.X + flipArea.Width / 2d, flipArea.Y + flipArea.Height / 2d));
