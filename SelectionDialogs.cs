@@ -8,6 +8,17 @@ namespace PhotoChop;
 
 public partial class MainWindow
 {
+    private void SelectAllPixels() => Run("selection.all", 0);
+    private void InvertSelection() => Run("selection.invert", 0);
+
+    private void FilterSelection(bool feather)
+    {
+        if (active?.Engine.Current?.Selection is null) return;
+        string title = feather ? "Feather Selection" : "Smooth Selection";
+        if (Form(title, ("Radius (pixels)", "3")) is { } values)
+            Guard(() => Run(feather ? "selection.feather" : "selection.smooth", Int(values[0])));
+    }
+
     private void ModifySelection(bool expand)
     {
         if (active?.Engine.Current?.Selection is null) return;

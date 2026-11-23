@@ -142,7 +142,8 @@ public partial class MainWindow
         }
         else if (e.ChangedButton == MouseButton.Left)
         {
-            if (point.X < 0 || point.Y < 0 || point.X >= doc.Width || point.Y >= doc.Height) return;
+            if (tool is not ("Selection" or "Lasso") &&
+                (point.X < 0 || point.Y < 0 || point.X >= doc.Width || point.Y >= doc.Height)) return;
             gestureStart = point;
             switch (tool)
             {
@@ -1010,12 +1011,20 @@ public partial class MainWindow
         if ((e.Key is Key.LeftAlt or Key.RightAlt || e.SystemKey is Key.LeftAlt or Key.RightAlt) &&
             (e.RoutedEvent == Keyboard.PreviewKeyDownEvent || e.RoutedEvent == Keyboard.PreviewKeyUpEvent))
             Dispatcher.BeginInvoke(new Action(Mouse.UpdateCursor), System.Windows.Threading.DispatcherPriority.Input);
-        if (e.RoutedEvent != Keyboard.PreviewKeyDownEvent || e.Handled || Keyboard.Modifiers != ModifierKeys.None)
+        if (e.RoutedEvent != Keyboard.PreviewKeyDownEvent || e.Handled)
             return;
         if (!IsActive && !Application.Current.Windows.OfType<AvalonDock.Controls.LayoutFloatingWindowControl>().Any(host => host.IsActive))
             return;
         if (Keyboard.FocusedElement is TextBoxBase or PasswordBox ||
             Menus.Items.OfType<MenuItem>().Any(menu => menu.IsSubmenuOpen)) return;
+        var modifiers = Keyboard.Modifiers;
+        if ((e.Key == Key.A && modifiers == ModifierKeys.Control) ||
+            (e.Key == Key.I && modifiers == (ModifierKeys.Control | ModifierKeys.Shift)))
+        {
+            OnKey(this, e);
+            return;
+        }
+        if (modifiers != ModifierKeys.None) return;
         string? shortcut = e.Key switch
         {
             Key.V => "Move", Key.B => "Brush", Key.E => "Eraser", Key.M => "Selection", Key.L => "Lasso",
@@ -1079,6 +1088,8 @@ public partial class MainWindow
             Key.E when shift => ExportPng, Key.E => MergeDown, Key.W => () => CloseSession(active),
             Key.Z => () => Run("history.undo", 0), Key.Y => () => Run("history.redo", 0),
             Key.D => () => Run<Area?>("document.selection", null),
+            Key.A when !shift => SelectAllPixels,
+            Key.I when shift => InvertSelection,
             Key.G when !shift => Group,
             Key.OemSemicolon when !shift => ToggleGuides,
             Key.R when !shift => ToggleRulers,

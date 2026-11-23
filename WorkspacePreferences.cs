@@ -11,6 +11,8 @@ public partial class MainWindow
 {
     private bool blockRenderInput;
 
+    private double? baseMenuFontSize;
+
     private void UpdateGpuPreference()
     {
         if (!preferences.ExperimentalGpu)
@@ -27,7 +29,7 @@ public partial class MainWindow
     {
         App.ControlScale = double.IsFinite(preferences.UiScale) ? Math.Clamp(preferences.UiScale, .75, 1.25) : 1;
         preferences.UiScale = App.ControlScale;
-        App.ScaleControls(Menus);
+        Menus.FontSize = (baseMenuFontSize ??= Menus.FontSize) * App.ControlScale;
         App.ScaleControls(ToolOptions);
         App.ScaleControls(WorkspaceStatus);
         foreach (var control in panelContent.Values) App.ScaleControls(control);

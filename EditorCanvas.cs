@@ -357,7 +357,8 @@ internal sealed class EditorCanvas : FrameworkElement
                 path.BeginFigure(new Point(x, y), false, false);
                 path.LineTo(new Point(rx, ry), true, false);
             }
-            bool Hit(int x, int y) => mask.Contains(x + bounds.X, y + bounds.Y);
+            int threshold = mask.Soft && mask.Bits.Any(amount => amount >= 128) ? 128 : 1;
+            bool Hit(int x, int y) => mask.Amount(x + bounds.X, y + bounds.Y) >= threshold;
             for (int y = 0; y <= bounds.Height; y++)
             {
                 int start = -1;

@@ -122,6 +122,13 @@ public static class ContentAwareFill
             }
             if (!changed) break;
         }
+        if (document.SelectionMask is { Soft: true })
+            for (int y = 0; y < target.Height; y++)
+            for (int x = 0; x < target.Width; x++)
+            {
+                int alpha = (y * target.Width + x) * 4 + 3;
+                reconstruction[alpha] = (byte)((reconstruction[alpha] * document.SelectionAmount(target.X + x, target.Y + y) + 127) / 255);
+            }
         return new(new Pixels(target.Width, target.Height, reconstruction), target.X, target.Y);
 
         int ReadContext(int x, int y)
