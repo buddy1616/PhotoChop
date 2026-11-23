@@ -297,6 +297,10 @@ public sealed class CommandEngine(IRasterBackend backend)
         "layer.warp" => command.Read<WarpArgs>().Kind.ToString(),
         "layer.bucket" => "Paint Bucket",
         "selection.lasso" => "Lasso Selection",
+        "selection.all" => "Select All",
+        "selection.invert" => "Invert Selection",
+        "selection.smooth" => "Smooth Selection",
+        "selection.feather" => "Feather Selection",
         "mask.maskerStroke" => "Masker Stroke",
         "layer.flip" => command.Read<FlipArgs>().Horizontal ? "Flip horizontal" : "Flip vertical",
         "document.color" or "document.settings" => "Change Document Settings",
@@ -692,11 +696,23 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "document.selection":
                 var selection = command.Args.Deserialize<Area?>(Format.Json);
                 return doc with { Selection = selection is { } area ? Clip(area, doc) : null, SelectionMask = null };
+            case "selection.all":
+                return WithSelection(doc, (new Area(0, 0, doc.Width, doc.Height), null));
+            case "selection.invert":
+                var fullCanvas = new Area(0, 0, doc.Width, doc.Height);
+                if (doc.Selection is null) return WithSelection(doc, (fullCanvas, null));
+                if (doc.Selection == fullCanvas && doc.SelectionMask is null) return WithSelection(doc, (null, null));
+                return SelectCoverage(doc, (x, y) => (byte)(255 - doc.SelectionAmount(x, y)));
+            case "selection.smooth":
+            case "selection.feather":
+                int radius = command.Read<int>();
+                Range(radius, 1, 128);
+                return WithSelection(doc, PixelSelection.Filter(doc, radius, command.Name == "selection.feather"));
             case "selection.rectangle":
                 var rect = command.Read<RectangleSelection>();
                 if (rect.Mode == SelectionMode.Replace && !rect.Ellipse)
-                    return WithSelection(doc, (Clip(rect.Area, doc), null));
-                return SelectPixels(doc, (x, y) =>
+                    return WithSelection(doc, (rect.Area.Width > 0 && rect.Area.Height > 0 && Intersects(rect.Area, doc) ? Clip(rect.Area, doc) : null, null));
+                return SelectCoverage(doc, (x, y) =>
                 {
                     bool hit = Contains(rect.Area, x, y);
                     if (hit && rect.Ellipse)
@@ -705,24 +721,14 @@ public sealed class CommandEngine(IRasterBackend backend)
                         double dy = (y + .5 - rect.Area.Y) * 2 / rect.Area.Height - 1;
                         hit = dx * dx + dy * dy <= 1;
                     }
-                    return rect.Mode switch
-                    {
-                        SelectionMode.Add => hit || doc.Selected(x, y),
-                        SelectionMode.Subtract => !hit && doc.Selected(x, y),
-                        _ => hit
-                    };
+                    return PixelSelection.Combine(doc, rect.Mode, hit, x, y);
                 });
             case "selection.wand":
                 var wand = command.Read<WandArgs>();
                 Range(wand.Tolerance, 0, 255);
                 if (!Enum.IsDefined(wand.Mode)) throw new InvalidDataException("Invalid selection mode.");
                 var region = backend.BucketRegion(doc, Wanted(), new BucketArgs(wand.Point, "#FF000000", wand.Tolerance), false);
-                return SelectPixels(doc, (x, y) => wand.Mode switch
-                {
-                    SelectionMode.Add => doc.Selected(x, y) || region?.Contains(x, y) == true,
-                    SelectionMode.Subtract => doc.Selected(x, y) && region?.Contains(x, y) != true,
-                    _ => region?.Contains(x, y) == true
-                });
+                return SelectCoverage(doc, (x, y) => PixelSelection.Combine(doc, wand.Mode, region?.Contains(x, y) == true, x, y));
             case "selection.lasso":
                 var lasso = command.Read<LassoArgs>();
                 return Lasso(doc, lasso);
@@ -1080,7 +1086,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.fillPixels":
                 var fillInk = Format.Color(command.Read<string>());
                 var fillBounds = new Area(0, 0, doc.Width, doc.Height);
-                return Edit(layer => ApplyInk(doc, layer, fillBounds, (_, _) => true, fillInk));
+                return Edit(layer => ApplyInk(doc with { SelectionMask = null }, layer, fillBounds, (_, _) => true, fillInk));
             case "layer.crushSelection":
                 int block = (int)Range(command.Read<int>(), 1, 512);
                 return Edit(layer => doc.Selection is not null && layer.Kind == LayerKind.Raster
@@ -1099,7 +1105,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var outer = ResizeSelection(doc, outside);
                 var inner = ResizeSelection(doc, -inside);
                 return outer.Selection is { } outlineBounds
-                    ? Edit(layer => ApplyInk(doc, layer, outlineBounds, (x, y) => outer.Selected(x, y) && !inner.Selected(x, y), strokeInk))
+                    ? Edit(layer => ApplyInk(doc with { SelectionMask = null }, layer, outlineBounds, (x, y) => outer.Selected(x, y) && !inner.Selected(x, y), strokeInk))
                     : doc;
             case "layer.clearSelection":
             case "layer.moveSelection":
@@ -1315,7 +1321,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 layer.Placement.ScaleX * sx, layer.Placement.ScaleY * sy) }).ToArray()
         };
         if (doc.Selection is null) return result;
-        return SelectPixels(result, (px, py) => doc.Selected((int)Math.Floor((px - x + .5) / sx),
+        return SelectCoverage(result, (px, py) => doc.SelectionAmount((int)Math.Floor((px - x + .5) / sx),
             (int)Math.Floor((py - y + .5) / sy)));
     }
 
@@ -1386,11 +1392,11 @@ public sealed class CommandEngine(IRasterBackend backend)
             ? doc with { Layers = Update(doc.Layers, layer.Id, item => item with { PixelShifts = [.. item.PixelShifts, patch] }) }
             : doc;
         var inverse = transform.Inverse();
-        return SelectPixels(changed, (x, y) =>
+        return SelectCoverage(changed, (x, y) =>
         {
             var previous = inverse.Map(x + .5, y + .5);
-            return double.IsFinite(previous.X) && double.IsFinite(previous.Y) &&
-                doc.Selected((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y));
+            return double.IsFinite(previous.X) && double.IsFinite(previous.Y)
+                ? doc.SelectionAmount((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y)) : (byte)0;
         });
     }
 
@@ -1403,7 +1409,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         var crossings = new List<double>();
         int row = -1, edge = 0;
         bool inside = false;
-        return SelectPixels(doc, (x, y) =>
+        return SelectCoverage(doc, (x, y) =>
         {
             if (row != y)
             {
@@ -1418,12 +1424,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 crossings.Sort();
             }
             while (edge < crossings.Count && x + .5 >= crossings[edge]) { inside = !inside; edge++; }
-            return args.Mode switch
-            {
-                SelectionMode.Add => inside || doc.Selected(x, y),
-                SelectionMode.Subtract => !inside && doc.Selected(x, y),
-                _ => inside
-            };
+            return PixelSelection.Combine(doc, args.Mode, inside, x, y);
         });
     }
 
@@ -1481,10 +1482,13 @@ public sealed class CommandEngine(IRasterBackend backend)
     private static Document SelectPixels(Document doc, Func<int, int, bool> test) =>
         WithSelection(doc, PixelSelection.Create(doc.Width, doc.Height, test));
 
+    private static Document SelectCoverage(Document doc, Func<int, int, byte> sample) =>
+        WithSelection(doc, PixelSelection.CreateCoverage(new Area(0, 0, doc.Width, doc.Height), sample));
+
     private static Document TranslateSelection(Document doc, int dx, int dy)
     {
         if (doc.Selection is not { } selection || (dx == 0 && dy == 0)) return doc;
-        if (doc.SelectionMask is not null) return SelectPixels(doc, (x, y) => doc.Selected(x - dx, y - dy));
+        if (doc.SelectionMask is not null) return SelectCoverage(doc, (x, y) => doc.SelectionAmount(x - dx, y - dy));
         var shifted = selection with { X = selection.X + dx, Y = selection.Y + dy };
         return WithSelection(doc, (Intersects(shifted, doc) ? Clip(shifted, doc) : null, null));
     }

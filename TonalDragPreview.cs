@@ -56,8 +56,10 @@ internal sealed class TonalDragPreview
                 if (coverage[index] == 255) continue;
                 double dx = x + .5 - center.X, dy = y + .5 - center.Y;
                 double distance = dx * dx + dy * dy;
-                if (distance >= radius * radius || document.Selection is not null && !document.Selected(x, y)) continue;
-                int amount = (int)Math.Round(255 * Math.Min(1, (radius - Math.Sqrt(distance)) / feather));
+                if (distance >= radius * radius) continue;
+                double selection = document.Selection is null ? 1 : document.SelectionAmount(x, y) / 255d;
+                if (selection == 0) continue;
+                int amount = (int)Math.Round(255 * selection * Math.Min(1, (radius - Math.Sqrt(distance)) / feather));
                 if (amount <= coverage[index]) continue;
                 var local = inverse.MapPoint(x + .5f, y + .5f);
                 int rx = (int)Math.Floor(local.X) - raster.X, ry = (int)Math.Floor(local.Y) - raster.Y;

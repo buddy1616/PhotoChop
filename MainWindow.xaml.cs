@@ -479,12 +479,21 @@ public partial class MainWindow : Window
         Item(layer, "Merge selected layers…", Merge);
         Item(layer, "Position and Rotation…", EditTransform);
         var select = Menu("Select");
+        var selectAll = Item(select, "Select All", SelectAllPixels, "Ctrl+A");
+        var invert = Item(select, "Invert Selection", InvertSelection, "Ctrl+Shift+I");
         Item(select, "Rectangular selection", () => SetTool("Selection"), "M");
         Item(select, "Convert Selection to Paths", ConvertSelectionToPaths);
         var modify = new MenuItem { Header = "Modify" };
         select.Items.Add(modify);
         Item(modify, "Expand…", () => ModifySelection(expand: true));
         Item(modify, "Contract…", () => ModifySelection(expand: false));
+        Item(modify, "Smooth…", () => FilterSelection(feather: false));
+        Item(modify, "Feather…", () => FilterSelection(feather: true));
+        select.SubmenuOpened += (_, _) =>
+        {
+            selectAll.IsEnabled = invert.IsEnabled = active?.Engine.Current is not null;
+            modify.IsEnabled = active?.Engine.Current?.Selection is not null;
+        };
         Item(select, "Color Range…", SelectColorRange);
         Item(select, "Deselect", () => Run<Area?>("document.selection", null), "Ctrl+D");
 

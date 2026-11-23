@@ -93,11 +93,12 @@ internal sealed class BrushDragPreview(EditorCanvas view, Document document, Str
             {
                 int i = ((y - ty) * TileSize + x - tx) * 4;
                 if (tile is not null && tile.Bgra[i + 3] >= peak) continue;
-                if (document.Selection is not null && !document.Selected(x, y)) continue;
+                double selection = document.Selection is null ? 1 : document.SelectionAmount(x, y) / 255d;
+                if (selection == 0) continue;
                 double dx = x + .5 - center.X, dy = y + .5 - center.Y;
                 double squared = dx * dx + dy * dy;
                 if (squared > radius * radius) continue;
-                byte alpha = (byte)Math.Round(maxAlpha * (stroke.Pencil ? 1 : Math.Min(1, (radius - Math.Sqrt(squared)) / feather)));
+                byte alpha = (byte)Math.Round(maxAlpha * selection * (stroke.Pencil ? 1 : Math.Min(1, (radius - Math.Sqrt(squared)) / feather)));
                 if (alpha == 0 || tile is not null && alpha <= tile.Bgra[i + 3]) continue;
                 if (tile is null)
                 {

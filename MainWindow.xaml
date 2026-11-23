@@ -55,7 +55,8 @@
         </DataTemplate>
     </Window.Resources>
     <DockPanel>
-        <Menu x:Name="Menus" DockPanel.Dock="Top" />
+        <Menu x:Name="Menus" DockPanel.Dock="Top" UseLayoutRounding="True" SnapsToDevicePixels="True"
+              TextOptions.TextFormattingMode="Display" />
         <StatusBar x:Name="WorkspaceStatus" DockPanel.Dock="Bottom" Background="#242730">
             <StatusBarItem x:Name="RenderStatus" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal">

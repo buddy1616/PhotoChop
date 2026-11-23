@@ -1140,13 +1140,19 @@ public sealed partial class SkiaRenderer : IRasterBackend
     public RasterEdit PaintArea(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, uint color) =>
         PaintArea(doc, layer, bounds, contains, (_, _) => PixelValue.FromArgb(color));
 
-    private RasterEdit PaintArea(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, Func<float, float, PixelValue> sample)
+    private RasterEdit PaintArea(Document doc, Layer layer, Area bounds, Func<int, int, bool> contains, Func<float, float, PixelValue> sample, bool erase = false)
     {
         var raster = ResolveRaster(layer) ?? new RasterEdit(new Pixels(layer.Width, layer.Height,
             new byte[layer.Width * layer.Height * 4]), layer.RasterX, layer.RasterY);
         var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
         if (!world.TryInvert(out var inverse)) throw new InvalidDataException("Layer transform cannot be inverted.");
-        var area = EnclosingPixels(inverse.MapRect(SKRect.Create(bounds.X, bounds.Y, bounds.Width, bounds.Height)));
+        var localBounds = inverse.MapRect(SKRect.Create(bounds.X, bounds.Y, bounds.Width, bounds.Height));
+        if (erase)
+        {
+            localBounds.Intersect(SKRect.Create(raster.X, raster.Y, raster.Pixels.Width, raster.Pixels.Height));
+            if (localBounds.IsEmpty) return raster;
+        }
+        var area = EnclosingPixels(localBounds);
         var patch = new PixelBuffer(area.Width, area.Height, doc.Color);
         bool changed = false;
         for (int y = 0; y < area.Height; y++)
@@ -1160,10 +1166,21 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var point = world.MapPoint(lx + .5f, ly + .5f);
             int px = (int)Math.Floor(point.X), py = (int)Math.Floor(point.Y);
             if (px < bounds.X || py < bounds.Y || px >= bounds.X + bounds.Width || py >= bounds.Y + bounds.Height || !contains(px, py)) continue;
-            var color = sample(point.X, point.Y);
-            if (color.A == 0) continue;
+            double amount = doc.SelectionMask is { Soft: true } ? doc.SelectionAmount(px, py) / 255d : 1;
+            if (erase)
+            {
+                var current = patch.Get(dest);
+                if (current.A == 0 || amount == 0) continue;
+                patch.CopyWithAlpha(patch.Finish(), dest, dest, current.A * (1 - amount));
+            }
+            else
+            {
+                var color = sample(point.X, point.Y);
+                color = color with { A = color.A * amount };
+                if (color.A == 0) continue;
+                patch.Set(dest, color.Over(patch.Get(dest)));
+            }
             changed = true;
-            patch.Set(dest, color.Over(patch.Get(dest)));
         }
         var pixels = patch.Finish();
         if (!changed) return raster;
@@ -1352,7 +1369,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
         for (int x = 0; x < box.Width; x++)
         {
             int offset = y * box.Width + x;
-            if (doc.Selected(x + box.X, y + box.Y)) selection.Copy(pixels, offset, offset);
+            byte amount = doc.SelectionAmount(x + box.X, y + box.Y);
+            if (amount == 255) selection.Copy(pixels, offset, offset);
+            else if (amount > 0) selection.CopyWithAlpha(pixels, offset, offset, PixelBuffer.Alpha(pixels, offset) * amount / 255d);
         }
         return new(selection.Finish(), box.X, box.Y);
     }
@@ -1380,15 +1399,17 @@ public sealed partial class SkiaRenderer : IRasterBackend
         for (int x = 0; x < raster.Pixels.Width; x++)
         {
             var point = world.MapPoint(x + raster.X + .5f, y + raster.Y + .5f);
-            if (!doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y))) continue;
+            byte weight = doc.SelectionAmount((int)Math.Floor(point.X), (int)Math.Floor(point.Y));
+            if (weight == 0) continue;
             int fx = area.X + ((int)point.X - area.X) / size * size;
             int fy = area.Y + ((int)point.Y - area.Y) / size * size;
             var src = inverse.MapPoint(fx + .5f, fy + .5f);
             int sx = (int)Math.Floor(src.X) - raster.X, sy = (int)Math.Floor(src.Y) - raster.Y;
             int destination = y * before.Width + x;
-            if (sx >= 0 && sy >= 0 && sx < before.Width && sy < before.Height)
-                data.Copy(before, sy * before.Width + sx, destination);
-            else data.Set(destination, default);
+            bool inside = sx >= 0 && sy >= 0 && sx < before.Width && sy < before.Height;
+            int sample = sy * before.Width + sx;
+            if (inside && weight == 255) data.Copy(before, sample, destination);
+            else data.Set(destination, PixelValue.Lerp(data.Get(destination), inside ? PixelBuffer.Get(before, sample) : default, weight / 255d));
         }
         return editable with { Pixels = data.Finish(), RasterX = raster.X, RasterY = raster.Y, PixelShifts = [] };
     }
@@ -1433,20 +1454,33 @@ public sealed partial class SkiaRenderer : IRasterBackend
             int index = y * area.Width + x;
             var point = world.MapPoint(lx + .5f, ly + .5f);
             int original = SourceIndex(lx, ly);
-            bool cut = doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y));
-            if (!cut && original >= 0) buffer.Copy(source, original, index);
-            if (cut && original >= 0 && PixelBuffer.Alpha(source, original) != 0) changed = true;
+            byte cut = doc.SelectionAmount((int)Math.Floor(point.X), (int)Math.Floor(point.Y));
+            if (original >= 0)
+            {
+                if (cut == 0) buffer.Copy(source, original, index);
+                else
+                {
+                    double alpha = PixelBuffer.Alpha(source, original);
+                    if (cut < 255) buffer.CopyWithAlpha(source, original, index, alpha * (255 - cut) / 255d);
+                    if (alpha != 0) changed = true;
+                }
+            }
 
             var from = reverse.Map(point.X, point.Y);
             if (!double.IsFinite(from.X) || !double.IsFinite(from.Y)) continue;
-            if (!doc.Selected((int)Math.Floor(from.X), (int)Math.Floor(from.Y))) continue;
+            byte picked = doc.SelectionAmount((int)Math.Floor(from.X), (int)Math.Floor(from.Y));
+            if (picked == 0) continue;
             var previous = inverse.MapPoint((float)from.X, (float)from.Y);
             int sample = SourceIndex((int)Math.Floor(previous.X), (int)Math.Floor(previous.Y));
             if (sample < 0 || PixelBuffer.Alpha(source, sample) == 0) continue;
             changed = true;
             var backdrop = buffer.Get(index);
-            if (backdrop.A == 0) buffer.Copy(source, sample, index);
-            else buffer.Set(index, PixelBuffer.Get(source, sample).Over(backdrop));
+            if (picked == 255 && backdrop.A == 0 || sample == original && picked == cut) buffer.Copy(source, sample, index);
+            else
+            {
+                var foreground = PixelBuffer.Get(source, sample);
+                buffer.Set(index, (foreground with { A = foreground.A * picked / 255d }).Over(backdrop));
+            }
         }
         if (!changed) return null;
         var edit = new PixelShift(area, [], 0, 0, Patch: buffer.Finish());
@@ -1455,6 +1489,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
     public RasterEdit ClearSelection(Document doc, Layer layer)
     {
+        if (doc.SelectionMask is { Soft: true } && doc.Selection is { } selection)
+            return PaintArea(doc, layer, selection, (_, _) => true, (_, _) => default, erase: true);
         var raster = ResolveRaster(layer)!;
         var source = raster.Pixels;
         var world = WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
@@ -1564,12 +1600,14 @@ public sealed partial class SkiaRenderer : IRasterBackend
                         world.SkewY * cx + world.ScaleY * cy + world.TransY)
                     : world.MapPoint(cx, cy);
                 if (p.X < selection.X || p.X >= selection.X + selection.Width ||
-                    p.Y < selection.Y || p.Y >= selection.Y + selection.Height || (doc.SelectionMask is not null &&
-                    !doc.Selected((int)Math.Floor(p.X), (int)Math.Floor(p.Y)))) continue;
+                    p.Y < selection.Y || p.Y >= selection.Y + selection.Height) continue;
+                double selected = doc.SelectionMask is { } mask ? mask.Amount((int)Math.Floor(p.X), (int)Math.Floor(p.Y)) / 255d : 1;
+                if (selected == 0) continue;
                 double dx = p.X - point.X, dy = p.Y - point.Y;
                 double squared = dx * dx + dy * dy;
                 if (squared > radiusSquared) continue;
                 double amount = stroke.Pencil || squared <= solidSquared ? 1 : (radius - Math.Sqrt(squared)) / feather;
+                amount *= selected;
                 coverage[i] = Math.Max(coverage[i], eightBit ? Byte(amount) : (float)amount);
             }
         }

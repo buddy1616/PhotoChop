@@ -140,8 +140,10 @@ public sealed record Document(string Id, int Width, int Height)
     [JsonIgnore] public Area? Selection { get; init; }
 
     [JsonIgnore] public PixelSelection? SelectionMask { get; init; }
-    public bool Selected(int x, int y) => SelectionMask?.Contains(x, y) ??
-        (Selection is { } area && x >= area.X && y >= area.Y && x < area.X + area.Width && y < area.Y + area.Height);
+    public bool Selected(int x, int y) => SelectionAmount(x, y) != 0;
+    public byte SelectionAmount(int x, int y) => SelectionMask?.Amount(x, y) ??
+        (Selection is { } area && x >= area.X && y >= area.Y && x < area.X + area.Width && y < area.Y + area.Height
+            ? byte.MaxValue : (byte)0);
 
     public Document ReplaceLayer(string id, Layer replacement)
     {
