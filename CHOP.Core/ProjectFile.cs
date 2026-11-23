@@ -9,7 +9,7 @@ public static class ProjectFile
     private const int MaxProfileBytes = 16 * 1024 * 1024;
     private const string ProfilePath = "color/source.icc";
     private const int MaxManifestBytes = 8_000_000;
-    private const int MaxRasterBytes = 512 * 1024 * 1024;
+    private const long MaxRasterBytes = 4L * 1024 * 1024 * 1024;
     private sealed record Manifest(int Version, Document Document, Dictionary<string, Resource> Resources, Dictionary<string, Resource>? Masks = null,
         Dictionary<string, ShiftResource[]>? Shifts = null, Dictionary<string, ColorResource>? LayerChannels = null,
         ExtraChannelResource[]? Channels = null, bool HasIccProfile = false);

@@ -73,7 +73,7 @@ public partial class MainWindow
         var actions = new WrapPanel();
         actions.Children.Add(Button("Re-Bake", () => RebakeChopLayer(layer, changeSource: false)));
         actions.Children.Add(Button("Change Source…", () => RebakeChopLayer(layer, changeSource: true)));
-        actions.Children.Add(Button("Open Source", () => { if (layer.ChopSource is { } path) { effectDialog?.Close(); OpenPath(path); } }));
+        actions.Children.Add(Button("Open Source", () => { if (layer.ChopSource is { } path) { effectDialog?.Close(); _ = OpenPath(path); } }));
         panel.Children.Add(actions);
     }
 }

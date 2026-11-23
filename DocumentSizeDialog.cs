@@ -97,8 +97,8 @@ internal static class DocumentSizeDialog
             int Pixels((TextBox Value, ComboBox Unit) field, int original)
             {
                 double pixels = double.Parse(field.Value.Text) * Scale(field.Unit.SelectedIndex, original);
-                if (!double.IsFinite(pixels) || pixels < .5 || pixels >= 16384.5)
-                    throw new InvalidDataException("Each dimension must be between 1 and 16,384 pixels.");
+                if (!double.IsFinite(pixels) || pixels < .5 || pixels >= Format.MaxDimension + .5)
+                    throw new InvalidDataException($"Each dimension must be between 1 and {Format.MaxDimension:N0} pixels.");
                 return (int)Math.Round(pixels, MidpointRounding.AwayFromZero);
             }
             int w = Pixels(width, current.Width), h = Pixels(height, current.Height);

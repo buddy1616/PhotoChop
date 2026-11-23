@@ -52,7 +52,7 @@ internal sealed class PsdReader(ReadOnlyMemory<byte> bytes)
 /// <summary>Decodes the image data compression shared by PSD composite and layer channels.</summary>
 internal static class PsdCompression
 {
-    private const long MaxChannelBytes = 512L * 1024 * 1024;
+    private const long MaxChannelBytes = 4L * 1024 * 1024 * 1024;
 
     public static int PlaneLength(int width, int height, int depth)
     {

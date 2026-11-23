@@ -58,6 +58,7 @@ public sealed partial class SkiaRenderer
         {
             if (!CanCompositeOnGpu(document)) return null;
             if (context.IsAbandoned) throw new InvalidOperationException("Skia lost the OpenGL context.");
+            if (Math.Max(document.Width, document.Height) > context.MaxRenderTargetSize) return null;
             var region = new Area(0, 0, document.Width, document.Height);
             var info = new SKImageInfo(region.Width, region.Height, SKColorType.Rgba8888, SKAlphaType.Premul);
             using var surface = SKSurface.Create(context, true, info);

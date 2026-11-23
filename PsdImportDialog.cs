@@ -12,7 +12,11 @@ public partial class MainWindow
         var picker = new OpenFileDialog { Filter = "Photoshop Document (*.psd)|*.psd", CheckFileExists = true };
         if (picker.ShowDialog(EditorOwner) != true) return;
 
-        string path = picker.FileName;
+        await ImportPsdPath(picker.FileName, flattened);
+    }
+
+    private async Task ImportPsdPath(string path, bool flattened = false)
+    {
         var session = NewSession();
         session.InitialTitle = Path.GetFileNameWithoutExtension(path);
         string id = Format.Id();

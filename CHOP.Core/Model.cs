@@ -163,10 +163,13 @@ public static class Format
         Converters = { new JsonStringEnumConverter() }
     };
 
+    public const int MaxDimension = 32768;
+    public const int MaxPixels = 200_000_000;
+
     public static void Dimensions(int width, int height)
     {
-        if (width < 1 || height < 1 || width > 16384 || height > 16384 || (long)width * height > 32_000_000)
-            throw new InvalidDataException("Dimensions must be positive, at most 16384 per side and 32 million pixels in total.");
+        if (width < 1 || height < 1 || width > MaxDimension || height > MaxDimension || (long)width * height > MaxPixels)
+            throw new InvalidDataException($"Dimensions must be positive, with at most {MaxDimension:N0} pixels per side and {MaxPixels:N0} pixels total.");
     }
 
     public static string Id() => Guid.NewGuid().ToString("N");

@@ -119,6 +119,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        HookFileDrops(this);
         PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
         PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
         System.Windows.Interop.ComponentDispatcher.ThreadFilterMessage += TextEditorKeyMessage;
@@ -580,10 +581,10 @@ public partial class MainWindow : Window
     private void OpenDocument()
     {
         var picker = new OpenFileDialog { Filter = "CHOP documents (*.chop)|*.chop" };
-        if (picker.ShowDialog(this) == true) OpenPath(picker.FileName);
+        if (picker.ShowDialog(this) == true) _ = OpenPath(picker.FileName);
     }
 
-    private async void OpenPath(string path)
+    private async Task OpenPath(string path)
     {
         var existing = sessions.FirstOrDefault(item => string.Equals(item.Engine.Path, path, StringComparison.OrdinalIgnoreCase));
         if (existing is not null) { SelectTab(existing); return; }
@@ -664,6 +665,12 @@ public partial class MainWindow : Window
             if (Window.GetWindow(session.View) != this) OnKey(session.View, e);
         };
         HookCanvas(session.View);
+        HookFileDrops(session.Viewport);
+        session.View.AllowDrop = true;
+        session.Viewport.Loaded += (_, _) =>
+        {
+            if (Window.GetWindow(session.Viewport) is { } host && !ReferenceEquals(host, this)) HookFileDrops(host);
+        };
         HookRulers(session);
         session.View.Cursor = ToolCursor(tool);
         pane.Children.Add(session.Tab);
@@ -749,29 +756,44 @@ public partial class MainWindow : Window
         });
     }
 
-    private void ImportImage()
+    private async void ImportImage()
     {
         var picker = new OpenFileDialog { Filter = "Images (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp" };
-        if (picker.ShowDialog(this) != true) return;
-        Guard(() =>
+        if (picker.ShowDialog(EditorOwner) == true) await ImportImagePath(picker.FileName, active);
+    }
+
+    private async Task ImportImagePath(string path, Session? destination)
+    {
+        try
         {
-            var input = new ImageImportArgs(Format.Id(), Path.GetFileNameWithoutExtension(picker.FileName),
-                Data: File.ReadAllBytes(picker.FileName));
-            if (active is null)
+            var input = new ImageImportArgs(Format.Id(), Path.GetFileNameWithoutExtension(path), Path: path);
+            if (destination is null)
             {
                 var session = NewSession();
-                session.Engine.Execute(Command.Of("document.importImage", input with { DocumentId = Format.Id() }));
+                await WhileLoading(() => session.Engine.Execute(Command.Of("document.importImage", input with { DocumentId = Format.Id() })));
                 session.ActiveId = input.Id;
                 AddSession(session);
             }
             else
             {
+                Activate(destination);
+                FinishTextEdit();
                 string? parent = DestinationGroup();
-                if (parent is not null) active.Collapsed.Remove(parent);
-                if (!Run("layer.importImage", input with { Parent = parent }, selectId: input.Id)) return;
+                StartWaiting();
+                try { await destination.Engine.ExecuteImageImportAsync(input with { Parent = parent }); }
+                finally { StopWaiting(); }
+                if (!sessions.Contains(destination)) return;
+                if (parent is not null) destination.Collapsed.Remove(parent);
+                destination.ActiveId = input.Id;
+                if (ReferenceEquals(active, destination)) Refresh();
+                else if (destination.Tab is { } tab) tab.Title = destination.Title;
             }
-            Say($"Imported {Path.GetFileName(picker.FileName)}");
-        });
+            Say($"Imported {Path.GetFileName(path)}");
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(EditorOwner, error.Message, "Could not import image", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void ExportPng() => ExportImage("PNG", ".png", "*.png", ImageExportFormat.Png);
@@ -824,7 +846,7 @@ public partial class MainWindow : Window
         if (recentMenu is null) return;
         recentMenu.Items.Clear();
         recentMenu.IsEnabled = preferences.Recent.Count != 0;
-        foreach (var path in preferences.Recent) Item(recentMenu, path, () => OpenPath(path));
+        foreach (var path in preferences.Recent) Item(recentMenu, path, () => _ = OpenPath(path));
     }
 
     private bool Run<T>(string action, T args, string? target = null, string? selectId = null, Action<Session>? beforeRefresh = null)

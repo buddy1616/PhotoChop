@@ -94,10 +94,12 @@ public sealed partial class SkiaRenderer : IRasterBackend
             (pngOnly || codec.EncodedFormat is not (SKEncodedImageFormat.Jpeg or SKEncodedImageFormat.Webp)))
             throw new InvalidDataException(pngOnly ? "Expected PNG data." : "Choose a PNG, JPEG, or WebP image.");
         Format.Dimensions(codec.Info.Width, codec.Info.Height);
-        using var bitmap = new SKBitmap(new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
-        var result = codec.GetPixels(bitmap.Info, bitmap.GetPixels());
-        if (result != SKCodecResult.Success) throw new InvalidDataException($"Image decode failed: {result}.");
-        return Read(bitmap);
+        return ReadIntoArray(codec.Info.Width, codec.Info.Height, (info, address) =>
+        {
+            var result = codec.GetPixels(info, address);
+            if (result != SKCodecResult.Success) throw new InvalidDataException($"Image decode failed: {result}.");
+            return true;
+        });
     }
 
     public byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null)
@@ -1681,12 +1683,23 @@ public sealed partial class SkiaRenderer : IRasterBackend
     private static byte Mix(byte old, byte color, double retained, double alpha, double output) =>
         (byte)Math.Round((old * retained + color * alpha) / output);
     private static byte Byte(double value) => (byte)Math.Round(Math.Clamp(value, 0, 1) * 255);
-    private static SKBitmap Surface(int width, int height, ColorSettings? precision = null) =>
-        new(width, height, precision is null ? SKColorType.Rgba8888 : SKColorType.RgbaF32, SKAlphaType.Premul);
+    private static SKBitmap Surface(int width, int height, ColorSettings? precision = null)
+    {
+        var bitmap = new SKBitmap();
+        var info = new SKImageInfo(width, height, precision is null ? SKColorType.Rgba8888 : SKColorType.RgbaF32, SKAlphaType.Premul);
+        if (bitmap.TryAllocPixels(info)) return bitmap;
+        bitmap.Dispose();
+        throw new InvalidDataException($"Could not allocate a {width:N0} × {height:N0} rendering surface.");
+    }
 
     private static SKBitmap Bitmap(Pixels pixels)
     {
-        var bitmap = new SKBitmap(pixels.Width, pixels.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+        var bitmap = new SKBitmap();
+        if (!bitmap.TryAllocPixels(new SKImageInfo(pixels.Width, pixels.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul)))
+        {
+            bitmap.Dispose();
+            throw new InvalidDataException($"Could not allocate a {pixels.Width:N0} × {pixels.Height:N0} raster.");
+        }
         Marshal.Copy(pixels.Rgba, 0, bitmap.GetPixels(), pixels.Rgba.Length);
         bitmap.NotifyPixelsChanged();
         return bitmap;

@@ -89,11 +89,24 @@ public sealed class CommandEngine(IRasterBackend backend)
     {
         if (command.Name is not ("layer.paintStroke" or "mask.paintStroke"))
             throw new ArgumentException("Expected a raster or mask stroke.", nameof(command));
+        await ExecuteEditAsync(command);
+    }
+
+    public Task ExecuteImageImportAsync(ImageImportArgs args) => ExecuteEditAsync(Command.Of("layer.importImage", args));
+
+    private async Task ExecuteEditAsync(Command command)
+    {
         var snapshot = Current ?? throw new InvalidOperationException("Open a document first.");
         try
         {
-            var result = await Task.Run(() => Apply(snapshot, command));
-            if (!ReferenceEquals(snapshot, Current)) throw new InvalidOperationException("The document changed before the stroke could be committed.");
+            var edit = await Task.Run(() =>
+            {
+                var captured = CaptureFileInputs(command);
+                return (Command: captured, Result: Apply(snapshot, captured));
+            });
+            command = edit.Command;
+            if (!ReferenceEquals(snapshot, Current)) throw new InvalidOperationException("The document changed before the edit could be committed.");
+            var result = edit.Result;
             CommitEdit(snapshot, result, command);
         }
         catch (Exception error)
@@ -123,6 +136,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (snapshot.Png is null && snapshot.Native is null)
                     return Command.Of(command.Name, CaptureChopSnapshot(snapshot.SourcePath), command.Target);
                 break;
+            case "document.importImage":
             case "layer.importImage":
                 var image = command.Read<ImageImportArgs>();
                 if (image is { Path: { } path, Data: null })

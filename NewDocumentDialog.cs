@@ -52,8 +52,8 @@ internal static class NewDocumentDialog
             {
                 double size = double.Parse(dimension.Field.Text);
                 double pixels = dimension.Unit.SelectedIndex switch { 1 => size * ppi, 2 => size * ppi / 25.4, _ => size };
-                if (!double.IsFinite(pixels) || pixels <= 0 || pixels > 16384.49)
-                    throw new InvalidDataException("Each dimension must be between 1 and 16,384 pixels.");
+                if (!double.IsFinite(pixels) || pixels < .5 || pixels >= Format.MaxDimension + .5)
+                    throw new InvalidDataException($"Each dimension must be between 1 and {Format.MaxDimension:N0} pixels.");
                 return (int)Math.Round(pixels, MidpointRounding.AwayFromZero);
             }
             int w = Pixels(width), h = Pixels(height);
