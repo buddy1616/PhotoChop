@@ -547,6 +547,25 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return right < left ? null : new Area(left, top, right - left + 1, bottom - top + 1);
     }
 
+    public static SKMatrix? TextMoveMatrix(Layer[] layers, string id) =>
+        FindMatrix(layers, id, SKMatrix.Identity, SKMatrix.Identity, includeTargetEffects: false);
+
+    public (RasterEdit Raster, SKMatrix World)? TextMoveRaster(Document doc, Layer layer)
+    {
+        if (layer.Kind != LayerKind.Text || !layer.Visible || layer.Opacity == 0 ||
+            TextMoveMatrix(doc.Layers, layer.Id) is not { Persp0: 0, Persp1: 0, Persp2: 1 } world)
+            return null;
+        // Keep dragging independent of the document's masks and effect stacks.
+        var raster = ResolveRaster(layer) ?? new RasterEdit(TextRaster(layer), layer.RasterX, layer.RasterY);
+        return (raster, world);
+    }
+
+    public static bool IsTopText(Layer[] layers, string id)
+    {
+        var top = layers.LastOrDefault(layer => layer.Visible && layer.Opacity > 0);
+        return top is not null && (top.Id == id || IsPassThroughGroup(top) && IsTopText(top.Children, id));
+    }
+
     public bool HitsText(Document doc, Layer layer, PointD point)
     {
         if (layer.Kind != LayerKind.Text || !layer.Visible || layer.Opacity == 0 ||

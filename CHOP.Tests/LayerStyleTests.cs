@@ -7,6 +7,25 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void TextDragUsesTheSameRasterAtTheCommandedPlacement()
+    {
+        var renderer = new SkiaRenderer();
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("test", 128, 128)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("text", "Text", LayerKind.Text,
+            Transform: new(10, 20, 1.25, .75, 15), Typography: RichText.FromPlain("Test", new()))));
+        var doc = engine.Current!;
+        var layer = doc.AllLayers().Single(item => item.Id == "text");
+        var start = renderer.TextMoveRaster(doc, layer)!.Value;
+        engine.Execute(Command.Of("layer.move", new PointD(14, -5), layer.Id));
+        var result = engine.Current!;
+        var end = renderer.TextMoveRaster(result, result.AllLayers().Single(item => item.Id == "text"))!.Value;
+        Assert.Same(start.Raster.Pixels, end.Raster.Pixels);
+        Assert.Equal(14, end.World.TransX - start.World.TransX, 4);
+        Assert.Equal(-5, end.World.TransY - start.World.TransY, 4);
+    }
+
+    [Fact]
     public void RichTextStylesAndWarpPersistThroughCommandsAndRender()
     {
         var renderer = new SkiaRenderer();

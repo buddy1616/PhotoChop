@@ -31,6 +31,19 @@ internal sealed class EditorCanvas : FrameworkElement
     private static readonly Pen selectionLight = Frozen(new Pen(Brushes.White, 3));
     private static readonly Pen selectionDark = Frozen(new Pen(Brushes.Black, 2) { DashStyle = DashStyles.Dash });
     public BitmapSource? Frame { get; set; }
+    internal sealed class TextOverlay(string layerId, BitmapSource image, Matrix placement, double opacity)
+    {
+        public string LayerId { get; } = layerId;
+        public BitmapSource Image { get; } = image;
+        public Matrix Placement { get; } = placement;
+        public double Opacity { get; } = opacity;
+        public BitmapSource? Underlay { get; set; }
+        public Vector Delta { get; set; }
+        public bool ShowAtOrigin { get; init; }
+        public bool LoadingUnderlay { get; set; }
+    }
+
+    public TextOverlay? MovingText { get; set; }
     public BitmapSource? TonalFrame { get; set; }
     public double Zoom { get; set; } = 1;
     public Point Offset { get; set; }
@@ -91,7 +104,19 @@ internal sealed class EditorCanvas : FrameworkElement
         var imageArea = new Rect(Offset.X, Offset.Y, ImageWidth * Zoom, ImageHeight * Zoom);
         dc.DrawRectangle(checker, border, imageArea);
         dc.PushClip(new RectangleGeometry(imageArea));
-        if ((TonalFrame ?? Frame) is { } frame) dc.DrawImage(frame, imageArea);
+        if ((TonalFrame ?? MovingText?.Underlay ?? Frame) is { } frame) dc.DrawImage(frame, imageArea);
+        if (TonalFrame is null && MovingText is { } moving && (moving.ShowAtOrigin || moving.Underlay is not null || moving.Delta.LengthSquared > 0))
+        {
+            var matrix = moving.Placement;
+            matrix.Translate(moving.Delta.X, moving.Delta.Y);
+            matrix.Scale(Zoom, Zoom);
+            matrix.Translate(Offset.X, Offset.Y);
+            dc.PushTransform(new MatrixTransform(matrix));
+            dc.PushOpacity(moving.Underlay is null && !moving.ShowAtOrigin ? moving.Opacity * .65 : moving.Opacity);
+            dc.DrawImage(moving.Image, new Rect(0, 0, moving.Image.PixelWidth, moving.Image.PixelHeight));
+            dc.Pop();
+            dc.Pop();
+        }
         if (ShowPixelGrid && Zoom >= 8)
         {
             var visible = Rect.Intersect(imageArea, new Rect(RenderSize));

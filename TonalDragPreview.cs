@@ -9,7 +9,8 @@ namespace PhotoChop;
 internal sealed class TonalDragPreview
 {
     private readonly Document document;
-    private readonly Pixels source;
+    private readonly byte[] baseline;
+    private readonly int width, height;
     private readonly RasterEdit raster;
     private readonly Layer layer;
     private readonly SKMatrix inverse;
@@ -21,35 +22,37 @@ internal sealed class TonalDragPreview
     private double remaining;
     public WriteableBitmap Bitmap { get; }
 
-    public TonalDragPreview(Document document, Pixels source, BitmapSource frame, Layer layer, RasterEdit raster, SKMatrix inverse, StrokeArgs stroke)
+    public TonalDragPreview(Document document, BitmapSource frame, Layer layer, RasterEdit raster, SKMatrix inverse, StrokeArgs stroke)
     {
         this.document = document;
-        this.source = source;
+        width = frame.PixelWidth;
+        height = frame.PixelHeight;
         this.raster = raster;
         this.layer = layer;
         this.inverse = inverse;
         this.stroke = stroke;
         remaining = Math.Max(.5, stroke.Size / 6);
         Bitmap = new WriteableBitmap(frame);
-        bgra = GC.AllocateUninitializedArray<byte>(source.Rgba.Length);
-        frame.CopyPixels(bgra, source.Width * 4, 0);
-        coverage = new byte[source.Width * source.Height];
+        baseline = GC.AllocateUninitializedArray<byte>(checked(width * height * 4));
+        frame.CopyPixels(baseline, width * 4, 0);
+        bgra = (byte[])baseline.Clone();
+        coverage = new byte[width * height];
     }
 
     public void Add(PointD point, bool finish = false)
     {
-        int left = source.Width, top = source.Height, right = -1, bottom = -1;
+        int left = width, top = height, right = -1, bottom = -1;
         double radius = stroke.Size / 2, feather = Math.Max(.5, radius * (1 - stroke.Hardness));
         void Stamp(PointD center)
         {
-            int x0 = (int)Math.Clamp(Math.Floor(center.X - radius), 0, source.Width);
-            int y0 = (int)Math.Clamp(Math.Floor(center.Y - radius), 0, source.Height);
-            int x1 = (int)Math.Clamp(Math.Ceiling(center.X + radius), 0, source.Width);
-            int y1 = (int)Math.Clamp(Math.Ceiling(center.Y + radius), 0, source.Height);
+            int x0 = (int)Math.Clamp(Math.Floor(center.X - radius), 0, width);
+            int y0 = (int)Math.Clamp(Math.Floor(center.Y - radius), 0, height);
+            int x1 = (int)Math.Clamp(Math.Ceiling(center.X + radius), 0, width);
+            int y1 = (int)Math.Clamp(Math.Ceiling(center.Y + radius), 0, height);
             for (int y = y0; y < y1; y++)
             for (int x = x0; x < x1; x++)
             {
-                int index = y * source.Width + x;
+                int index = y * width + x;
                 if (coverage[index] == 255) continue;
                 double dx = x + .5 - center.X, dy = y + .5 - center.Y;
                 double distance = dx * dx + dy * dy;
@@ -67,9 +70,9 @@ internal sealed class TonalDragPreview
                 int previewAmount = (int)Math.Round(visible * amount);
                 var curve = curves[previewAmount] ??= MakeCurve(previewAmount);
                 int pixel = index * 4;
-                bgra[pixel] = curve[source.Rgba[pixel + 2]];
-                bgra[pixel + 1] = curve[source.Rgba[pixel + 1]];
-                bgra[pixel + 2] = curve[source.Rgba[pixel]];
+                bgra[pixel] = curve[baseline[pixel]];
+                bgra[pixel + 1] = curve[baseline[pixel + 1]];
+                bgra[pixel + 2] = curve[baseline[pixel + 2]];
                 left = Math.Min(left, x); right = Math.Max(right, x);
                 top = Math.Min(top, y); bottom = Math.Max(bottom, y);
             }
@@ -90,7 +93,7 @@ internal sealed class TonalDragPreview
         if (right >= left)
         {
             var rect = new Int32Rect(left, top, right - left + 1, bottom - top + 1);
-            Bitmap.WritePixels(rect, bgra, source.Width * 4, left, top);
+            Bitmap.WritePixels(rect, bgra, width * 4, left, top);
         }
     }
 
