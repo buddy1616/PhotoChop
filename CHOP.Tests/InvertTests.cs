@@ -34,6 +34,32 @@ public sealed class InvertTests
     }
 
     [Fact]
+    public void WholeRasterInvertPreservesAlphaAndCanBeReversedExactly()
+    {
+        var renderer = new SkiaRenderer();
+        foreach (var settings in new[] { PixelBuffer.Rgba8, new ColorSettings(ChannelColorMode.Rgb, ChannelDepth.Bit16) })
+        {
+            var input = new PixelBuffer(37, 4, settings);
+            var random = new Random(19);
+            for (int i = 0; i < 37 * 4; i++)
+                input.Set(i, new(random.NextDouble(), random.NextDouble(), random.NextDouble(), random.NextDouble()));
+            var original = input.Finish();
+            var layer = new Layer("pixels", "Pixels", LayerKind.Raster) { Pixels = original };
+            var doc = new Document("invert", 37, 4) { Color = settings, Layers = [layer] };
+            var inverted = renderer.InvertPixels(doc, layer);
+            for (int i = 0; i < original.Rgba.Length; i++)
+            {
+                byte expected = i % 4 == 3 ? original.Rgba[i] : (byte)(255 - original.Rgba[i]);
+                Assert.Equal(expected, inverted.Pixels!.Rgba[i]);
+            }
+            var restored = renderer.InvertPixels(doc with { Layers = [inverted] }, inverted).Pixels!;
+            Assert.Equal(original.Rgba, restored.Rgba);
+            if (original.Native is { } native)
+                for (int c = 0; c < native.Planes.Length; c++) Assert.Equal(native.Planes[c], restored.Native!.Planes[c]);
+        }
+    }
+
+    [Fact]
     public void MaskInvertExtendsSelectedAreaAndKeepsOutsideDefaultUntilWholeMaskIsInverted()
     {
         var engine = new CommandEngine(new SkiaRenderer());

@@ -873,32 +873,74 @@ public sealed partial class SkiaRenderer : IRasterBackend
         int width = source.Width + padding * 2, height = source.Height + padding * 2;
         Format.Dimensions(width, height);
         var precision = WorkingPrecision(source);
-        using var input = RasterBitmap(source, precision);
-        using var output = Surface(width, height, precision);
-        using var canvas = new SKCanvas(output);
-        canvas.Clear(SKColors.Transparent);
-        using var filter = radius == 0 ? null : grow ? SKImageFilter.CreateDilate(radius, radius) : SKImageFilter.CreateErode(radius, radius);
-        using var paint = new SKPaint { ImageFilter = filter };
-        canvas.DrawBitmap(input, padding, padding, paint);
-        canvas.Flush();
-        var rgba = Unpremultiply(output, precision);
-        double alpha = (ink >> 24) / 255d * opacity;
+        var color = PixelValue.FromArgb(ink);
+        double opacityScale = color.A * opacity;
         if (precision is not null)
         {
             var buffer = new PixelBuffer(width, height, precision);
-            var color = PixelValue.FromArgb(ink);
-            for (int i = 0; i < width * height; i++)
-                buffer.Set(i, color with { A = PixelBuffer.Alpha(rgba, i) * alpha });
+            WriteAlpha((index, value) => buffer.Set(index, color with { A = value * opacityScale }));
             return new(buffer.Finish(), frame.X - padding, frame.Y - padding);
         }
-        for (int i = 0; i < rgba.Rgba.Length; i += 4)
+
+        var rgba = GC.AllocateUninitializedArray<byte>(width * height * 4);
+        byte red = (byte)(ink >> 16), green = (byte)(ink >> 8), blue = (byte)ink;
+        WriteAlpha((index, value) =>
         {
-            rgba.Rgba[i] = (byte)(ink >> 16);
-            rgba.Rgba[i + 1] = (byte)(ink >> 8);
-            rgba.Rgba[i + 2] = (byte)ink;
-            rgba.Rgba[i + 3] = (byte)Math.Round(rgba.Rgba[i + 3] * alpha);
+            int pixel = index * 4;
+            rgba[pixel] = red;
+            rgba[pixel + 1] = green;
+            rgba[pixel + 2] = blue;
+            // Keep the same byte rounding used by the original Skia alpha filter path.
+            rgba[pixel + 3] = (byte)Math.Round(Math.Round(value * 255) * opacityScale);
+        });
+        return new(new(width, height, rgba), frame.X - padding, frame.Y - padding);
+
+        float ReadAlpha(int x, int y)
+        {
+            int sx = x - padding, sy = y - padding;
+            return (uint)sx < (uint)source.Width && (uint)sy < (uint)source.Height
+                ? (float)PixelBuffer.Alpha(source, sy * source.Width + sx) : 0;
         }
-        return new(rgba, frame.X - padding, frame.Y - padding);
+
+        void WriteAlpha(Action<int, float> write)
+        {
+            if (radius == 0)
+            {
+                for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                    write(y * width + x, ReadAlpha(x, y));
+                return;
+            }
+
+            var horizontal = GC.AllocateUninitializedArray<float>(width * height);
+            int capacity = Math.Max(width, height);
+            var positions = new int[capacity];
+            var values = new float[capacity];
+            int row = 0, column = 0;
+            for (; row < height; row++)
+                FilterLine(width, x => ReadAlpha(x, row), (x, value) => horizontal[row * width + x] = value);
+            for (; column < width; column++)
+                FilterLine(height, y => horizontal[y * width + column], (y, value) => write(y * width + column, value));
+
+            // A monotonic queue yields the same square neighborhood extrema in linear time.
+            void FilterLine(int length, Func<int, float> read, Action<int, float> store)
+            {
+                int head = 0, tail = 0, next = 0;
+                for (int center = 0; center < length; center++)
+                {
+                    int last = Math.Min(length - 1, center + radius);
+                    while (next <= last)
+                    {
+                        float value = read(next);
+                        while (head < tail && (grow ? values[tail - 1] <= value : values[tail - 1] >= value)) tail--;
+                        positions[tail] = next++;
+                        values[tail++] = value;
+                    }
+                    while (head < tail && positions[head] < center - radius) head++;
+                    store(center, !grow && (center < radius || center + radius >= length) ? 0 : values[head]);
+                }
+            }
+        }
     }
 
     private static Frame StackFrames(Frame bottom, Frame top, Blend mode = Blend.Normal)
