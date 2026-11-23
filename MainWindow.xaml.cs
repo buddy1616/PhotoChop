@@ -121,6 +121,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
         PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
+        System.Windows.Interop.ComponentDispatcher.ThreadFilterMessage += TextEditorKeyMessage;
+        Closed += (_, _) => System.Windows.Interop.ComponentDispatcher.ThreadFilterMessage -= TextEditorKeyMessage;
         InputManager.Current.PreProcessInput += WorkspaceShortcuts;
         Closed += (_, _) => InputManager.Current.PreProcessInput -= WorkspaceShortcuts;
         Dock.Theme = new AvalonDock.Themes.Vs2013DarkTheme();
@@ -240,7 +242,7 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
-        if (committingTonalStroke) { e.Cancel = true; return; }
+        if (committingPaintStroke) { e.Cancel = true; return; }
         FinishTextEdit();
         foreach (var item in sessions.ToArray())
         {
@@ -337,7 +339,7 @@ public partial class MainWindow : Window
     private MenuItem? fileMenu;
     private void FileAccessKey(object sender, PreProcessInputEventArgs args)
     {
-        if (blockRenderInput || committingTonalStroke || fileMenu is not { } menu || args.StagingItem.Input is not KeyEventArgs e ||
+        if (blockRenderInput || committingPaintStroke || fileMenu is not { } menu || args.StagingItem.Input is not KeyEventArgs e ||
             e.RoutedEvent != Keyboard.PreviewKeyDownEvent || e.IsUp) return;
 
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
@@ -926,7 +928,7 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
-        bool modalRender = active.CommittedTonalFrame is null && canvas.MovingText is null && gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
+        bool modalRender = active.CommittedTonalFrame is null && canvas.PendingBrush.Count == 0 && canvas.MovingText is null && gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
         blockRenderInput = modalRender;
         if (modalRender)
         {
@@ -994,7 +996,8 @@ public partial class MainWindow : Window
                 session.View.Frame = frame.Frame;
                 if (!isPreview)
                 {
-                    if (!committingTonalStroke && paintGesture is null)
+                    if (!committingPaintStroke) session.View.PendingBrush.Clear();
+                    if (!committingPaintStroke && paintGesture is null)
                     {
                         session.KeepPaintFrame = false;
                         session.View.TonalFrame = null;
@@ -1012,6 +1015,7 @@ public partial class MainWindow : Window
         catch (Exception error)
         {
             canvas.PendingPaint.Clear();
+            canvas.PendingBrush.Clear();
             canvas.InvalidateVisual();
             Say(error.Message);
         }

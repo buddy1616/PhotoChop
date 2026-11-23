@@ -103,7 +103,7 @@ public partial class MainWindow
         ToolOptions.Children.Add(Button("Warp…", EditTextWarp));
         if (editingText is not null)
         {
-            ToolOptions.Children.Add(Button("Apply", () => FinishTextEdit(), "Apply text (Ctrl+Enter)"));
+            ToolOptions.Children.Add(Button("Apply", () => FinishTextEdit(), "Apply text (numpad Enter or Ctrl+Enter)"));
             ToolOptions.Children.Add(Button("Cancel", () => FinishTextEdit(cancel: true), "Cancel text edit (Esc)"));
         }
     }

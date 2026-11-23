@@ -19,7 +19,8 @@ public partial class MainWindow
     private Command? paintPreview;
     private object? paintGesture;
     private TonalDragPreview? tonalDrag;
-    private bool committingTonalStroke;
+    private BrushDragPreview? brushDrag;
+    private bool committingPaintStroke;
     private SKMatrix moveParentInverse = SKMatrix.Identity;
     private Point gestureStart;
     private Point panOrigin;
@@ -224,7 +225,13 @@ public partial class MainWindow
                     if (tool is "Brush" or "Burn" or "Dodge")
                     {
                         paintGesture = new object();
-                        PreviewStroke(raster.Id);
+                        if (tool == "Brush")
+                        {
+                            brushDrag = new(canvas, doc, new StrokeArgs([], brushSize, hardness, brushOpacity, foreground, false, Pencil: pencilMode));
+                            canvas.ActiveBrush = brushDrag;
+                            brushDrag.Add(stroke[^1]);
+                        }
+                        else PreviewStroke(raster.Id);
                     }
                     else canvas.Stroke = stroke;
                     canvas.StrokeColor = foreground;
@@ -287,7 +294,8 @@ public partial class MainWindow
                 if (stroke.Count < 99999 && (point - new Point(stroke[^1].X, stroke[^1].Y)).Length >= .25)
                 {
                     stroke.Add(new(point.X, point.Y));
-                    if (paintGesture is not null && active.ActiveId is { } paintId) PreviewStroke(paintId);
+                    if (brushDrag is { } brush) brush.Add(stroke[^1]);
+                    else if (paintGesture is not null && active.ActiveId is { } paintId) PreviewStroke(paintId);
                 }
                 canvas.InvalidateVisual();
                 break;
@@ -350,6 +358,12 @@ public partial class MainWindow
         bool renderedStroke = paintGesture is not null;
         if (renderedStroke && stroke.Count < 100000 && stroke[^1] != new PointD(end.X, end.Y))
             stroke.Add(new(end.X, end.Y));
+        var brushPreview = brushDrag;
+        if (brushPreview is not null)
+        {
+            brushPreview.Add(new(end.X, end.Y));
+            brushPreview.Flush(finish: true);
+        }
         var tonal = tonalDrag;
         tonal?.Add(new(end.X, end.Y), finish: true);
         var points = stroke.ToArray();
@@ -385,19 +399,9 @@ public partial class MainWindow
                     var paint = new StrokeArgs(points, brushSize, hardness, StrokeOpacity(completed), foreground, completed == "Eraser", Pencil: completed == "Brush" && pencilMode, Tone: StrokeTone(completed));
                     if (renderedStroke)
                     {
-                        if (paint.Tone != TonalStroke.None)
-                        {
-                            e.Handled = true;
-                            await CommitTonalStroke(active, paintTarget, paint);
-                            return;
-                        }
-                        active.KeepPaintFrame = true;
-                        if (!Run(mask ? "mask.paintStroke" : "layer.paintStroke", paint, paintTarget))
-                        {
-                            active.KeepPaintFrame = false;
-                            UpdateCanvas();
-                        }
-                        break;
+                        e.Handled = true;
+                        await CommitPaintStroke(active, paintTarget, paint, mask, brushPreview);
+                        return;
                     }
                     var view = canvas;
                     var overlay = new EditorCanvas.PaintOverlay(paint, active.Engine.Current?.Selection);
@@ -517,36 +521,38 @@ public partial class MainWindow
         _ => TonalStroke.None
     };
 
-    private async Task CommitTonalStroke(Session session, string target, StrokeArgs paint)
+    private async Task CommitPaintStroke(Session session, string target, StrokeArgs paint, bool mask, BrushDragPreview? brush)
     {
         session.KeepPaintFrame = true;
-        session.CommittedTonalFrame = session.View.TonalFrame;
-        committingTonalStroke = true;
+        if (brush is not null) session.View.PendingBrush.Add(brush);
+        else session.CommittedTonalFrame = session.View.TonalFrame;
+        committingPaintStroke = true;
         bool committed = false;
         try
         {
-            await session.Engine.ExecutePaintStrokeAsync(Command.Of("layer.paintStroke", paint, target));
-            session.TonalDocument = session.Engine.Current;
+            await session.Engine.ExecutePaintStrokeAsync(Command.Of(mask ? "mask.paintStroke" : "layer.paintStroke", paint, target));
+            if (brush is null) session.TonalDocument = session.Engine.Current;
             committed = true;
         }
         catch (Exception error)
         {
             session.KeepPaintFrame = false;
-            session.View.TonalFrame = session.CommittedTonalFrame = null;
+            if (brush is not null) session.View.PendingBrush.Remove(brush);
+            else session.View.TonalFrame = session.CommittedTonalFrame = null;
             Guard(() => throw error);
         }
         finally
         {
-            committingTonalStroke = false;
-            Refresh(updateCanvas: !committed || session.CommittedTonalFrame is null);
+            committingPaintStroke = false;
+            Refresh(updateCanvas: !committed || brush is null && session.CommittedTonalFrame is null);
         }
 
-        if (!committed || session.CommittedTonalFrame is null) return;
-        var snapshot = session.TonalDocument;
+        if (!committed || brush is null && session.CommittedTonalFrame is null) return;
+        var snapshot = session.Engine.Current;
         await Task.Delay(150);
         // The next stroke or document activation schedules its own exact render.
-        if (ReferenceEquals(active, session) && ReferenceEquals(snapshot, session.TonalDocument) &&
-            !committingTonalStroke && paintGesture is null)
+        if (ReferenceEquals(active, session) && ReferenceEquals(snapshot, session.Engine.Current) &&
+            !committingPaintStroke && paintGesture is null)
             UpdateCanvas();
     }
 
@@ -585,6 +591,9 @@ public partial class MainWindow
         paintGesture = null;
         paintPreview = null;
         tonalDrag = null;
+        brushDrag?.Stop();
+        brushDrag = null;
+        canvas.ActiveBrush = null;
         if (!keepPaintFrame) canvas.TonalFrame = active?.CommittedTonalFrame;
         if (wasPainting && !keepPaintFrame) UpdateCanvas();
         canvas.GradientGuide = null;
@@ -979,7 +988,7 @@ public partial class MainWindow
 
     private void WorkspaceShortcuts(object sender, PreProcessInputEventArgs args)
     {
-        if ((blockRenderInput || committingTonalStroke) && args.StagingItem.Input is KeyEventArgs or MouseButtonEventArgs or MouseWheelEventArgs or TextCompositionEventArgs)
+        if ((blockRenderInput || committingPaintStroke) && args.StagingItem.Input is KeyEventArgs or MouseButtonEventArgs or MouseWheelEventArgs or TextCompositionEventArgs)
         {
             args.Cancel();
             return;

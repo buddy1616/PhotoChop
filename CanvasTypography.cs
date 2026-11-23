@@ -1,3 +1,4 @@
+using System.Windows.Interop;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -103,7 +104,19 @@ public partial class MainWindow
         RefreshTools();
         editor.Focus();
         editor.CaretPosition = flow.ContentEnd;
-        Say("Edit text on the canvas. Ctrl+Enter applies. Esc cancels.");
+        Say("Edit text on the canvas. Numpad Enter or Ctrl+Enter applies. Esc cancels.");
+    }
+
+    private void TextEditorKeyMessage(ref MSG message, ref bool handled)
+    {
+        const int KeyDown = 0x0100;
+        const int ReturnKey = 0x0D;
+        const long ExtendedKey = 1L << 24;
+        if (handled || message.message != KeyDown || message.wParam.ToInt64() != ReturnKey ||
+            (message.lParam.ToInt64() & ExtendedKey) == 0 ||
+            editingText?.Editor.IsKeyboardFocusWithin != true) return;
+        handled = true;
+        FinishTextEdit();
     }
 
     private void PositionTextEditor()
