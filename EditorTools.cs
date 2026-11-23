@@ -673,7 +673,6 @@ public partial class MainWindow
         if (active is null) return;
         canvas.Zoom = active.Zoom;
         canvas.Offset = active.Offset;
-        PositionTextEditor();
         UpdateScrollBars(active);
         canvas.InvalidateVisual();
         RefreshNavigation();

@@ -42,6 +42,7 @@ public partial class MainWindow : Window
         public Document? Rendered { get; set; }
         public bool NeedsFit { get; set; } = true;
         public bool KeepPaintFrame { get; set; }
+        public bool KeepTextFrame { get; set; }
         public System.Windows.Media.Imaging.BitmapSource? CommittedTonalFrame { get; set; }
         public Document? TonalDocument { get; set; }
         public string Title => (Engine.Path is { } path ? Path.GetFileName(path) : InitialTitle ?? "Untitled") + (Engine.Dirty ? " *" : "");
@@ -938,7 +939,7 @@ public partial class MainWindow : Window
         }
         canvas.ImageWidth = doc.Width;
         canvas.ImageHeight = doc.Height;
-        if (preview is null && editingText?.Layer is null && paintGesture is null && !active.KeepPaintFrame) canvas.Frame = active.Frame is { } priorFrame &&
+        if (preview is null && editingText?.Draft is null && paintGesture is null && !active.KeepPaintFrame && !active.KeepTextFrame) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
         canvas.Guides = preferences.ShowGuides ? doc.Guides : [];
         var visibleSelection = interactiveTransform is not null ? preview ?? doc : doc;
@@ -952,7 +953,7 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
-        bool modalRender = active.CommittedTonalFrame is null && canvas.PendingBrush.Count == 0 && canvas.MovingText is null && gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
+        bool modalRender = active.CommittedTonalFrame is null && canvas.PendingBrush.Count == 0 && canvas.MovingText is null && !active.KeepTextFrame && gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
         blockRenderInput = modalRender;
         if (modalRender)
         {
@@ -965,8 +966,10 @@ public partial class MainWindow : Window
             {
                 int version = renderVersion;
                 var textEdit = editingText;
-                var textBackground = ReferenceEquals(textEdit?.Session, session) ? textEdit?.BackgroundFor(snapshot) : null;
-                var target = preview ?? textBackground ?? snapshot;
+                var textDraft = ReferenceEquals(textEdit?.Session, session) && ReferenceEquals(textEdit?.DraftSource, snapshot) &&
+                    preview is null ? textEdit?.Draft : null;
+                var textCommand = textDraft is null ? null : textEdit?.DraftCommand;
+                var target = preview ?? textDraft ?? snapshot;
                 var move = gesture == "Move" ? moveOriginal : null;
                 var shift = selectionDragDelta;
                 string? targetId = moveId;
@@ -974,7 +977,7 @@ public partial class MainWindow : Window
                 var channel = (channelList.SelectedItem as ChannelRow) is { Key: not "composite" } component ? component : null;
                 var paintCommand = paintPreview;
                 var paintId = paintGesture;
-                bool isPreview = preview is not null || textBackground is not null || shift is not null || paintCommand is not null;
+                bool isPreview = preview is not null || textDraft is not null || shift is not null || paintCommand is not null;
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
                 var vectorLayer = session.VectorMaskOnly && session.VectorMaskTarget is { } vectorId
@@ -1006,7 +1009,8 @@ public partial class MainWindow : Window
                 bool currentStroke = paintId is not null && ReferenceEquals(paintId, paintGesture);
                 bool currentMove = move is not null && gesture == "Move" &&
                     ReferenceEquals(move, moveOriginal) && targetId == moveId;
-                if (version != renderVersion && !currentStroke && !currentMove ||
+                bool currentText = textDraft is not null && textEdit?.Draft is not null && preview is null;
+                if (version != renderVersion && !currentStroke && !currentMove && !currentText ||
                     gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) ||
                     !ReferenceEquals(snapshot, session.Engine.Current) || !ReferenceEquals(textEdit, editingText)) continue;
                 if (!isPreview && maskLayer is null && vectorLayer is null && channel is null)
@@ -1018,8 +1022,10 @@ public partial class MainWindow : Window
                 }
                 if (frame.Backend is { } backend) GpuStatus.Content = backend;
                 session.View.Frame = frame.Frame;
+                if (textEdit is not null) textEdit.DisplayedCommand = textCommand;
                 if (!isPreview)
                 {
+                    session.KeepTextFrame = false;
                     if (!committingPaintStroke) session.View.PendingBrush.Clear();
                     if (!committingPaintStroke && paintGesture is null)
                     {
@@ -1040,6 +1046,7 @@ public partial class MainWindow : Window
         {
             canvas.PendingPaint.Clear();
             canvas.PendingBrush.Clear();
+            if (active is { } failedSession) failedSession.KeepTextFrame = false;
             canvas.InvalidateVisual();
             Say(error.Message);
         }
