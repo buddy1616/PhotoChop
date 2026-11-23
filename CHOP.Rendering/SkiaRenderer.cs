@@ -32,6 +32,56 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
     private readonly ConditionalWeakTable<Pixels, Evaluations> evaluations = new();
     private readonly ConditionalWeakTable<Layer, Pixels> vectors = new();
+    private readonly ConditionalWeakTable<RichText, RichTextRaster> textRasters = new();
+    private readonly ConditionalWeakTable<Pixels, ConditionalWeakTable<AlphaMask, MaskRaster>> maskedRasters = new();
+    private readonly ConditionalWeakTable<Layer, GroupRaster> groupRasters = new();
+
+    private sealed class RichTextRaster
+    {
+        public Pixels? Value;
+        public double Size;
+    }
+
+    private sealed class MaskRaster
+    {
+        public Frame? Value;
+        public int X, Y;
+    }
+
+    private sealed class GroupRaster
+    {
+        public WeakReference<Pixels>? Value;
+        public Area Region;
+        public SKMatrix World;
+        public ColorSettings? Precision;
+        public int X, Y;
+    }
+
+    private Pixels TextRaster(Layer layer)
+    {
+        if (layer.Typography is not { } rich) return vectors.GetValue(layer, Rasterize);
+        var cached = textRasters.GetOrCreateValue(rich);
+        lock (cached)
+        {
+            if (cached.Value is null || cached.Size != layer.Size)
+                (cached.Value, cached.Size) = (RasterizeRichText(layer, rich), layer.Size);
+            return cached.Value;
+        }
+    }
+
+    private Frame MaskedRaster(Frame frame, AlphaMask mask)
+    {
+        var cached = maskedRasters.GetOrCreateValue(frame.Pixels).GetOrCreateValue(mask);
+        lock (cached)
+        {
+            if (cached.Value is null || cached.X != frame.X || cached.Y != frame.Y)
+            {
+                cached.Value = ApplyMask(frame, mask);
+                (cached.X, cached.Y) = (frame.X, frame.Y);
+            }
+            return cached.Value;
+        }
+    }
 
     public Pixels DecodePng(byte[] data) => DecodeImage(data, pngOnly: true);
 
@@ -287,18 +337,49 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
         if (layer.Kind == LayerKind.Group)
         {
+            if (glow is null && !effects.Any(ProcessesPixels) && (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask))
+            {
+                using var group = Surface(region.Width, region.Height, precision);
+                using var groupCanvas = new SKCanvas(group);
+                groupCanvas.Clear(SKColors.Transparent);
+                groupCanvas.Translate(-region.X, -region.Y);
+                DrawTier(group, groupCanvas, layer.Children, region, world, precision);
+                groupCanvas.Flush();
+                canvas.DrawBitmap(group, region.X, region.Y, paint);
+            }
+            else DrawStyled(RenderGroup(layer, effects, region, world, precision));
+            return;
+        }
+
+        if (PrepareLayer(layer, effects, precision) is not { } evaluated) return;
+        canvas.Save();
+        canvas.Concat(world);
+        DrawStyled(evaluated);
+        canvas.Restore();
+    }
+
+    private Frame RenderGroup(Layer layer, Effect[] effects, Area region, SKMatrix world, ColorSettings? precision)
+    {
+        var cached = groupRasters.GetOrCreateValue(layer);
+        lock (cached)
+        {
+            if (cached.Region == region && cached.World == world && cached.Precision == precision &&
+                cached.Value?.TryGetTarget(out var previous) == true)
+                return new(previous, cached.X, cached.Y);
+            var result = Render();
+            (cached.Value, cached.Region, cached.World, cached.Precision) = (new(result.Pixels), region, world, precision);
+            (cached.X, cached.Y) = (result.X, result.Y);
+            return result;
+        }
+
+        Frame Render()
+        {
             using var group = Surface(region.Width, region.Height, precision);
             using var groupCanvas = new SKCanvas(group);
             groupCanvas.Clear(SKColors.Transparent);
             groupCanvas.Translate(-region.X, -region.Y);
             DrawTier(group, groupCanvas, layer.Children, region, world, precision);
             groupCanvas.Flush();
-            if (glow is null && !effects.Any(ProcessesPixels) && (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask))
-            {
-                canvas.DrawBitmap(group, region.X, region.Y, paint);
-                return;
-            }
-
             using var vectorCoverage = VectorCoverage(layer.VectorMask, region, world);
             var groupMask = layer.MaskEnabled ? layer.Mask : null;
             using var maskPaint = new SKPaint { BlendMode = SKBlendMode.DstIn };
@@ -317,16 +398,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             }
             if (vectorCoverage is not null) groupCanvas.DrawBitmap(vectorCoverage, region.X, region.Y, maskPaint);
             groupCanvas.Flush();
-            var frame = Evaluate(Unpremultiply(group, precision), effects, region.X, region.Y);
-            DrawStyled(frame);
-            return;
+            return Evaluate(Unpremultiply(group, precision), effects, region.X, region.Y);
         }
-
-        if (PrepareLayer(layer, effects, precision) is not { } evaluated) return;
-        canvas.Save();
-        canvas.Concat(world);
-        DrawStyled(evaluated);
-        canvas.Restore();
     }
 
     // Resize a group after its children and effects have been composited.
@@ -372,14 +445,14 @@ public sealed partial class SkiaRenderer : IRasterBackend
             Pixels? source = layer.Kind switch
             {
                 LayerKind.Raster or LayerKind.Chop => raster?.Pixels,
-                LayerKind.Text => raster?.Pixels ?? vectors.GetValue(layer, Rasterize),
+                LayerKind.Text => raster?.Pixels ?? TextRaster(layer),
                 LayerKind.Fill => FillSource(layer, layer.Width, layer.Height),
                 _ => vectors.GetValue(layer, Rasterize)
             };
             if (source is null) return null;
             frame = new(precision is null ? source : PixelBuffer.Convert(source, precision), raster?.X ?? layer.RasterX, raster?.Y ?? layer.RasterY);
         }
-        if (layer.MaskEnabled && layer.Mask is { } mask) frame = ApplyMask(frame, mask);
+        if (layer.MaskEnabled && layer.Mask is { } mask) frame = MaskedRaster(frame, mask);
         using var coverage = VectorCoverage(layer.VectorMask, new(frame.X, frame.Y, frame.Pixels.Width, frame.Pixels.Height), SKMatrix.Identity);
         if (coverage is not null)
         {
@@ -480,7 +553,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) is not { } world || !world.TryInvert(out var inverse))
             return false;
         var local = inverse.MapPoint((float)point.X, (float)point.Y);
-        var text = layer.Pixels ?? vectors.GetValue(layer, Rasterize);
+        var text = layer.Pixels ?? TextRaster(layer);
         return local.X >= layer.RasterX && local.Y >= layer.RasterY &&
             local.X < layer.RasterX + text.Width && local.Y < layer.RasterY + text.Height;
     }
@@ -1455,6 +1528,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             for (int y = top; y < bottom; y++)
             for (int x = left; x < right; x++)
             {
+                int i = (y - firstY) * stride + x - firstX;
+                if (coverage[i] >= (eightBit ? 255 : 1)) continue;
                 float cx = x + .5f, cy = y + .5f;
                 var p = affine
                     ? new SKPoint(world.ScaleX * cx + world.SkewX * cy + world.TransX,
@@ -1467,7 +1542,6 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 double squared = dx * dx + dy * dy;
                 if (squared > radiusSquared) continue;
                 double amount = stroke.Pencil || squared <= solidSquared ? 1 : (radius - Math.Sqrt(squared)) / feather;
-                int i = (y - firstY) * stride + x - firstX;
                 coverage[i] = Math.Max(coverage[i], eightBit ? Byte(amount) : (float)amount);
             }
         }

@@ -55,6 +55,33 @@ public sealed class LayerStyleTests
     }
 
     [Fact]
+    public void TonalStrokeAfterClearingPixelsUsesTheResolvedRasterAndCanBeUndone()
+    {
+        var renderer = new SkiaRenderer();
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("test", 8, 8)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("art", "Art", LayerKind.Raster)));
+        engine.Execute(Command.Of("layer.paintStroke", new StrokeArgs([new(2.5, 2.5), new(4.5, 2.5)], 1, 1, 1, "#FF808080", false), "art"));
+        engine.Execute(Command.Of("selection.rectangle", new RectangleSelection(new Area(2, 2, 1, 1), SelectionMode.Replace)));
+        engine.Execute(Command.Of("layer.clearSelection", 0, "art"));
+        engine.Execute(Command.Of<Area?>("document.selection", null));
+        var before = engine.Current!;
+        var source = before.AllLayers().Single(layer => layer.Id == "art");
+        Assert.NotEmpty(source.PixelShifts);
+        var prior = renderer.Composite(before);
+        engine.Execute(Command.Of("layer.paintStroke", new StrokeArgs([new(4.5, 2.5)], 1, 1, 1, "#FF000000", false,
+            Tone: TonalStroke.Burn), "art"));
+        var painted = engine.Current!;
+        Assert.Empty(painted.AllLayers().Single(layer => layer.Id == "art").PixelShifts);
+        var result = renderer.Composite(painted);
+        int offset = (2 * result.Width + 4) * 4;
+        Assert.True(result.Rgba[offset] < prior.Rgba[offset]);
+        Assert.Equal(prior.Rgba[offset + 3], result.Rgba[offset + 3]);
+        engine.Execute(Command.Of("history.undo", 0));
+        Assert.Same(before, engine.Current);
+    }
+
+    [Fact]
     public void BevelContrastDefaultsToFullAndCanBeTunedIndependently()
     {
         var renderer = new SkiaRenderer();

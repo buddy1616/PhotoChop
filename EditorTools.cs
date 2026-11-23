@@ -313,10 +313,14 @@ public partial class MainWindow
             case "Move":
                 var delta = point - gestureStart;
                 var mapped = moveParentInverse.MapVector((float)delta.X, (float)delta.Y);
-                movePreview = moveOriginal! with { X = Math.Round(moveOriginal!.X + mapped.X, 2),
+                var placement = moveOriginal! with { X = Math.Round(moveOriginal!.X + mapped.X, 2),
                     Y = Math.Round(moveOriginal.Y + mapped.Y, 2) };
-                preview = doc with { Layers = PreviewMove(doc.Layers, moveId!, movePreview) };
-                UpdateCanvas();
+                if (placement != (movePreview ?? moveOriginal))
+                {
+                    movePreview = placement;
+                    preview = doc with { Layers = PreviewMove(doc.Layers, moveId!, placement) };
+                    UpdateCanvas();
+                }
                 break;
         }
         Say();
@@ -549,7 +553,7 @@ public partial class MainWindow
 
         var tone = StrokeTone(tool);
         if (tone != TonalStroke.None && active is { Composite: { } source, Frame: { } frame, ChannelView: null or "composite" } session &&
-            session.Engine.Current is { } document && ReferenceEquals(document, session.Rendered) &&
+            session.Engine.Current is { } document && session.Rendered is { } rendered && SameComposite(document, rendered) &&
             ActiveLayer() is { } layer && renderer.ResolveRaster(layer) is { } raster &&
             SkiaRenderer.WorldMatrix(document.Layers, id, SKMatrix.Identity) is { } world && world.TryInvert(out var inverse))
         {

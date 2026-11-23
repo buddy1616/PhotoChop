@@ -1398,6 +1398,8 @@ public sealed class CommandEngine(IRasterBackend backend)
         var pixels = backend.Stroke(doc, layer, stroke);
         if (layer.PixelShifts.Length == 0) return layer with { Pixels = pixels };
         var effective = backend.ResolveRaster(layer)!;
+        if (stroke.Tone != TonalStroke.None)
+            return layer with { Pixels = pixels, RasterX = effective.X, RasterY = effective.Y, PixelShifts = [] };
         var prior = effective.Pixels;
         int left = pixels.Width, top = pixels.Height, right = -1, bottom = -1;
         for (int y = 0; y < pixels.Height; y++)

@@ -886,6 +886,11 @@ public partial class MainWindow : Window
         Say();
     }
 
+    private static bool SameComposite(Document target, Document prior) =>
+        ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating &&
+        target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color &&
+        ReferenceEquals(target.IccProfile, prior.IccProfile);
+
     private async void UpdateCanvas()
     {
         renderVersion++;
@@ -898,7 +903,7 @@ public partial class MainWindow : Window
         }
         canvas.ImageWidth = doc.Width;
         canvas.ImageHeight = doc.Height;
-        if (preview is null && paintGesture is null && !active.KeepPaintFrame) canvas.Frame = active.Frame is { } priorFrame &&
+        if (preview is null && editingText?.Layer is null && paintGesture is null && !active.KeepPaintFrame) canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
         canvas.Guides = preferences.ShowGuides ? doc.Guides : [];
         var visibleSelection = interactiveTransform is not null ? preview ?? doc : doc;
@@ -912,7 +917,7 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
-        bool modalRender = gesture is null && preview is null && paintGesture is null && effectDialog is not { IsVisible: true };
+        bool modalRender = gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
         blockRenderInput = modalRender;
         if (modalRender)
         {
@@ -924,20 +929,23 @@ public partial class MainWindow : Window
             while (active is { } session && session.Engine.Current is { } snapshot)
             {
                 int version = renderVersion;
-                var target = preview ?? snapshot;
+                var textEdit = editingText;
+                var textBackground = ReferenceEquals(textEdit?.Session, session) ? textEdit?.BackgroundFor(snapshot) : null;
+                var target = preview ?? textBackground ?? snapshot;
+                var move = gesture == "Move" ? moveOriginal : null;
                 var shift = selectionDragDelta;
                 string? targetId = moveId;
                 var selectedLayer = ActiveLayer();
                 var channel = (channelList.SelectedItem as ChannelRow) is { Key: not "composite" } component ? component : null;
                 var paintCommand = paintPreview;
                 var paintId = paintGesture;
-                bool isPreview = preview is not null || shift is not null || paintCommand is not null;
+                bool isPreview = preview is not null || textBackground is not null || shift is not null || paintCommand is not null;
                 var maskLayer = session.MaskOnly is { } maskId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == maskId && layer.Mask is not null) : null;
                 var vectorLayer = session.VectorMaskOnly && session.VectorMaskTarget is { } vectorId
                     ? target.AllLayers().FirstOrDefault(layer => layer.Id == vectorId && layer.VectorMask is not null) : null;
                 bool cached = !isPreview && maskLayer is null && vectorLayer is null && channel is null && session.Rendered is { } prior &&
-                    ReferenceEquals(target.Layers, prior.Layers) && target.Floating == prior.Floating && target.Width == prior.Width && target.Height == prior.Height && target.Color == prior.Color;
+                    SameComposite(target, prior);
                 bool gpuRequested = preferences.ExperimentalGpu;
                 var accelerator = !cached && paintCommand is null && gpuRequested && channel is null && maskLayer is null && vectorLayer is null &&
                     SkiaRenderer.CanCompositeOnGpu(target) ? gpu ??= new WindowsGpuCompositor() : null;
@@ -960,9 +968,12 @@ public partial class MainWindow : Window
                         maskLayer is not null ? renderer.MaskView(target, maskLayer) : RenderChannel(target, channel, selectedLayer));
                     return (Pixels: pixels, Frame: EditorCanvas.Bitmap(pixels), Backend: (string?)backend);
                 });
-                if ((version != renderVersion && (paintId is null || !ReferenceEquals(paintId, paintGesture))) || gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) || !ReferenceEquals(snapshot, session.Engine.Current) ||
-                    (isPreview && preview is null && selectionDragDelta is null &&
-                        (paintId is null || !ReferenceEquals(paintId, paintGesture)))) continue;
+                bool currentStroke = paintId is not null && ReferenceEquals(paintId, paintGesture);
+                bool currentMove = move is not null && gesture == "Move" &&
+                    ReferenceEquals(move, moveOriginal) && targetId == moveId;
+                if (version != renderVersion && !currentStroke && !currentMove ||
+                    gpuRequested != preferences.ExperimentalGpu || !ReferenceEquals(active, session) ||
+                    !ReferenceEquals(snapshot, session.Engine.Current) || !ReferenceEquals(textEdit, editingText)) continue;
                 if (!isPreview && maskLayer is null && vectorLayer is null && channel is null)
                 {
                     session.Rendered = snapshot;
@@ -979,7 +990,7 @@ public partial class MainWindow : Window
                     session.View.PendingPaint.Clear();
                 }
                 session.View.InvalidateVisual();
-                if (paintCommand is null) RefreshNavigation();
+                if (paintCommand is null && !currentMove) RefreshNavigation();
                 if (version == renderVersion) break;
             }
         }

@@ -31,8 +31,8 @@ internal sealed class TonalDragPreview
         this.stroke = stroke;
         remaining = Math.Max(.5, stroke.Size / 6);
         Bitmap = new WriteableBitmap(frame);
-        bgra = (byte[])source.Rgba.Clone();
-        for (int i = 0; i < bgra.Length; i += 4) (bgra[i], bgra[i + 2]) = (bgra[i + 2], bgra[i]);
+        bgra = GC.AllocateUninitializedArray<byte>(source.Rgba.Length);
+        frame.CopyPixels(bgra, source.Width * 4, 0);
         coverage = new byte[source.Width * source.Height];
     }
 
@@ -49,10 +49,11 @@ internal sealed class TonalDragPreview
             for (int y = y0; y < y1; y++)
             for (int x = x0; x < x1; x++)
             {
+                int index = y * source.Width + x;
+                if (coverage[index] == 255) continue;
                 double dx = x + .5 - center.X, dy = y + .5 - center.Y;
                 double distance = dx * dx + dy * dy;
                 if (distance >= radius * radius || document.Selection is not null && !document.Selected(x, y)) continue;
-                int index = y * source.Width + x;
                 int amount = (int)Math.Round(255 * Math.Min(1, (radius - Math.Sqrt(distance)) / feather));
                 if (amount <= coverage[index]) continue;
                 var local = inverse.MapPoint(x + .5f, y + .5f);
