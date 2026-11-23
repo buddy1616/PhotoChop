@@ -22,6 +22,8 @@ public partial class MainWindow
         public Layer? Layer { get; } = layer;
         public TextWarp? Warp { get; set; } = text.Warp;
         public double Width { get; set; } = text.Width;
+        public double Height { get; set; } = text.Height;
+        public PointD[][]? Shape { get; } = text.Shape;
         public bool Modified { get; set; }
         public bool LivePreview { get; set; } = true;
         public DispatcherTimer Timer { get; } = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(85) };
@@ -47,7 +49,7 @@ public partial class MainWindow
 
         CharacterStyle style = layer is null ? textDefaults :
             new(layer.Font, layer.Size, layer.Color);
-        var rich = layer?.Typography ?? RichText.FromPlain(layer?.Text ?? "", style,
+        var rich = layer?.Typography ?? create?.Typography ?? RichText.FromPlain(layer?.Text ?? "", style,
             layer is { TextBend: not 0 } ? new(TextWarpStyle.Arc, layer.TextBend) : null);
         var flow = new FlowDocument { PagePadding = new Thickness(0), FontFamily = new FontFamily(ResolveEditorFamily(style.Font)),
             FontSize = style.Size, Foreground = Ink(style.Color), TextAlignment = TextAlignment.Left };
@@ -69,7 +71,7 @@ public partial class MainWindow
         var window = new Window
         {
             Owner = EditorOwner, Title = layer is null ? "New Text Layer" : $"Edit Text · {layer.Name}",
-            Width = 450, Height = 250, MinWidth = 300, MinHeight = 175,
+            Width = 730, Height = 380, MinWidth = 590, MinHeight = 230,
             ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.CenterOwner
         };
         if (active.View.MovingText is not null) ClearTextMovePreview(active);
@@ -91,6 +93,15 @@ public partial class MainWindow
             DockPanel.SetDock(button, System.Windows.Controls.Dock.Right);
             actions.Children.Add(button);
         }
+        var formatting = new WrapPanel { Margin = new Thickness(0, 0, 0, 6) };
+        AddTypographyTools(formatting);
+        DockPanel.SetDock(formatting, System.Windows.Controls.Dock.Top);
+        layout.Children.Add(formatting);
+        var typography = new TabControl { Width = 270, Margin = new Thickness(8, 0, 0, 0) };
+        typography.Items.Add(new TabItem { Header = "Character", Content = BuildCharacterTypography() });
+        typography.Items.Add(new TabItem { Header = "Paragraph", Content = BuildParagraphTypography() });
+        DockPanel.SetDock(typography, System.Windows.Controls.Dock.Right);
+        layout.Children.Add(typography);
         layout.Children.Add(editor);
         window.Content = layout;
         window.Closed += (_, _) =>
@@ -253,7 +264,7 @@ public partial class MainWindow
             }
             AddParagraph();
         }
-        return new(paragraphs.Count == 0 ? [new([], new())] : paragraphs.ToArray(), edit.Warp, edit.Width);
+        return new(paragraphs.Count == 0 ? [new([], new())] : paragraphs.ToArray(), edit.Warp, edit.Width, edit.Height, edit.Shape);
     }
 
     private CharacterStyle CurrentTextStyle()

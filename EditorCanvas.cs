@@ -28,6 +28,7 @@ internal sealed class EditorCanvas : FrameworkElement
         checker = CreateChecker(size);
     }
     private static readonly Pen border = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(110, 119, 136)), 1));
+    private static readonly Pen selectionBacking = Frozen(new Pen(Brushes.Black, 5));
     private static readonly Pen selectionLight = Frozen(new Pen(Brushes.White, 3));
     private static readonly Pen selectionDark = Frozen(new Pen(Brushes.Black, 2) { DashStyle = DashStyles.Dash });
     public BitmapSource? Frame { get; set; }
@@ -147,6 +148,7 @@ internal sealed class EditorCanvas : FrameworkElement
                     outline = BuildOutline(mask);
                 }
                 dc.PushTransform(new MatrixTransform(Zoom, 0, 0, Zoom, Offset.X + selection.X * Zoom, Offset.Y + selection.Y * Zoom));
+                dc.DrawGeometry(null, new Pen(Brushes.Black, 5 / Zoom), outline);
                 var light = new Pen(Brushes.White, 3 / Zoom);
                 var dark = new Pen(Brushes.Black, 2 / Zoom) { DashStyle = DashStyles.Dash };
                 dc.DrawGeometry(null, light, outline);
@@ -163,6 +165,7 @@ internal sealed class EditorCanvas : FrameworkElement
                 writer.BeginFigure(ToView(shapePoints[0]), false, ClosedShapePreview);
                 writer.PolyLineTo(shapePoints.Skip(1).Select(ToView).ToArray(), true, false);
             }
+            dc.DrawGeometry(null, selectionBacking, path);
             dc.DrawGeometry(null, selectionLight, path);
             dc.DrawGeometry(null, selectionDark, path);
         }
@@ -172,6 +175,7 @@ internal sealed class EditorCanvas : FrameworkElement
             if (EllipticalMarquee)
             {
                 var center = new Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
+                dc.DrawEllipse(null, selectionBacking, center, r.Width / 2, r.Height / 2);
                 dc.DrawEllipse(null, selectionLight, center, r.Width / 2, r.Height / 2);
                 dc.DrawEllipse(null, selectionDark, center, r.Width / 2, r.Height / 2);
             }
@@ -224,8 +228,15 @@ internal sealed class EditorCanvas : FrameworkElement
         if (PathOverlay is { } paths) DrawVectorPaths(dc, paths);
         if (LassoPath is { Count: > 1 } lasso)
         {
-            for (int i = 1; i < lasso.Count; i++) dc.DrawLine(selectionLight, ToView(lasso[i - 1]), ToView(lasso[i]));
-            dc.DrawLine(selectionDark, ToView(lasso[^1]), ToView(lasso[0]));
+            var trace = new StreamGeometry();
+            using (var stream = trace.Open())
+            {
+                stream.BeginFigure(ToView(lasso[0]), false, true);
+                stream.PolyLineTo(lasso.Skip(1).Select(ToView).ToArray(), true, false);
+            }
+            dc.DrawGeometry(null, selectionBacking, trace);
+            dc.DrawGeometry(null, selectionLight, trace);
+            dc.DrawGeometry(null, selectionDark, trace);
         }
         if (TransformBox is { Length: 4 } box)
         {
@@ -376,6 +387,7 @@ internal sealed class EditorCanvas : FrameworkElement
 
     private static void DrawOutline(DrawingContext dc, Rect rect)
     {
+        dc.DrawRectangle(null, selectionBacking, rect);
         dc.DrawRectangle(null, selectionLight, rect);
         dc.DrawRectangle(null, selectionDark, rect);
     }

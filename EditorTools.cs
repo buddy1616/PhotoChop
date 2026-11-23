@@ -147,9 +147,7 @@ public partial class MainWindow
             switch (tool)
             {
                 case "Text":
-                    FinishTextEdit();
-                    if (active?.Engine.Current is { } textDoc) EditTextAt(textDoc, new PointD(point.X, point.Y));
-                    return;
+                    break;
                 case "Eyedropper": Sample(point); return;
                 case "Transform": ScaleLayer(); return;
                 case "Magic Wand":
@@ -307,6 +305,7 @@ public partial class MainWindow
             case "Selection":
             case "Chop":
             case "Shape":
+            case "Text":
                 canvas.Marquee = GestureBounds(point);
                 canvas.EllipticalMarquee = gesture == "Selection" && ellipticalMarquee || gesture == "Shape" && shapeKind == ShapeToolKind.Ellipse;
                 canvas.ShapePreview = gesture == "Shape" && shapeKind is not (ShapeToolKind.Rectangle or ShapeToolKind.Ellipse)
@@ -383,6 +382,21 @@ public partial class MainWindow
         CancelGesture(keepPaintFrame: renderedStroke, keepTextPreview: textMoved);
         switch (completed)
         {
+            case "Text":
+                FinishTextEdit();
+                if (active.Engine.Current is { } textDoc)
+                {
+                    if (Math.Abs(motion.X * canvas.Zoom) >= 3 && Math.Abs(motion.Y * canvas.Zoom) >= 3)
+                    {
+                        var left = Math.Clamp(area.X, 0, textDoc.Width - 1);
+                        var top = Math.Clamp(area.Y, 0, textDoc.Height - 1);
+                        var right = Math.Clamp(area.X + area.Width, left + 1, textDoc.Width);
+                        var bottom = Math.Clamp(area.Y + area.Height, top + 1, textDoc.Height);
+                        CreateBoundedText(new Area(left, top, right - left, bottom - top));
+                    }
+                    else EditTextAt(textDoc, new PointD(end.X, end.Y));
+                }
+                break;
             case "Gradient":
                 if (gradient is not null && motion.LengthSquared > .01) RunLayer("layer.gradient", gradient);
                 break;
@@ -853,7 +867,7 @@ public partial class MainWindow
             ToolOptions.Children.Add(opacity.Row);
         }
         if (tool == "Selection") AddMarqueeOptions();
-        if (tool == "Text") AddTypographyTools();
+        if (tool == "Text") OptionLabel("Click for point text or drag a text box");
         if (tool == "Shape")
         {
             var list = new ComboBox { ItemsSource = Enum.GetValues<ShapeToolKind>(), SelectedItem = shapeKind };

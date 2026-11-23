@@ -7,6 +7,42 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void BoundedTextWrapsInsideShapeAndKeepsItsBoxThroughTransformsAndSave()
+    {
+        var renderer = new SkiaRenderer();
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("boxed", 200, 160)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("group", "Group", LayerKind.Group,
+            Transform: new(5, 7, 2, 2))));
+        var text = RichText.FromPlain("One two three four five six seven eight nine ten eleven twelve", new(Size: 10))
+            with { Width = 80, Height = 55, Shape = [[new(0, 0), new(30, 0), new(30, 25), new(80, 25), new(80, 55), new(0, 55)]] };
+        engine.Execute(Command.Of("layer.create", new LayerArgs("text", "Text", LayerKind.Text, Parent: "group",
+            Transform: new(10, 15), Typography: text, CanvasAlignedText: true)));
+        var doc = engine.Current!;
+        var layer = doc.AllLayers().Single(item => item.Id == "text");
+        Assert.Equal(new Area(10, 15, 80, 55), SkiaRenderer.BoundedTextBounds(doc, layer));
+        var image = renderer.Composite(doc);
+        byte Alpha(int x, int y) => image.Rgba[(y * image.Width + x) * 4 + 3];
+        Assert.Contains(Enumerable.Range(16, 20), y => Enumerable.Range(11, 28).Any(x => Alpha(x, y) > 0));
+        Assert.Contains(Enumerable.Range(42, 25), y => Enumerable.Range(43, 42).Any(x => Alpha(x, y) > 0));
+        Assert.All(Enumerable.Range(15, 25), y => Assert.All(Enumerable.Range(41, 49), x => Assert.Equal(0, Alpha(x, y))));
+        engine.Execute(Command.Of("document.selection", new Area(10, 15, 3, 3)));
+        engine.Execute(Command.Of("layer.scale", new ScaleArgs(2, 2, AnchorX: 0, AnchorY: 0), "text"));
+        var transformed = engine.Current!;
+        Assert.Equal(new Area(20, 30, 160, 110), SkiaRenderer.BoundedTextBounds(transformed,
+            transformed.AllLayers().Single(item => item.Id == "text")));
+
+        string path = Path.Combine(Path.GetTempPath(), $"chop-bounded-text-{Guid.NewGuid():N}.chop");
+        try
+        {
+            ProjectFile.Save(path, transformed);
+            var reopened = ProjectFile.Open(path);
+            Assert.Equal(renderer.Composite(transformed).Rgba, renderer.Composite(reopened).Rgba);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void WarpedTextPreviewMatchesTheAppliedLayerInsideATransformedGroup()
     {
         var renderer = new SkiaRenderer();

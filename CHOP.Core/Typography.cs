@@ -17,8 +17,10 @@ public sealed record TextRun(string Text, CharacterStyle Style);
 public sealed record ParagraphStyle(TextAlignmentMode Alignment = TextAlignmentMode.Left, double Leading = 0,
     double LeftIndent = 0, double RightIndent = 0, double FirstLineIndent = 0, double SpaceBefore = 0, double SpaceAfter = 0);
 public sealed record TextParagraph(TextRun[] Runs, ParagraphStyle Style);
-public sealed record RichText(TextParagraph[] Paragraphs, TextWarp? Warp = null, double Width = 0)
+public sealed record RichText(TextParagraph[] Paragraphs, TextWarp? Warp = null, double Width = 0, double Height = 0, PointD[][]? Shape = null)
 {
+    public const int MaxBoxSide = 16384;
+
     public string PlainText => string.Join("\n", Paragraphs.Select(paragraph => string.Concat(paragraph.Runs.Select(run => run.Text))));
 
     public static RichText FromPlain(string text, CharacterStyle style, TextWarp? warp = null) =>
@@ -37,11 +39,15 @@ public sealed record RichText(TextParagraph[] Paragraphs, TextWarp? Warp = null,
         return installed.FirstOrDefault(family => Key(family) == baseName) ?? requested;
     }
 
-    internal static void Check(RichText? value)
+    public static void Check(RichText? value)
     {
         if (value is null) return;
         static bool Valid(double v, double min, double max) => double.IsFinite(v) && v >= min && v <= max;
-        if (value.Paragraphs is not { Length: > 0 and <= 4096 } || !Valid(value.Width, 0, 16384) ||
+        if (value.Paragraphs is not { Length: > 0 and <= 4096 } || !Valid(value.Width, 0, MaxBoxSide) ||
+            !Valid(value.Height, 0, MaxBoxSide) || value.Height > 0 && (value.Width < 1 || value.Width * value.Height > 32_000_000) ||
+            value.Shape is { } shape && (value.Height < 1 || shape.Length == 0 ||
+                shape.Sum(loop => (long)(loop?.Length ?? 0)) > 8192 || shape.Any(loop => loop is not { Length: >= 3 } ||
+                    loop.Any(p => !Valid(p.X, 0, value.Width) || !Valid(p.Y, 0, value.Height)))) ||
             value.Warp is { } warp && (!Enum.IsDefined(warp.Style) || !Valid(warp.Bend, -1, 1) ||
                 !Valid(warp.HorizontalDistortion, -1, 1) || !Valid(warp.VerticalDistortion, -1, 1)))
             throw new InvalidDataException("Invalid text layout.");

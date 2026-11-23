@@ -210,7 +210,8 @@ public static class ProjectFile
             layer.ImagePlacement?.Inverse();
             if (layer.RasterGrid is { } grid)
             {
-                if (layer.Kind != LayerKind.Raster) throw new InvalidDataException("Only raster layers can have a pixel grid.");
+                if (layer.Kind is not (LayerKind.Raster or LayerKind.Text))
+                    throw new InvalidDataException("Only raster and text layers can have a pixel grid.");
                 grid.Inverse();
             }
             if (layer.SpatialEdits is { } legacy)

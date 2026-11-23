@@ -42,8 +42,10 @@ public sealed partial class SkiaRenderer
         Span<ushort> pair = stackalloc ushort[2];
         Span<int> shift = stackalloc int[1];
 
-        var lines = new List<(PositionedGlyph[] Glyphs, ParagraphStyle Style, float Left, float Y, float Height, float Ascent, bool Last)>();
+        var lines = new List<(PositionedGlyph[] Glyphs, ParagraphStyle Style, float Left, float Right, float Y, float Height, float Ascent, bool Last)>();
         float y = 2, widest = 0;
+        bool bounded = text.Height > 0;
+        using var boundary = TextBoundary(text.Shape);
         try
         {
             foreach (var paragraph in text.Paragraphs)
@@ -84,8 +86,28 @@ public sealed partial class SkiaRenderer
                 int first = 0;
                 do
                 {
-                    float left = (float)Math.Max(0, p.LeftIndent + (first == 0 ? p.FirstLineIndent : 0));
-                    double available = text.Width > 0 ? Math.Max(1, text.Width - left - p.RightIndent - 4) : double.PositiveInfinity;
+                    float indent = (float)Math.Max(0, p.LeftIndent + (first == 0 ? p.FirstLineIndent : 0));
+                    float left = indent, right = float.NaN;
+                    if (text.Width > 0) right = (float)text.Width - (float)p.RightIndent;
+                    if (bounded)
+                    {
+                        float bandHeight = (float)(p.Leading > 0 ? p.Leading : glyphs.Count == 0 ? layer.Size * 1.2 :
+                            Math.Max(glyphs[first].Height, glyphs[first].Ascent + glyphs[first].Descent));
+                        if (y + bandHeight > text.Height) break;
+                        if (text.Shape is { } shape)
+                        {
+                            var span = FindTextSpan(shape, y, bandHeight);
+                            left = span.Left + indent;
+                            right = span.Right - (float)p.RightIndent;
+                            float firstWidth = glyphs.Count == 0 ? 0 : Math.Min(glyphs[first].Width, (float)text.Width);
+                            if (right - left < firstWidth + 4)
+                            {
+                                y += Math.Max(1, bandHeight / 4);
+                                continue;
+                            }
+                        }
+                    }
+                    double available = text.Width > 0 ? Math.Max(1, right - left - 4) : double.PositiveInfinity;
                     int end = first, breakAt = first;
                     double length = 0;
                     while (end < glyphs.Count && (end == first || length + glyphs[end].Width <= available))
@@ -99,7 +121,8 @@ public sealed partial class SkiaRenderer
                     float ascent = row.Length == 0 ? (float)layer.Size : row.Max(g => g.Ascent);
                     float height = (float)(p.Leading > 0 ? p.Leading : row.Length == 0 ? layer.Size * 1.2 :
                         Math.Max(row.Max(g => g.Height), ascent + row.Max(g => g.Descent)));
-                    lines.Add((row, p, left, y, height, ascent, end == glyphs.Count));
+                    if (bounded && y + height > text.Height) break;
+                    lines.Add((row, p, left, right, y, height, ascent, end == glyphs.Count));
                     widest = Math.Max(widest, left + row.Sum(g => g.Width) + (float)p.RightIndent);
                     y += height;
                     first = end;
@@ -107,17 +130,19 @@ public sealed partial class SkiaRenderer
                 y += (float)p.SpaceAfter;
             }
 
-            int width = Math.Clamp((int)Math.Ceiling(Math.Max(text.Width, widest + 6)), 1, 16384);
-            int heightPx = Math.Clamp((int)Math.Ceiling(y + 4), 1, Math.Min(16384, 32_000_000 / width));
+            int width = Math.Clamp((int)Math.Ceiling(bounded ? text.Width : Math.Max(text.Width, widest + 6)), 1, RichText.MaxBoxSide);
+            int heightPx = Math.Clamp((int)Math.Ceiling(bounded ? text.Height : y + 4), 1, Math.Min(RichText.MaxBoxSide, 32_000_000 / width));
             using var bitmap = Surface(width, heightPx);
             using var canvas = new SKCanvas(bitmap);
             canvas.Clear(SKColors.Transparent);
+            if (boundary is not null) canvas.ClipPath(boundary, SKClipOperation.Intersect, antialias: true);
             using var paint = new SKPaint { IsAntialias = true };
             foreach (var line in lines)
             {
                 if (line.Y >= heightPx) break;
                 float advance = line.Glyphs.Sum(g => g.Width);
-                float gap = Math.Max(0, width - 6 - line.Left - (float)line.Style.RightIndent - advance);
+                float right = bounded ? line.Right : width - (float)line.Style.RightIndent;
+                float gap = Math.Max(0, right - 6 - line.Left - advance);
                 float x = 2 + line.Left + (line.Style.Alignment switch
                 {
                     TextAlignmentMode.Right => gap, TextAlignmentMode.Center => gap / 2, _ => 0
@@ -148,6 +173,54 @@ public sealed partial class SkiaRenderer
         {
             foreach (var font in fonts.Values) font.Dispose();
             foreach (var face in faces.Values) face.Dispose();
+        }
+    }
+
+    private static SKPath? TextBoundary(PointD[][]? shape)
+    {
+        if (shape is null) return null;
+        var path = new SKPath { FillType = SKPathFillType.EvenOdd };
+        foreach (var loop in shape)
+        {
+            path.MoveTo((float)loop[0].X, (float)loop[0].Y);
+            foreach (var point in loop.Skip(1)) path.LineTo((float)point.X, (float)point.Y);
+            path.Close();
+        }
+        return path;
+    }
+
+    private static (float Left, float Right) FindTextSpan(PointD[][] shape, float top, float height)
+    {
+        var spans = At(top + .01f);
+        foreach (float y in new[] { top + height / 2, top + height - .01f })
+        {
+            var available = At(y);
+            spans = (from span in spans
+                     from candidate in available
+                     let left = Math.Max(span.Left, candidate.Left)
+                     let right = Math.Min(span.Right, candidate.Right)
+                     where right > left
+                     select (left, right)).ToArray();
+        }
+        return spans.OrderByDescending(span => span.Right - span.Left).FirstOrDefault();
+
+        (float Left, float Right)[] At(float y)
+        {
+            var intersections = new List<float>();
+            foreach (var loop in shape)
+            {
+                var previous = loop[^1];
+                foreach (var point in loop)
+                {
+                    if ((point.Y > y) != (previous.Y > y))
+                        intersections.Add((float)(point.X + (y - point.Y) * (previous.X - point.X) / (previous.Y - point.Y)));
+                    previous = point;
+                }
+            }
+            intersections.Sort();
+            var result = new (float, float)[intersections.Count / 2];
+            for (int i = 0; i < result.Length; i++) result[i] = (intersections[i * 2], intersections[i * 2 + 1]);
+            return result;
         }
     }
 

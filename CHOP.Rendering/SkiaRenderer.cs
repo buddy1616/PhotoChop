@@ -533,6 +533,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return [];
     }
 
+    public static Area? BoundedTextBounds(Document doc, Layer layer)
+    {
+        if (layer.Kind != LayerKind.Text || layer.Typography is not { Width: > 0, Height: > 0 } text ||
+            WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) is not { } matrix) return null;
+        return EnclosingPixels(matrix.MapRect(SKRect.Create(layer.RasterX, layer.RasterY, (float)text.Width, (float)text.Height)));
+    }
+
     public Area? VisibleLayerBounds(Document doc, string id)
     {
         var layers = IsolatedBranch(doc.Layers, id);

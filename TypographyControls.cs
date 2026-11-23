@@ -19,7 +19,7 @@ public partial class MainWindow
     private static string ResolveEditorFamily(string font) => EditorFamilies.GetOrAdd(font,
         name => RichText.ResolveFamily(name, InstalledFonts.Value.Select(family => family.Source)));
 
-    private void AddTypographyTools()
+    private void AddTypographyTools(Panel options)
     {
         var current = CurrentTextStyle();
         var font = new ComboBox { Width = 162, MaxDropDownHeight = 380, ItemsSource = InstalledFonts.Value,
@@ -78,11 +78,11 @@ public partial class MainWindow
             chip.Background = Ink(value);
         }, "Text color");
         swatch.Content = chip;
-        ToolOptions.Children.Add(font);
-        ToolOptions.Children.Add(face);
-        ToolOptions.Children.Add(size);
-        ToolOptions.Children.Add(align);
-        ToolOptions.Children.Add(swatch);
+        options.Children.Add(font);
+        options.Children.Add(face);
+        options.Children.Add(size);
+        options.Children.Add(align);
+        options.Children.Add(swatch);
         CharacterStyle? lastStyle = null;
         syncTypographyToolbar = () =>
         {
@@ -100,12 +100,8 @@ public partial class MainWindow
             align.SelectedItem = editingText?.Editor.Selection.Start.Paragraph?.TextAlignment ?? TextAlignment.Left;
             updating = false;
         };
-        ToolOptions.Children.Add(Button("Warp…", EditTextWarp));
-        if (editingText is not null)
-        {
-            ToolOptions.Children.Add(Button("Apply", () => FinishTextEdit(), "Apply text (numpad Enter or Ctrl+Enter)"));
-            ToolOptions.Children.Add(Button("Cancel", () => FinishTextEdit(cancel: true), "Cancel text edit (Esc)"));
-        }
+        options.Children.Add(Button("Warp…", EditTextWarp));
+
     }
 
     private sealed record FontChoice(string Label, int Weight, bool Italic);
@@ -211,12 +207,20 @@ public partial class MainWindow
             Number("First line indent", p?.TextIndent ?? 0, -4096, (q, v) => q.TextIndent = v);
             Number("Space before", p?.Margin.Top ?? 0, 0, (q, v) => q.Margin = new Thickness(q.Margin.Left, v, q.Margin.Right, q.Margin.Bottom));
             Number("Space after", p?.Margin.Bottom ?? 0, 0, (q, v) => q.Margin = new Thickness(q.Margin.Left, q.Margin.Top, q.Margin.Right, v));
-            TypographyRow(body, "Text box width", TypographyNumber(editingText?.Width ?? 0, 0, 16384, v =>
+            if (editingText is { Shape: null } edit)
             {
-                if (editingText is not { } edit) return;
-                edit.Width = v;
-                TextEditChanged(edit);
-            }));
+                TypographyRow(body, "Text box width", TypographyNumber(edit.Width, 0, RichText.MaxBoxSide, v =>
+                {
+                    edit.Width = v;
+                    if (v == 0) edit.Height = 0;
+                    TextEditChanged(edit);
+                }));
+                TypographyRow(body, "Text box height", TypographyNumber(edit.Height, 0, RichText.MaxBoxSide, v =>
+                {
+                    edit.Height = edit.Width > 0 ? v : 0;
+                    TextEditChanged(edit);
+                }));
+            }
         }
         view.IsVisibleChanged += (_, _) => { if (view.IsVisible) RefreshFields(); };
         RefreshFields();
