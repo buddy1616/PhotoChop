@@ -53,7 +53,18 @@ public partial class MainWindow
         var tools = new WrapPanel { Margin = new Thickness(0, 5, 0, 6) };
         controls.Children.Add(tools);
         var mode = new ComboBox { ItemsSource = new[] { "Add sampling area", "Remove sampling area" }, SelectedIndex = 0, MinWidth = 172 };
-        mode.SelectionChanged += (_, _) => surface.Include = mode.SelectedIndex == 0;
+        mode.SelectionChanged += (_, _) =>
+        {
+            surface.Include = mode.SelectedIndex == 0;
+            surface.RefreshCursor();
+        };
+        void UpdateAltCursor(object sender, KeyEventArgs e)
+        {
+            if ((e.Key == Key.System ? e.SystemKey : e.Key) is Key.LeftAlt or Key.RightAlt)
+                surface.RefreshCursor();
+        }
+        dialog.AddHandler(Keyboard.PreviewKeyDownEvent, new KeyEventHandler(UpdateAltCursor), handledEventsToo: true);
+        dialog.AddHandler(Keyboard.PreviewKeyUpEvent, new KeyEventHandler(UpdateAltCursor), handledEventsToo: true);
         tools.Children.Add(mode);
         tools.Children.Add(new TextBlock { Text = "Brush diameter (px)", Margin = new Thickness(8, 0, 3, 0), VerticalAlignment = VerticalAlignment.Center });
         var size = new TextBox { Text = "48", Width = 62, VerticalContentAlignment = VerticalAlignment.Center };
@@ -143,6 +154,10 @@ public partial class MainWindow
         private Point? brush;
         public bool Include { get; set; } = true;
         public double Radius { get; set; } = 24;
+        private bool IncludesSamples => Include && (Keyboard.Modifiers & ModifierKeys.Alt) == 0;
+
+        public void RefreshCursor() =>
+            Cursor = IncludesSamples ? ToolCursors.SelectionAdd : ToolCursors.SelectionSubtract;
 
         public FillSamplingCanvas(Document document, Pixels thumbnail)
         {
@@ -153,7 +168,7 @@ public partial class MainWindow
             tint = new WriteableBitmap(thumbnail.Width, thumbnail.Height, 96, 96, PixelFormats.Bgra32, null);
             mask = new byte[thumbnail.Width * thumbnail.Height];
             overlay = new byte[mask.Length * 4];
-            Cursor = Cursors.Cross;
+            RefreshCursor();
             Reset(true);
         }
 
@@ -217,7 +232,7 @@ public partial class MainWindow
             if (!ImageBounds.Contains(e.GetPosition(this))) return;
             points = [];
             strokeRadius = Radius;
-            strokeInclude = Include && !Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+            strokeInclude = IncludesSamples;
             CaptureMouse();
             Sample(DocumentPoint(e.GetPosition(this)));
             e.Handled = true;
@@ -226,6 +241,7 @@ public partial class MainWindow
         protected override void OnMouseMove(MouseEventArgs e)
         {
             brush = e.GetPosition(this);
+            RefreshCursor();
             if (points is not null) Sample(DocumentPoint(brush.Value));
             InvalidateVisual();
         }
@@ -240,9 +256,15 @@ public partial class MainWindow
 
         protected override void OnLostMouseCapture(MouseEventArgs e)
         {
-            if (points is { Count: > 0 } recorded) strokes.Add(new(recorded.ToArray(), strokeRadius, strokeInclude));
+            RecordStroke();
             points = null;
             base.OnLostMouseCapture(e);
+        }
+
+        private void RecordStroke()
+        {
+            if (points is { Count: > 0 } recorded)
+                strokes.Add(new(recorded.ToArray(), strokeRadius, strokeInclude));
         }
 
         private void Sample(PointD point)
@@ -250,6 +272,13 @@ public partial class MainWindow
             var current = points!;
             if (current.Count > 0 && current[^1] == point) return;
             var start = current.Count == 0 ? point : current[^1];
+            bool include = IncludesSamples;
+            if (strokeInclude != include)
+            {
+                RecordStroke();
+                points = current = [start];
+                strokeInclude = include;
+            }
             current.Add(point);
             PaintOverlay(ContentAwareFill.PaintSampling(mask, tint.PixelWidth, tint.PixelHeight, start, point, strokeRadius, strokeInclude, scale));
         }
