@@ -28,6 +28,9 @@ internal sealed class EditorCanvas : FrameworkElement
         checker = CreateChecker(size);
     }
     private static readonly Pen border = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(110, 119, 136)), 1));
+    private static readonly Pen textBoundsPen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(87, 207, 255)), 1.5)
+        { DashStyle = DashStyles.Dash });
+    private static readonly Pen textBoundsBacking = Frozen(new Pen(Brushes.Black, 3) { DashStyle = DashStyles.Dash });
     private static readonly Pen selectionBacking = Frozen(new Pen(Brushes.Black, 5));
     private static readonly Pen selectionLight = Frozen(new Pen(Brushes.White, 3));
     private static readonly Pen selectionDark = Frozen(new Pen(Brushes.Black, 2) { DashStyle = DashStyles.Dash });
@@ -77,6 +80,7 @@ internal sealed class EditorCanvas : FrameworkElement
     public string? DraggedGuide { get; set; }
     public Area? Selection { get; set; }
     public Rect? Marquee { get; set; }
+    public PointD[][]? TextEditOutline { get; set; }
     internal sealed record PaintOverlay(StrokeArgs Stroke, Area? Clip);
     public BrushDragPreview? ActiveBrush { get; set; }
     public List<BrushDragPreview> PendingBrush { get; } = [];
@@ -180,6 +184,18 @@ internal sealed class EditorCanvas : FrameworkElement
                 dc.DrawEllipse(null, selectionDark, center, r.Width / 2, r.Height / 2);
             }
             else DrawOutline(dc, r);
+        }
+        if (TextEditOutline is { Length: > 0 } textOutline)
+        {
+            var geometry = new StreamGeometry();
+            using (var outline = geometry.Open())
+                foreach (var ring in textOutline)
+                {
+                    outline.BeginFigure(ToView(ring[0]), false, true);
+                    outline.PolyLineTo(ring.Skip(1).Select(ToView).ToArray(), true, false);
+                }
+            dc.DrawGeometry(null, textBoundsBacking, geometry);
+            dc.DrawGeometry(null, textBoundsPen, geometry);
         }
         dc.Pop();
         if (BrushPointer is { } pointer && MouseCursorVisible())

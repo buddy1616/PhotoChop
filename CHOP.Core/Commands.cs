@@ -97,6 +97,13 @@ public sealed class CommandEngine(IRasterBackend backend)
     public Task ExecuteContentAwareFillAsync(ContentAwareFillArgs args, string target) =>
         ExecuteEditAsync(Command.Of("layer.contentAwareFill", args, target));
 
+    public Task ExecuteInvertAsync(string command, string target)
+    {
+        if (command is not ("layer.invertPixels" or "mask.invert" or "vectorMask.invert"))
+            throw new ArgumentException("Expected an invert command.", nameof(command));
+        return ExecuteEditAsync(Command.Of(command, 0, target));
+    }
+
     private async Task ExecuteEditAsync(Command command)
     {
         var snapshot = Current ?? throw new InvalidOperationException("Open a document first.");
@@ -299,6 +306,9 @@ public sealed class CommandEngine(IRasterBackend backend)
         "selection.lasso" => "Lasso Selection",
         "selection.all" => "Select All",
         "selection.invert" => "Invert Selection",
+        "layer.invertPixels" => "Invert Pixels",
+        "mask.invert" => "Invert Layer Mask",
+        "vectorMask.invert" => "Invert Vector Mask",
         "selection.smooth" => "Smooth Selection",
         "selection.feather" => "Feather Selection",
         "mask.maskerStroke" => "Masker Stroke",
@@ -1107,6 +1117,16 @@ public sealed class CommandEngine(IRasterBackend backend)
                 return outer.Selection is { } outlineBounds
                     ? Edit(layer => ApplyInk(doc with { SelectionMask = null }, layer, outlineBounds, (x, y) => outer.Selected(x, y) && !inner.Selected(x, y), strokeInk))
                     : doc;
+            case "layer.invertPixels":
+                return Edit(layer => layer.Kind == LayerKind.Raster ? backend.InvertPixels(doc, layer)
+                    : throw new InvalidDataException("Select a raster layer to invert its pixels."));
+            case "mask.invert":
+                return Edit(layer => layer.Mask is not null ? layer with { Mask = backend.InvertMask(doc, layer) }
+                    : throw new InvalidDataException("Select a raster mask to invert."));
+            case "vectorMask.invert":
+                if (doc.Selection is not null) throw new InvalidDataException("Pixel selections can invert part of a raster mask. Deselect to invert a vector mask.");
+                return Edit(layer => layer.VectorMask is { } vector ? layer with { VectorMask = vector with { Inverted = !vector.Inverted } }
+                    : throw new InvalidDataException("Select a vector mask to invert."));
             case "layer.clearSelection":
             case "layer.moveSelection":
                 bool movingSelection = command.Name == "layer.moveSelection";

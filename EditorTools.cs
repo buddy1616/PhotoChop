@@ -1019,7 +1019,7 @@ public partial class MainWindow
             Menus.Items.OfType<MenuItem>().Any(menu => menu.IsSubmenuOpen)) return;
         var modifiers = Keyboard.Modifiers;
         if ((e.Key == Key.A && modifiers == ModifierKeys.Control) ||
-            (e.Key == Key.I && modifiers == (ModifierKeys.Control | ModifierKeys.Shift)))
+            (e.Key == Key.I && modifiers is ModifierKeys.Control or (ModifierKeys.Control | ModifierKeys.Shift)))
         {
             OnKey(this, e);
             return;
@@ -1033,6 +1033,43 @@ public partial class MainWindow
         if (shortcut is null) return;
         e.Handled = true;
         SetTool(shortcut);
+    }
+
+    private string? InvertTarget()
+    {
+        if (active?.Engine.Current is not { } document || ActiveLayer() is not { } layer || !Editable(document, layer.Id)) return null;
+        if (active.VectorMaskTarget == layer.Id)
+            return layer.VectorMask is not null && document.Selection is null ? "vectorMask.invert" : null;
+        if (active.MaskTarget == layer.Id || active.MaskOnly == layer.Id)
+            return layer.Mask is null ? null : "mask.invert";
+        return layer.Kind == LayerKind.Raster ? "layer.invertPixels" : null;
+    }
+
+    private bool invertingPixels;
+
+    private async void InvertPixelsOrMask()
+    {
+        if (invertingPixels || active is not { ActiveId: { } layerId } session) return;
+        if (InvertTarget() is not { } command)
+        {
+            if (session.VectorMaskTarget is not null && session.Engine.Current?.Selection is not null)
+                Say("Deselect to invert the whole vector mask, or use a raster mask for selected pixels.");
+            return;
+        }
+        invertingPixels = true;
+        StartWaiting();
+        try
+        {
+            await session.Engine.ExecuteInvertAsync(command, layerId);
+            if (ReferenceEquals(active, session)) Refresh();
+            else if (session.Tab is { } tab) tab.Title = session.Title;
+        }
+        catch (Exception error) { Guard(() => throw error); }
+        finally
+        {
+            StopWaiting();
+            invertingPixels = false;
+        }
     }
 
     private void OnKey(object sender, KeyEventArgs e)
@@ -1090,6 +1127,7 @@ public partial class MainWindow
             Key.D => () => Run<Area?>("document.selection", null),
             Key.A when !shift => SelectAllPixels,
             Key.I when shift => InvertSelection,
+            Key.I => InvertPixelsOrMask,
             Key.G when !shift => Group,
             Key.OemSemicolon when !shift => ToggleGuides,
             Key.R when !shift => ToggleRulers,

@@ -31,6 +31,7 @@ public partial class MainWindow
         public Document? DraftSource { get; set; }
         public Command? DraftCommand { get; set; }
         public Command? DisplayedCommand { get; set; }
+        public int OutlineVersion { get; set; }
     }
 
     private TextEditSession? editingText;
@@ -117,6 +118,7 @@ public partial class MainWindow
             else if (e.Key == Key.Enter && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
             { e.Handled = true; FinishTextEdit(); }
         };
+        SetTextEditOutline(edit, doc, rich);
         RefreshTools();
         window.Show();
         editor.Focus();
@@ -153,6 +155,38 @@ public partial class MainWindow
         if (edit.LivePreview && !edit.Timer.IsEnabled) edit.Timer.Start();
     }
 
+    private async void SetTextEditOutline(TextEditSession edit, Document original, RichText rich)
+    {
+        int version = ++edit.OutlineVersion;
+        var target = edit.Draft ?? original;
+        string? id = edit.Create?.Id ?? edit.Layer?.Id;
+        var layer = target.AllLayers().FirstOrDefault(item => item.Id == id);
+        PointD[][] outline = [];
+        if (layer is not null)
+        {
+            if (edit.Draft is null && rich is { Width: > 0, Height: > 0 })
+                layer = layer with { Typography = rich };
+            try
+            {
+                outline = layer.Pixels is null && layer.Typography is not { Width: > 0, Height: > 0 }
+                    ? await Task.Run(() => renderer.TextEditOutline(target, layer))
+                    : renderer.TextEditOutline(target, layer);
+            }
+            catch (Exception error) when (error is InvalidDataException or InvalidOperationException or OverflowException)
+            {
+                System.Diagnostics.Debug.WriteLine(error.Message);
+            }
+        }
+        else if (edit.Create is { CanvasAlignedText: true, Transform: { } position } && rich.Width > 0 && rich.Height > 0)
+        {
+            outline = (rich.Shape ?? SkiaRenderer.TextRectangle(rich.Width, rich.Height)).Select(ring =>
+                ring.Select(point => new PointD(point.X + position.X, point.Y + position.Y)).ToArray()).ToArray();
+        }
+        if (!ReferenceEquals(editingText, edit) || edit.OutlineVersion != version) return;
+        edit.Session.View.TextEditOutline = outline;
+        edit.Session.View.InvalidateVisual();
+    }
+
     private void RefreshTextPreview(TextEditSession edit, TextWarp? temporaryWarp = null)
     {
         edit.Timer.Stop();
@@ -174,6 +208,7 @@ public partial class MainWindow
             }
             catch (InvalidDataException error) { Say(error.Message); }
         }
+        SetTextEditOutline(edit, source, text);
         UpdateCanvas();
     }
 
@@ -184,6 +219,8 @@ public partial class MainWindow
             ? TextEditCommand(edit, ReadRichText(edit), textDefaults) : null;
         edit.Timer.Stop();
         editingText = null;
+        edit.Session.View.TextEditOutline = null;
+        edit.Session.View.InvalidateVisual();
         syncTypographyToolbar = null;
         if (!windowClosed) edit.Window.Close();
         if (command is not null)

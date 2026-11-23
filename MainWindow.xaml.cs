@@ -428,6 +428,8 @@ public partial class MainWindow : Window
         var image = Menu("Image");
         var adjustments = new MenuItem { Header = "Adjustments" };
         image.Items.Add(adjustments);
+        var invertPixels = Item(adjustments, "Invert", InvertPixelsOrMask, "Ctrl+I");
+        adjustments.SubmenuOpened += (_, _) => invertPixels.IsEnabled = InvertTarget() is not null;
         foreach (var kind in new[] { EffectKind.BrightnessContrast, EffectKind.HueSaturation, EffectKind.Opacity, EffectKind.Burn, EffectKind.Dodge })
             Item(adjustments, EffectName(kind), () => AddEffect(kind));
 

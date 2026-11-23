@@ -112,6 +112,31 @@ public sealed class PixelBuffer
         WriteProxy(pixels, index, value);
     }
 
+    public void InvertColor(int index, byte coverage)
+    {
+        if (coverage == 0) return;
+        double amount = coverage / 255d;
+        if (pixels.Native is { } native)
+        {
+            int components = ChannelSamples.ComponentCount(native.Settings.Mode);
+            for (int channel = 0; channel < components; channel++)
+            {
+                var plane = native.Planes[channel];
+                float value = ChannelSamples.Read(plane, native.Settings.Depth, index);
+                ChannelSamples.Write(plane, native.Settings.Depth, index, (float)(value + (1 - 2d * value) * amount));
+            }
+            WriteProxy(pixels, index, Get(index));
+            return;
+        }
+
+        int offset = index * 4;
+        for (int channel = 0; channel < 3; channel++)
+        {
+            int value = pixels.Rgba[offset + channel];
+            pixels.Rgba[offset + channel] = (byte)Math.Round(value + (255 - 2 * value) * amount);
+        }
+    }
+
     private static void WriteProxy(Pixels pixels, int index, PixelValue value)
     {
         int offset = index * 4;

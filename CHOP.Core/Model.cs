@@ -209,6 +209,8 @@ public interface IRasterBackend
     PixelSelection? BucketRegion(Document document, Layer layer, BucketArgs options, bool clipToSelection = true);
     Layer? MoveSelection(Document document, Layer layer, Area selection, int dx, int dy);
     RasterEdit ClearSelection(Document document, Layer layer);
+    Layer InvertPixels(Document document, Layer layer);
+    AlphaMask InvertMask(Document document, Layer layer);
     AlphaMask PaintMask(Document document, Layer layer, StrokeArgs stroke);
     Pixels Stroke(Document document, Layer layer, StrokeArgs stroke);
 }
