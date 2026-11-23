@@ -94,6 +94,9 @@ public sealed class CommandEngine(IRasterBackend backend)
 
     public Task ExecuteImageImportAsync(ImageImportArgs args) => ExecuteEditAsync(Command.Of("layer.importImage", args));
 
+    public Task ExecuteContentAwareFillAsync(ContentAwareFillArgs args, string target) =>
+        ExecuteEditAsync(Command.Of("layer.contentAwareFill", args, target));
+
     private async Task ExecuteEditAsync(Command command)
     {
         var snapshot = Current ?? throw new InvalidOperationException("Open a document first.");
@@ -286,6 +289,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         "document.globalLight" => "Set Global Light",
         "effect.update" => $"Edit {EffectLabel(command.Read<Effect>().Kind)}",
         "layer.scale" => "Scale",
+        "layer.contentAwareFill" => "Content-Aware Fill",
         "layer.move" => "Move layer",
         "layer.moveSelection" => "Move floating pixels",
         "selection.wand" => "Magic Wand",
@@ -861,6 +865,22 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var png = import.Png ?? File.ReadAllBytes(import.Path!);
                 return With(Insert(layers, import.Parent, null, new(import.Id, Name(import.Name), LayerKind.Raster)
                     { Pixels = backend.DecodePng(png) }));
+            case "layer.contentAwareFill":
+                var contentFill = command.Read<ContentAwareFillArgs>();
+                NewId(contentFill.Id);
+                if (doc.Selection is not { } contentBounds || (long)contentBounds.Width * contentBounds.Height > ContentAwareFill.MaxTargetPixels)
+                    throw new InvalidDataException($"Select an area with bounds of at most {ContentAwareFill.MaxTargetPixels:N0} pixels to fill.");
+                var fillAnchor = Wanted();
+                var (fillParent, fillBefore) = PathDestination(fillAnchor.Id, null);
+                var filled = ContentAwareFill.Synthesize(doc, backend.Composite(doc), contentFill);
+                var generated = new Layer(contentFill.Id, "Content-Aware Fill", LayerKind.Raster)
+                {
+                    Pixels = PixelBuffer.Convert(filled.Pixels, doc.Color), Width = filled.Pixels.Width, Height = filled.Pixels.Height
+                };
+                var output = With(Insert(layers, fillParent, fillBefore, generated));
+                var placement = new Projective(1, 0, filled.X, 0, 1, filled.Y);
+                if (fillParent is not null) placement = placement.Then(backend.ParentCoordinates(output, generated).Inverse());
+                return output.ReplaceLayer(generated.Id, generated with { RasterGrid = placement });
             case "layer.pastePixels":
                 var paste = command.Read<PastePixelsArgs>();
                 NewId(paste.Id);
