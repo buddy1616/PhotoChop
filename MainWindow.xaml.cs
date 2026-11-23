@@ -414,6 +414,7 @@ public partial class MainWindow : Window
         Item(transformItem, "Flip Vertical", () => RunLayer("layer.flip", new FlipArgs(false)));
         var fill = Item(edit, "Fill…", FillPixels);
         var stroke = Item(edit, "Stroke…", StrokeSelection);
+        var contentFill = Item(edit, "Content-Aware Fill…", OpenContentAwareFill);
         var textItem = Item(edit, "Edit text…", EditText);
         var shapeItem = Item(edit, "Edit shape…", EditShape);
         edit.Items.Add(new Separator());
@@ -424,6 +425,7 @@ public partial class MainWindow : Window
             transformItem.IsEnabled = selected is not null && selected.Kind != LayerKind.Effect;
             fill.IsEnabled = selected?.Kind == LayerKind.Raster;
             stroke.IsEnabled = fill.IsEnabled;
+            contentFill.IsEnabled = selected is not null && active?.Engine.Current?.Selection is not null;
             textItem.IsEnabled = selected?.Kind == LayerKind.Text;
             shapeItem.IsEnabled = selected?.Kind is LayerKind.Rectangle or LayerKind.Ellipse;
         };
