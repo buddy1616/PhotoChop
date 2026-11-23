@@ -1,45 +1,36 @@
+using System.IO;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using Chop.Core;
-using SkiaSharp;
 using Chop.Rendering;
 
 namespace PhotoChop;
 
 public partial class MainWindow
 {
-    private sealed class TextEditSession(Session session, RichTextBox editor, LayerArgs? create, Layer? layer, Canvas host, SKMatrix placement, RichText text)
+    private sealed class TextEditSession(Session session, RichTextBox editor, Window window, LayerArgs? create, Layer? layer, RichText text)
     {
         public Session Session { get; } = session;
         public RichTextBox Editor { get; } = editor;
+        public Window Window { get; } = window;
         public LayerArgs? Create { get; } = create;
         public Layer? Layer { get; } = layer;
-        public Canvas Host { get; } = host;
-        public SKMatrix Placement { get; } = placement;
-        private Document? source;
-        private Document? background;
-
-        public Document? BackgroundFor(Document document)
-        {
-            if (Layer is null) return null;
-            if (!ReferenceEquals(source, document))
-            {
-                source = document;
-                background = document.AllLayers().FirstOrDefault(item => item.Id == Layer.Id) is { } layer
-                    ? document.ReplaceLayer(layer.Id, layer with { Visible = false }) : null;
-            }
-            return background;
-        }
         public TextWarp? Warp { get; set; } = text.Warp;
         public double Width { get; set; } = text.Width;
         public bool Modified { get; set; }
+        public bool LivePreview { get; set; } = true;
+        public DispatcherTimer Timer { get; } = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(85) };
+        public Document? Draft { get; set; }
+        public Document? DraftSource { get; set; }
+        public Command? DraftCommand { get; set; }
+        public Command? DisplayedCommand { get; set; }
     }
+
     private TextEditSession? editingText;
     private CharacterStyle textDefaults = new();
 
@@ -58,12 +49,6 @@ public partial class MainWindow
             new(layer.Font, layer.Size, layer.Color);
         var rich = layer?.Typography ?? RichText.FromPlain(layer?.Text ?? "", style,
             layer is { TextBend: not 0 } ? new(TextWarpStyle.Arc, layer.TextBend) : null);
-        var placement = SKMatrix.CreateTranslation((float)(create?.Transform?.X ?? 0), (float)(create?.Transform?.Y ?? 0));
-        if (create?.Parent is { } parent && SkiaRenderer.WorldMatrix(doc.Layers, parent, SKMatrix.Identity) is { } parentWorld)
-            placement = SKMatrix.Concat(parentWorld, placement);
-        if (layer is not null && SkiaRenderer.WorldMatrix(doc.Layers, layer.Id, SKMatrix.Identity) is { } world)
-            placement = SKMatrix.Concat(world, SKMatrix.CreateTranslation(layer.RasterX, layer.RasterY));
-
         var flow = new FlowDocument { PagePadding = new Thickness(0), FontFamily = new FontFamily(ResolveEditorFamily(style.Font)),
             FontSize = style.Size, Foreground = Ink(style.Color), TextAlignment = TextAlignment.Left };
         foreach (var item in rich.Paragraphs)
@@ -77,21 +62,43 @@ public partial class MainWindow
         }
         var editor = new RichTextBox(flow)
         {
-            Padding = new Thickness(2), BorderThickness = new Thickness(0),
-            Background = Brushes.Transparent, Foreground = Ink(style.Color), CaretBrush = Brushes.White,
-            HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
-            AcceptsReturn = true, IsInactiveSelectionHighlightEnabled = true, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
-            HorizontalScrollBarVisibility = rich.Width == 0 ? ScrollBarVisibility.Hidden : ScrollBarVisibility.Disabled,
+            Padding = new Thickness(8), Background = Brushes.Transparent, Foreground = Ink(style.Color), CaretBrush = Brushes.DeepSkyBlue,
+            AcceptsReturn = true, IsInactiveSelectionHighlightEnabled = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             FocusVisualStyle = null, IsUndoEnabled = true
         };
-        var host = new Canvas { ClipToBounds = true };
-        host.Children.Add(editor);
-        editingText = new(active, editor, create, layer, host, placement, rich);
-        Grid.SetColumn(host, 1);
-        Grid.SetRow(host, 1);
-        Panel.SetZIndex(host, 10);
-        active.Viewport.Children.Add(host);
-        editor.TextChanged += (_, _) => { if (editingText is { } edit) edit.Modified = true; };
+        var window = new Window
+        {
+            Owner = EditorOwner, Title = layer is null ? "New Text Layer" : $"Edit Text · {layer.Name}",
+            Width = 450, Height = 250, MinWidth = 300, MinHeight = 175,
+            ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        if (active.View.MovingText is not null) ClearTextMovePreview(active);
+        var edit = new TextEditSession(active, editor, window, create, layer, rich);
+        editingText = edit;
+        var layout = new DockPanel { Margin = new Thickness(10), Background = new SolidColorBrush(Color.FromRgb(37, 40, 48)) };
+        var actions = new DockPanel { Margin = new Thickness(0, 8, 0, 0), LastChildFill = false };
+        DockPanel.SetDock(actions, System.Windows.Controls.Dock.Bottom);
+        layout.Children.Add(actions);
+        var live = new CheckBox { Content = "Live preview", IsChecked = true, VerticalAlignment = VerticalAlignment.Center };
+        live.Click += (_, _) =>
+        {
+            edit.LivePreview = live.IsChecked == true;
+            RefreshTextPreview(edit);
+        };
+        actions.Children.Add(live);
+        foreach (var button in new[] { Button("Cancel", () => FinishTextEdit(cancel: true)), Button("Apply", () => FinishTextEdit()) })
+        {
+            DockPanel.SetDock(button, System.Windows.Controls.Dock.Right);
+            actions.Children.Add(button);
+        }
+        layout.Children.Add(editor);
+        window.Content = layout;
+        window.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(editingText, edit)) FinishTextEdit(cancel: true, windowClosed: true);
+        };
+        edit.Timer.Tick += (_, _) => RefreshTextPreview(edit);
+        editor.TextChanged += (_, _) => TextEditChanged(edit);
         editor.SelectionChanged += (_, _) => syncTypographyToolbar?.Invoke();
         editor.PreviewKeyDown += (_, e) =>
         {
@@ -99,12 +106,11 @@ public partial class MainWindow
             else if (e.Key == Key.Enter && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
             { e.Handled = true; FinishTextEdit(); }
         };
-        PositionTextEditor();
-        if (layer is not null) UpdateCanvas();
         RefreshTools();
+        window.Show();
         editor.Focus();
         editor.CaretPosition = flow.ContentEnd;
-        Say("Edit text on the canvas. Numpad Enter or Ctrl+Enter applies. Esc cancels.");
+        Say("Edit text in the separate window. Numpad Enter or Ctrl+Enter applies. Esc cancels.");
     }
 
     private void TextEditorKeyMessage(ref MSG message, ref bool handled)
@@ -119,58 +125,66 @@ public partial class MainWindow
         FinishTextEdit();
     }
 
-    private void PositionTextEditor()
+    private static Command? TextEditCommand(TextEditSession edit, RichText rich, CharacterStyle fallback)
     {
-        if (editingText is not { } edit) return;
-        var editor = edit.Editor;
-        double zoom = edit.Session.Zoom;
-        var offset = edit.Session.Offset;
-        var placement = edit.Placement;
-        Canvas.SetLeft(editor, placement.TransX * zoom + offset.X);
-        Canvas.SetTop(editor, placement.TransY * zoom + offset.Y);
-        editor.RenderTransform = new MatrixTransform(new Matrix(
-            placement.ScaleX * zoom, placement.SkewY * zoom,
-            placement.SkewX * zoom, placement.ScaleY * zoom, 0, 0));
-        editor.HorizontalScrollBarVisibility = edit.Width > 0 ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Hidden;
-        editor.Width = edit.Width > 0 ? edit.Width : double.NaN;
-        editor.MinWidth = 16;
-        editor.MinHeight = 16;
-        editor.MaxWidth = edit.Width > 0 ? double.PositiveInfinity : 16384;
-
+        var style = rich.Paragraphs.SelectMany(p => p.Runs).FirstOrDefault()?.Style ?? fallback;
+        if (edit.Create is { } create && rich.PlainText.Length > 0)
+            return Command.Of("layer.create", create with { Text = rich.PlainText, Font = style.Font, Size = style.Size,
+                Color = style.Color, Typography = rich });
+        return edit.Layer is { } layer
+            ? Command.Of("layer.text", new TextArgs(rich.PlainText, style.Font, style.Size, style.Color, Typography: rich), layer.Id)
+            : null;
     }
 
-    private void FinishTextEdit(bool cancel = false)
+    private static void TextEditChanged(TextEditSession edit)
+    {
+        edit.Modified = true;
+        if (edit.LivePreview && !edit.Timer.IsEnabled) edit.Timer.Start();
+    }
+
+    private void RefreshTextPreview(TextEditSession edit, TextWarp? temporaryWarp = null)
+    {
+        edit.Timer.Stop();
+        if (!ReferenceEquals(editingText, edit) || !ReferenceEquals(active, edit.Session) ||
+            edit.Session.Engine.Current is not { } source) return;
+        var text = ReadRichText(edit);
+        if (temporaryWarp is not null) text = text with { Warp = temporaryWarp };
+        var command = edit.LivePreview && (edit.Modified || temporaryWarp is not null)
+            ? TextEditCommand(edit, text, textDefaults) : null;
+        edit.Draft = null;
+        edit.DraftCommand = null;
+        edit.DraftSource = source;
+        if (command is not null)
+        {
+            try
+            {
+                edit.Draft = edit.Session.Engine.Preview(source, command);
+                edit.DraftCommand = command;
+            }
+            catch (InvalidDataException error) { Say(error.Message); }
+        }
+        UpdateCanvas();
+    }
+
+    private void FinishTextEdit(bool cancel = false, bool windowClosed = false)
     {
         if (editingText is not { } edit) return;
-        RichText? text = cancel ? null : ReadRichText(edit);
+        var command = !cancel && edit.Modified && ReferenceEquals(active, edit.Session)
+            ? TextEditCommand(edit, ReadRichText(edit), textDefaults) : null;
+        edit.Timer.Stop();
         editingText = null;
         syncTypographyToolbar = null;
-        edit.Session.Viewport.Children.Remove(edit.Host);
-        bool previewWasVisible = preview is not null;
-        preview = null;
-        if (text is not null && ReferenceEquals(active, edit.Session) &&
-            (edit.Layer is not null && edit.Modified || edit.Create is not null && text.PlainText.Length > 0))
+        if (!windowClosed) edit.Window.Close();
+        if (command is not null)
         {
-            CharacterStyle style = text.Paragraphs.SelectMany(p => p.Runs).FirstOrDefault()?.Style ?? textDefaults;
-            if (edit.Create is { } create)
-            {
-                var previous = edit.Session.Engine.Current;
-                Run("layer.create", create with { Text = text.PlainText, Font = style.Font, Size = style.Size, Color = style.Color,
-                    Typography = text }, selectId: create.Id, beforeRefresh: session =>
-                    {
-                        if (session.Engine.Current is not { } document || ActiveLayer() is not { } added) return;
-                        var underlay = previous is not null && session.Rendered is { } rendered &&
-                            SameComposite(previous, rendered) && SkiaRenderer.IsTopText(document.Layers, added.Id)
-                            ? session.Frame : null;
-                        ShowTextMovePreview(session, document, added, underlay, newlyCreated: true);
-                    });
-            }
-            else if (edit.Layer is { } layer)
-                Run("layer.text", new TextArgs(text.PlainText, style.Font, style.Size, style.Color, Typography: text), layer.Id, layer.Id);
+            if (ReferenceEquals(edit.DraftSource, edit.Session.Engine.Current) &&
+                edit.DisplayedCommand is { } displayed && displayed.Args.GetRawText() == command.Args.GetRawText())
+                edit.Session.KeepTextFrame = true;
+            Run(command.Name, command.Args, command.Target, edit.Create?.Id ?? edit.Layer?.Id);
         }
         else
         {
-            if (edit.Layer is not null || previewWasVisible) UpdateCanvas();
+            if (edit.Draft is not null || edit.DisplayedCommand is not null) UpdateCanvas();
             RefreshTools();
         }
     }
@@ -178,10 +192,13 @@ public partial class MainWindow
     private static Brush Ink(string hex) => new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)!);
     private static Run WriteRun(string content, CharacterStyle s)
     {
+        var ink = (SolidColorBrush)Ink(s.Color);
+        var color = ink.Color;
+        var backdrop = .2126 * color.R + .7152 * color.G + .0722 * color.B < 105 ? Brushes.Gainsboro : null;
         var run = new Run(content) { Tag = s, FontFamily = new FontFamily(ResolveEditorFamily(s.Font)), FontSize = s.Size,
             FontWeight = FontWeight.FromOpenTypeWeight(s.FauxBold ? Math.Max(700, s.Weight) : s.Weight),
             FontStyle = s.Italic || s.FauxItalic ? FontStyles.Italic : FontStyles.Normal,
-            Foreground = Ink(s.Color), BaselineAlignment = s.Script switch
+            Foreground = ink, Background = backdrop, BaselineAlignment = s.Script switch
             {
                 TextScript.Superscript => BaselineAlignment.Superscript, TextScript.Subscript => BaselineAlignment.Subscript, _ => BaselineAlignment.Baseline
             } };
@@ -256,7 +273,7 @@ public partial class MainWindow
         if (editingText is not { } edit) return;
         if (!edit.Editor.Selection.IsEmpty) SetCustomTextStyle(update);
         else edit.Editor.Selection.ApplyPropertyValue(property, value);
-        edit.Modified = true;
+        TextEditChanged(edit);
     }
 
     private void SetCustomTextStyle(Func<CharacterStyle, CharacterStyle> update)
@@ -267,7 +284,7 @@ public partial class MainWindow
         if (selection.IsEmpty)
         {
             if (selection.Start.Parent is Run run) run.Tag = update(ReadRun(run));
-            edit.Modified = true;
+            TextEditChanged(edit);
             return;
         }
         var affected = edit.Editor.Document.Blocks.OfType<Paragraph>().SelectMany(p => TextInlines(p.Inlines)).OfType<Run>()
@@ -291,6 +308,6 @@ public partial class MainWindow
             last = changed;
         }
         if (first is not null && last is not null) selection.Select(first.ContentStart, last.ContentEnd);
-        edit.Modified = true;
+        TextEditChanged(edit);
     }
 }

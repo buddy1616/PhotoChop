@@ -73,7 +73,7 @@ public partial class MainWindow
         var chip = StyleFields.ColorChip(current.Color);
         var swatch = Button("", () =>
         {
-            if (ColorPickerDialog.Show(EditorOwner, "Text color", CurrentTextStyle().Color) is not { } value) return;
+            if (ColorPickerDialog.Show(editingText?.Window ?? EditorOwner, "Text color", CurrentTextStyle().Color) is not { } value) return;
             SetTextProperty(TextElement.ForegroundProperty, Ink(value), s => s with { Color = value });
             chip.Background = Ink(value);
         }, "Text color");
@@ -134,7 +134,7 @@ public partial class MainWindow
         var range = edit.Editor.Selection;
         foreach (var p in edit.Editor.Document.Blocks.OfType<Paragraph>())
             if (p.ContentEnd.CompareTo(range.Start) >= 0 && p.ContentStart.CompareTo(range.End) <= 0) update(p);
-        edit.Modified = true;
+        TextEditChanged(edit);
     }
 
     private static void TypographyRow(Panel body, string label, FrameworkElement control)
@@ -215,8 +215,7 @@ public partial class MainWindow
             {
                 if (editingText is not { } edit) return;
                 edit.Width = v;
-                edit.Modified = true;
-                PositionTextEditor();
+                TextEditChanged(edit);
             }));
         }
         view.IsVisibleChanged += (_, _) => { if (view.IsVisible) RefreshFields(); };
@@ -229,7 +228,7 @@ public partial class MainWindow
         if (editingText is null && ActiveLayer() is { Kind: LayerKind.Text } layer) EditText(layer);
         if (editingText is not { } edit) return;
         var initial = edit.Warp ?? new();
-        var dialog = new Window { Owner = EditorOwner, Title = "Warp Text", Width = 405, SizeToContent = SizeToContent.Height,
+        var dialog = new Window { Owner = edit.Window, Title = "Warp Text", Width = 405, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var body = new StackPanel { Margin = new Thickness(12) };
         var styles = new ComboBox { ItemsSource = Enum.GetValues<TextWarpStyle>(), SelectedItem = initial.Style };
@@ -248,16 +247,7 @@ public partial class MainWindow
         }
         TextWarp Read() => new((TextWarpStyle)styles.SelectedItem, bend.Slider.Value / 100, vertical.IsChecked == true,
             horizontal.Slider.Value / 100, perpendicular.Slider.Value / 100);
-        void PreviewWarp()
-        {
-            if (edit.Session.Engine.Current is not { } doc) return;
-            var rich = ReadRichText(edit) with { Warp = Read() };
-            var style = CurrentTextStyle();
-            var command = edit.Create is { } create ? Command.Of("layer.create", create with { Typography = rich }) :
-                Command.Of("layer.text", new TextArgs(rich.PlainText, style.Font, style.Size, style.Color, Typography: rich), edit.Layer!.Id);
-            try { preview = edit.Session.Engine.Preview(doc, command); UpdateCanvas(); }
-            catch (InvalidDataException) { }
-        }
+        void PreviewWarp() => RefreshTextPreview(edit, Read());
         styles.SelectionChanged += (_, _) => PreviewWarp();
         vertical.Click += (_, _) => PreviewWarp();
         bend.Slider.ValueChanged += (_, _) => PreviewWarp();
@@ -268,12 +258,10 @@ public partial class MainWindow
         body.Children.Add(apply);
         body.Children.Add(new Button { Content = "Cancel", IsCancel = true, Margin = new Thickness(2) });
         dialog.Content = body;
-        edit.Editor.Visibility = Visibility.Hidden;
         dialog.Loaded += (_, _) => PreviewWarp();
-        if (dialog.ShowDialog() == true) { edit.Warp = Read(); edit.Modified = true; }
-        edit.Editor.Visibility = Visibility.Visible;
-        preview = null;
-        UpdateCanvas();
+        if (dialog.ShowDialog() == true) { edit.Warp = Read(); TextEditChanged(edit); }
+        RefreshTextPreview(edit);
+        edit.Window.Activate();
         edit.Editor.Focus();
     }
 }

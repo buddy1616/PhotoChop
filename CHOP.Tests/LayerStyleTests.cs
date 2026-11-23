@@ -7,6 +7,29 @@ namespace Chop.Tests;
 public sealed class LayerStyleTests
 {
     [Fact]
+    public void WarpedTextPreviewMatchesTheAppliedLayerInsideATransformedGroup()
+    {
+        var renderer = new SkiaRenderer();
+        var engine = new CommandEngine(renderer);
+        engine.Execute(Command.Of("document.create", new NewArgs("preview", 192, 128)));
+        engine.Execute(Command.Of("layer.create", new LayerArgs("group", "Group", LayerKind.Group,
+            Transform: new(13, 9, 0.9, 1.1, 11))));
+        var rich = RichText.FromPlain("Preview", new(Size: 24, Color: "#FFFF8020"), new(TextWarpStyle.Arc, .35));
+        var command = Command.Of("layer.create", new LayerArgs("text", "Text", LayerKind.Text, Parent: "group",
+            Transform: new(20, 25), Typography: rich));
+        var source = engine.Current!;
+        int history = engine.History.Count;
+        var draft = renderer.Composite(engine.Preview(source, command));
+        Assert.Same(source, engine.Current);
+        Assert.Equal(history, engine.History.Count);
+        Assert.Contains(Enumerable.Range(0, draft.Width * draft.Height), pixel => draft.Rgba[pixel * 4 + 3] > 0);
+
+        engine.Execute(command);
+        Assert.Equal(draft.Rgba, renderer.Composite(engine.Current!).Rgba);
+        Assert.Equal(history + 1, engine.History.Count);
+    }
+
+    [Fact]
     public void TextDragUsesTheSameRasterAtTheCommandedPlacement()
     {
         var renderer = new SkiaRenderer();
