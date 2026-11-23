@@ -112,6 +112,33 @@ public sealed class PixelBuffer
         WriteProxy(pixels, index, value);
     }
 
+    public void InvertColorRow(int first, int count)
+    {
+        var rgba = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(pixels.Rgba.AsSpan(first * 4, count * 4));
+        if (pixels.Native is { } native)
+        {
+            int components = ChannelSamples.ComponentCount(native.Settings.Mode);
+            if (native.Settings.Mode != ChannelColorMode.Rgb || native.Settings.Depth == ChannelDepth.Bit32)
+            {
+                for (int i = first; i < first + count; i++) InvertColor(i, 255);
+                return;
+            }
+            int bytes = ChannelSamples.Bytes(native.Settings.Depth);
+            for (int channel = 0; channel < components; channel++)
+                foreach (ref byte sample in native.Planes[channel].AsSpan(first * bytes, count * bytes))
+                    sample = (byte)~sample;
+        }
+
+        const uint rgb = 0x00FFFFFF;
+        var mask = new System.Numerics.Vector<uint>(rgb);
+        int length = System.Numerics.Vector<uint>.Count;
+        int offset = 0;
+        if (System.Numerics.Vector.IsHardwareAccelerated)
+            for (; offset <= rgba.Length - length; offset += length)
+                (new System.Numerics.Vector<uint>(rgba[offset..]) ^ mask).CopyTo(rgba[offset..]);
+        for (; offset < rgba.Length; offset++) rgba[offset] ^= rgb;
+    }
+
     public void InvertColor(int index, byte coverage)
     {
         if (coverage == 0) return;

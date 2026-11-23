@@ -9,17 +9,44 @@ public sealed partial class SkiaRenderer
     {
         if (ResolveRaster(layer) is not { } raster) return layer;
         var source = raster.Pixels;
-        var world = WorldMatrix(document.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
+        var bounds = new SKRectI(raster.X, raster.Y, raster.X + source.Width, raster.Y + source.Height);
+        var world = document.Selection is null ? SKMatrix.Identity :
+            WorldMatrix(document.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
+        bool integerTranslation = world == SKMatrix.CreateTranslation(world.TransX, world.TransY) &&
+            world.TransX == MathF.Truncate(world.TransX) && world.TransY == MathF.Truncate(world.TransY) &&
+            Math.Abs(world.TransX) <= 1_000_000 && Math.Abs(world.TransY) <= 1_000_000;
+        int dx = integerTranslation ? (int)world.TransX : 0, dy = integerTranslation ? (int)world.TransY : 0;
+        if (document.Selection is { } selection && world.TryInvert(out var inverse) &&
+            world.Persp0 == 0 && world.Persp1 == 0 && world.Persp2 == 1)
+        {
+            var local = inverse.MapRect(SKRect.Create(selection.X, selection.Y, selection.Width, selection.Height));
+            bounds.Intersect(new SKRectI(
+                (int)Math.Clamp(Math.Floor(local.Left), bounds.Left, bounds.Right),
+                (int)Math.Clamp(Math.Floor(local.Top), bounds.Top, bounds.Bottom),
+                (int)Math.Clamp(Math.Ceiling(local.Right), bounds.Left, bounds.Right),
+                (int)Math.Clamp(Math.Ceiling(local.Bottom), bounds.Top, bounds.Bottom)));
+            if (bounds.IsEmpty) return layer;
+        }
+
         var output = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
         output.Copy(source, 0, 0, source.Width * source.Height);
         bool changed = false;
-        for (int y = 0; y < source.Height; y++)
-        for (int x = 0; x < source.Width; x++)
+        for (int y = bounds.Top; y < bounds.Bottom; y++)
         {
-            byte amount = SelectionAt(document, world, x + raster.X, y + raster.Y);
-            if (amount == 0) continue;
-            output.InvertColor(y * source.Width + x, amount);
-            changed = true;
+            int index = (y - raster.Y) * source.Width + bounds.Left - raster.X;
+            if (document.Selection is null || integerTranslation && document.SelectionMask is null)
+            {
+                output.InvertColorRow(index, bounds.Width);
+                changed = true;
+                continue;
+            }
+            for (int x = bounds.Left; x < bounds.Right; x++, index++)
+            {
+                byte amount = integerTranslation ? document.SelectionAmount(x + dx, y + dy) : SelectionAt(document, world, x, y);
+                if (amount == 0) continue;
+                output.InvertColor(index, amount);
+                changed = true;
+            }
         }
         return changed ? layer with { Pixels = output.Finish(), RasterX = raster.X, RasterY = raster.Y, PixelShifts = [] } : layer;
     }
