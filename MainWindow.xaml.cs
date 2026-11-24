@@ -24,6 +24,8 @@ public partial class MainWindow : Window
         {
             using var file = File.OpenRead(path);
             Icon = BitmapFrame.Create(file, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+            SourceInitialized += (_, _) => TaskbarIcon.Apply(this, path);
+            Closing += (_, args) => { if (!args.Cancel) TaskbarIcon.Clear(this); };
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or FormatException or NotSupportedException)
         {
