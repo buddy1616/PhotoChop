@@ -91,8 +91,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
     {
         using var codec = SKCodec.Create(new SKMemoryStream(data)) ?? throw new InvalidDataException("Invalid image data.");
         if (codec.EncodedFormat != SKEncodedImageFormat.Png &&
-            (pngOnly || codec.EncodedFormat is not (SKEncodedImageFormat.Jpeg or SKEncodedImageFormat.Webp)))
-            throw new InvalidDataException(pngOnly ? "Expected PNG data." : "Choose a PNG, JPEG, or WebP image.");
+            (pngOnly || codec.EncodedFormat is not (SKEncodedImageFormat.Jpeg or SKEncodedImageFormat.Webp or SKEncodedImageFormat.Ico)))
+            throw new InvalidDataException(pngOnly ? "Expected PNG data." : "Choose a PNG, JPEG, WebP, or ICO image.");
         Format.Dimensions(codec.Info.Width, codec.Info.Height);
         return ReadIntoArray(codec.Info.Width, codec.Info.Height, (info, address) =>
         {
