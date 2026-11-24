@@ -18,7 +18,7 @@ public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? P
     string Color = "#FFFFFFFF", int Width = 100, int Height = 100, double TextBend = 0, RichText? Typography = null, bool CanvasAlignedText = false);
 public sealed record ImportArgs(string Id, string Name, byte[]? Png = null, string? Parent = null, string? Path = null);
 public sealed record PathArgs(string Path);
-public enum ImageExportFormat { Png, Jpeg, WebP, Svg }
+public enum ImageExportFormat { Png, Jpeg, WebP, Svg, Ico }
 public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExportFormat.Png);
 public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null, string? Path = null,
     string? Parent = null, string? DocumentId = null);
@@ -213,7 +213,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (psd.Data is null || psd.Path is not null)
                     throw new InvalidDataException("PSD import requires either embedded PSD bytes or a file path.");
                 var importedPsd = PsdImport.Read(psd.Data, psd.Id, psd.Flattened);
-                Reset(importedPsd.Document, null);
+                Reset(importedPsd.Document, null, "Imported PSD");
                 LastImportWarnings = importedPsd.Warnings;
                 return;
             case "document.importImage":
@@ -226,7 +226,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 var imageLayer = new Layer(startImage.Id, Name(startImage.Name), LayerKind.Raster)
                     { Width = imported.Width, Height = imported.Height, Pixels = PixelBuffer.Convert(imported, imageColor) };
                 Reset(new Document(startImage.DocumentId ?? startImage.Id + "-document", imported.Width, imported.Height)
-                    { Color = imageColor, Layers = [imageLayer] }, null);
+                    { Color = imageColor, Layers = [imageLayer] }, null, "Imported image");
                 return;
             case "document.open":
                 var open = command.Read<OpenArgs>();
@@ -540,17 +540,19 @@ public sealed class CommandEngine(IRasterBackend backend)
                 }
             }
             if (i == history.Count - 1 || (size <= limit && history.Count - i <= 250)) continue;
-            history.RemoveRange(0, i + 1);
-            HistoryBase += i + 1;
+            // Keep the current document and the immediate undo state, even for large imports.
+            int remove = Math.Min(i + 1, history.Count - 2);
+            history.RemoveRange(0, remove);
+            HistoryBase += remove;
             cursor = history.Count - 1;
             break;
         }
     }
 
-    private void Reset(Document document, string? path)
+    private void Reset(Document document, string? path, string? label = null)
     {
         history.Clear();
-        history.Add(new(path is null ? "New document" : "Opened document", document));
+        history.Add(new(label ?? (path is null ? "New document" : "Opened document"), document));
         cursor = 0;
         HistoryBase = 0;
         Path = path;

@@ -8,7 +8,7 @@ public partial class MainWindow
 {
     private bool importingDroppedFiles;
 
-    private static bool IsRasterFile(string path) => Path.GetExtension(path).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp";
+    private static bool IsRasterFile(string path) => Path.GetExtension(path).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".ico";
 
     private static bool IsSupportedDrop(string path) =>
         IsRasterFile(path) || Path.GetExtension(path).ToLowerInvariant() is ".chop" or ".psd";

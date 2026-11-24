@@ -388,6 +388,7 @@ public partial class MainWindow : Window
         Item(export, "PNG", ExportPng, "Ctrl+Shift+E");
         Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", ImageExportFormat.Jpeg));
         Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", ImageExportFormat.WebP));
+        Item(export, "ICO", () => ExportImage("Windows Icon", ".ico", "*.ico", ImageExportFormat.Ico));
         Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", ImageExportFormat.Svg));
         var close = Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
         save.IsEnabled = saveAs.IsEnabled = close.IsEnabled = false;
@@ -767,7 +768,7 @@ public partial class MainWindow : Window
 
     private async void ImportImage()
     {
-        var picker = new OpenFileDialog { Filter = "Images (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp" };
+        var picker = new OpenFileDialog { Filter = "Images (*.png;*.jpg;*.jpeg;*.webp;*.ico)|*.png;*.jpg;*.jpeg;*.webp;*.ico" };
         if (picker.ShowDialog(EditorOwner) == true) await ImportImagePath(picker.FileName, active);
     }
 
