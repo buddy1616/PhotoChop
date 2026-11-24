@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using AvalonDock.Layout;
 using AvalonDock.Layout.Serialization;
 using Chop.Core;
@@ -16,6 +17,20 @@ namespace PhotoChop;
 
 public partial class MainWindow : Window
 {
+    private void LoadWindowIcon()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "PhotoChop.ico");
+        try
+        {
+            using var file = File.OpenRead(path);
+            Icon = BitmapFrame.Create(file, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or FormatException or NotSupportedException)
+        {
+            System.Diagnostics.Debug.WriteLine($"Could not load the window icon: {error.Message}");
+        }
+    }
+
     private sealed class Session(CommandEngine engine)
     {
         public DocumentViewport Viewport { get; } = new();
@@ -121,6 +136,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        LoadWindowIcon();
         HookFileDrops(this);
         PreviewKeyDown += (_, _) => RefreshMarqueeCursor();
         PreviewKeyUp += (_, _) => RefreshMarqueeCursor();
