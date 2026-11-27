@@ -99,8 +99,8 @@ public sealed partial class SkiaRenderer
         _ => SKBlendMode.SrcOver
     };
 
-    private static bool IsPassThroughGroup(Layer layer) =>
-        layer.Kind == LayerKind.Group && layer.PassThrough && layer.Opacity == 1 && layer.FillOpacity == 1 && !layer.Clipped &&
+    private static bool IsPassThroughGroup(Layer layer, bool withinClippingStack = false) =>
+        layer.Kind == LayerKind.Group && layer.PassThrough && layer.Opacity == 1 && layer.FillOpacity == 1 && (!layer.Clipped || withinClippingStack) &&
         layer.Placement == new Placement() && SpatialMatrix(layer) == SKMatrix.Identity &&
         (layer.Mask is null || !layer.MaskEnabled) && !ActiveVectorMask(layer.VectorMask) &&
         (!layer.TransformsEnabled || !layer.Effects.Any(ProcessesPixels)) &&

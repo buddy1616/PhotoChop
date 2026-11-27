@@ -55,7 +55,7 @@ public partial class MainWindow
         {
             if (updating || font.SelectedItem is not FontFamily family) return;
             updating = true;
-            SetTextProperty(TextElement.FontFamilyProperty, family, s => s with { Font = family.Source });
+            SetTextProperty(TextElement.FontFamilyProperty, family, s => s with { Font = family.Source }, applyToAllWhenNoSelection: true);
             Faces(family);
             updating = false;
         };
@@ -63,8 +63,8 @@ public partial class MainWindow
         {
             if (updating || face.SelectedItem is not FontChoice choice) return;
             updating = true;
-            SetTextProperty(TextElement.FontWeightProperty, FontWeight.FromOpenTypeWeight(choice.Weight), s => s with { Weight = choice.Weight });
-            SetTextProperty(TextElement.FontStyleProperty, choice.Italic ? FontStyles.Italic : FontStyles.Normal, s => s with { Italic = choice.Italic });
+            SetTextProperty(TextElement.FontWeightProperty, FontWeight.FromOpenTypeWeight(choice.Weight), s => s with { Weight = choice.Weight }, applyToAllWhenNoSelection: true);
+            SetTextProperty(TextElement.FontStyleProperty, choice.Italic ? FontStyles.Italic : FontStyles.Normal, s => s with { Italic = choice.Italic }, applyToAllWhenNoSelection: true);
             updating = false;
         };
         var size = TypographyNumber(current.Size, 1, 512, value =>
@@ -78,6 +78,7 @@ public partial class MainWindow
             chip.Background = Ink(value);
         }, "Text color");
         swatch.Content = chip;
+        foreach (var combo in new[] { font, face, align }) LiveComboNavigation.Enable(combo);
         options.Children.Add(font);
         options.Children.Add(face);
         options.Children.Add(size);

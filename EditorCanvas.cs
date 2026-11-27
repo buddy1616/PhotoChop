@@ -260,6 +260,7 @@ internal sealed class EditorCanvas : FrameworkElement
             for (int i = 0; i < 4; i++)
             {
                 var a = controlPoints[i]; var b = controlPoints[(i + 1) % 4];
+                dc.DrawLine(selectionBacking, a, b);
                 dc.DrawLine(selectionLight, a, b);
                 dc.DrawRectangle(Brushes.White, border, new Rect(a.X - 4, a.Y - 4, 8, 8));
                 if (ShowTransformEdges) dc.DrawRectangle(Brushes.White, border,

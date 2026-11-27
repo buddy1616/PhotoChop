@@ -170,12 +170,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
         }
     }
 
-    private void DrawUnclippedTier(SKBitmap surface, SKCanvas canvas, ReadOnlySpan<Layer> layers, Area region, SKMatrix parent, ColorSettings? precision = null)
+    private void DrawUnclippedTier(SKBitmap surface, SKCanvas canvas, ReadOnlySpan<Layer> layers, Area region, SKMatrix parent,
+        ColorSettings? precision = null, bool withinClippingStack = false)
     {
         foreach (var layer in layers)
         {
             if (!layer.Visible || layer.Opacity == 0) continue;
-            if (IsPassThroughGroup(layer))
+            if (IsPassThroughGroup(layer, withinClippingStack))
             {
                 var world = SKMatrix.Concat(parent, LayerMatrix(layer, !layer.TransformsEnabled));
                 DrawTier(surface, canvas, layer.Children, region, world, precision);
@@ -266,6 +267,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         if (layer.RasterGrid is { } grid) world = SKMatrix.Concat(world, ToSkia(grid));
         var blend = bypass ? layer.Blend : CommandEngine.EffectiveBlend(layer);
         Effect[] effects = bypass ? [] : layer.Effects;
+        if (layer.Kind == LayerKind.Fill) effects = effects.Where(effect => effect.Kind != EffectKind.Transform).ToArray();
         var glow = effects.LastOrDefault(ProcessesPixels);
         if (glow is { Kind: EffectKind.Glow, Alignment: StrokeAlignment.Outside, Mode: not Blend.Normal })
             effects = effects.Where(effect => !ReferenceEquals(effect, glow)).ToArray();
@@ -301,9 +303,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var projection = SKMatrix.Concat(parent, SKMatrix.Concat(spatial, parentInverse));
             if (layer.Kind != LayerKind.Group)
             {
-                if (PrepareLayer(layer, effects, precision) is not { } frame) return;
+                var projected = SKMatrix.Concat(projection, world);
+                var projectedFill = layer.Kind == LayerKind.Fill ? FillBounds(region, projected) : (Area?)null;
+                if (PrepareLayer(layer, effects, precision, projectedFill) is not { } frame) return;
                 canvas.Save();
-                canvas.Concat(SKMatrix.Concat(projection, world));
+                canvas.Concat(projected);
                 DrawStyled(frame);
                 canvas.Restore();
                 return;
@@ -353,7 +357,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             return;
         }
 
-        if (PrepareLayer(layer, effects, precision) is not { } evaluated) return;
+        var fillArea = layer.Kind == LayerKind.Fill ? FillBounds(region, world) : (Area?)null;
+        if (PrepareLayer(layer, effects, precision, fillArea) is not { } evaluated) return;
         canvas.Save();
         canvas.Concat(world);
         DrawStyled(evaluated);
@@ -430,7 +435,13 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return true;
     }
 
-    private Frame? PrepareLayer(Layer layer, Effect[] effects, ColorSettings? precision = null)
+    private static Area FillBounds(Area canvas, SKMatrix world)
+    {
+        if (!world.TryInvert(out var inverse)) return canvas;
+        return EnclosingPixels(inverse.MapRect(SKRect.Create(canvas.X, canvas.Y, canvas.Width, canvas.Height)));
+    }
+
+    private Frame? PrepareLayer(Layer layer, Effect[] effects, ColorSettings? precision = null, Area? fillArea = null)
     {
         Frame frame;
         if (layer.Kind == LayerKind.Path)
@@ -448,11 +459,11 @@ public sealed partial class SkiaRenderer : IRasterBackend
             {
                 LayerKind.Raster or LayerKind.Chop => raster?.Pixels,
                 LayerKind.Text => raster?.Pixels ?? TextRaster(layer),
-                LayerKind.Fill => FillSource(layer, layer.Width, layer.Height),
+                LayerKind.Fill => FillSource(layer, fillArea?.Width ?? layer.Width, fillArea?.Height ?? layer.Height),
                 _ => vectors.GetValue(layer, Rasterize)
             };
             if (source is null) return null;
-            frame = new(precision is null ? source : PixelBuffer.Convert(source, precision), raster?.X ?? layer.RasterX, raster?.Y ?? layer.RasterY);
+            frame = new(precision is null ? source : PixelBuffer.Convert(source, precision), fillArea?.X ?? raster?.X ?? layer.RasterX, fillArea?.Y ?? raster?.Y ?? layer.RasterY);
         }
         if (layer.MaskEnabled && layer.Mask is { } mask) frame = MaskedRaster(frame, mask);
         using var coverage = VectorCoverage(layer.VectorMask, new(frame.X, frame.Y, frame.Pixels.Width, frame.Pixels.Height), SKMatrix.Identity);
@@ -475,7 +486,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
 
     public RasterEdit RasterizeLayer(Document document, Layer layer)
     {
-        if (layer.Kind == LayerKind.Group || SpatialMatrix(layer) != SKMatrix.Identity)
+        if (layer.Kind is LayerKind.Group or LayerKind.Fill || SpatialMatrix(layer) != SKMatrix.Identity)
         {
             var parent = NativeParentMatrix(document.Layers, layer.Id, SKMatrix.Identity) ?? SKMatrix.Identity;
             if (!parent.TryInvert(out var inverse)) throw new InvalidDataException("The parent group transform cannot be inverted.");
@@ -485,7 +496,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
         Effect[] effects = layer.TransformsEnabled ? layer.Effects : [];
         if (PrepareLayer(layer, effects, NativePrecision(document)) is not { } frame)
             return new(new Pixels(layer.Width, layer.Height, new byte[layer.Width * layer.Height * 4]), layer.RasterX, layer.RasterY);
-        if (layer.ActiveTransform == new Transform() && layer.Placement == new Placement() && layer.RasterGrid is null) return new(frame.Pixels, frame.X, frame.Y);
+        if (layer.ActiveTransform == new Transform() && layer.Placement == new Placement() && layer.RasterGrid is null)
+            return new(frame.Pixels, frame.X, frame.Y);
 
         var matrix = LayerMatrix(layer, !layer.TransformsEnabled);
         if (layer.RasterGrid is { } grid) matrix = SKMatrix.Concat(matrix, ToSkia(grid));
@@ -1330,7 +1342,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
         new(m.ScaleX, m.SkewX, m.TransX, m.SkewY, m.ScaleY, m.TransY, m.Persp0, m.Persp1, m.Persp2);
 
     private static SKMatrix SpatialMatrix(Layer layer) => ToSkia(
-        (layer.TransformsEnabled ? layer.Transform.Warp ?? Projective.Identity : Projective.Identity)
+        (layer.TransformsEnabled && layer.Kind != LayerKind.Fill ? layer.Transform.Warp ?? Projective.Identity : Projective.Identity)
             .Then(layer.ImagePlacement ?? Projective.Identity));
 
     private static bool IsPixelGrid(SKMatrix m)
@@ -1755,7 +1767,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             var native = SKMatrix.Concat(parent, placedGroup ? Matrix(skip ? new Transform() : layer.Transform) : LayerMatrix(layer, skip));
             var effects = SKMatrix.Identity;
             foreach (var effect in layer.Effects)
-                if (!skip && effect.Enabled && effect.Kind == EffectKind.Transform)
+                if (!skip && layer.Kind != LayerKind.Fill && effect.Enabled && effect.Kind == EffectKind.Transform)
                     effects = SKMatrix.Concat(Matrix(effect.Spatial!), effects);
 
             if (layer.Kind == LayerKind.Group)
@@ -1784,7 +1796,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
     private static SKMatrix LayerMatrix(Layer layer, bool bypass)
     {
         var placement = PlacementMatrix(layer.Placement);
-        return bypass ? placement : SKMatrix.Concat(placement, Matrix(layer.Transform));
+        return bypass || layer.Kind == LayerKind.Fill ? placement : SKMatrix.Concat(placement, Matrix(layer.Transform));
     }
 
     private static SKMatrix Matrix(Transform t) => SKMatrix.Concat(SKMatrix.CreateTranslation((float)t.X, (float)t.Y),

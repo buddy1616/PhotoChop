@@ -27,6 +27,7 @@ public partial class MainWindow
         var panel = primary;
         columns.Children.Add(primary);
         shell.Children.Add(new ScrollViewer { Content = columns, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        LiveComboNavigation.Enable(dialog);
         dialog.Content = shell;
         TextBox Numeric(string title, double initial, double min, double max)
         {

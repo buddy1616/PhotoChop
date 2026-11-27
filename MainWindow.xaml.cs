@@ -159,6 +159,7 @@ public partial class MainWindow : Window
         preferences = LoadPreferences();
         Closed += (_, _) => gpu?.Dispose();
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        Loaded += (_, _) => WindowPlacement.EnsureVisible(this);
         if (WindowPlacement.TryConstrain(preferences.WindowPosition, out var placement))
         {
             WindowStartupLocation = WindowStartupLocation.Manual;
@@ -437,7 +438,7 @@ public partial class MainWindow : Window
         edit.SubmenuOpened += (_, _) =>
         {
             var selected = ActiveLayer();
-            transformItem.IsEnabled = selected is not null && selected.Kind != LayerKind.Effect;
+            transformItem.IsEnabled = selected is not null && selected.Kind is not (LayerKind.Effect or LayerKind.Fill);
             fill.IsEnabled = selected?.Kind == LayerKind.Raster;
             stroke.IsEnabled = fill.IsEnabled;
             contentFill.IsEnabled = selected is not null && active?.Engine.Current?.Selection is not null;
@@ -550,9 +551,16 @@ public partial class MainWindow : Window
         };
         Item(window, "Reset workspace", ResetLayout);
         var help = Menu("Help");
+        Item(help, "Report an issue on GitHub…", () => OpenSupportLink("https://github.com/buddy1616/PhotoChop/issues/new"));
+        Item(help, "Email feedback…", () => OpenSupportLink("mailto:buddy.wagner@hotmail.com?subject=PhotoChop%20feedback"));
         Item(help, "Editing controls", () => MessageBox.Show(this,
             "Use the wheel to zoom. Pan with the middle mouse button or Space + drag.\nDrag layers to reorder. Drop onto the center of a group to move into it.\nDrag inside a selection to move its outline with the Selection tool. Use Ctrl or Shift to select multiple layers or log entries.", "CHOP"));
     }
+
+    private void OpenSupportLink(string link) => Guard(() =>
+    {
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(link) { UseShellExecute = true });
+    });
 
     private MenuItem Menu(string title)
     {
@@ -877,7 +885,8 @@ public partial class MainWindow : Window
         foreach (var path in preferences.Recent) Item(recentMenu, path, () => _ = OpenPath(path));
     }
 
-    private bool Run<T>(string action, T args, string? target = null, string? selectId = null, Action<Session>? beforeRefresh = null)
+    private bool Run<T>(string action, T args, string? target = null, string? selectId = null,
+        Action<Session>? beforeRefresh = null, bool updateProperties = true)
     {
         if (active is not { } session) return false;
         if (interactiveTransform is not null) CancelTransform();
@@ -897,7 +906,7 @@ public partial class MainWindow : Window
                 session.VectorMaskTarget = null;
         });
         if (ok) beforeRefresh?.Invoke(session);
-        Refresh();
+        Refresh(updateProperties: updateProperties);
         return ok;
     }
 
@@ -916,7 +925,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Refresh(bool updateCanvas = true)
+    private void Refresh(bool updateCanvas = true, bool updateProperties = true)
     {
         syncing = true;
         try
@@ -929,7 +938,7 @@ public partial class MainWindow : Window
                 (!item.Enabled ? " (disabled)" : item.Error is { } error ? $" (skipped: {error})" : "")).ToArray();
             history.SelectedIndex = active?.Engine.Cursor ?? -1;
             if (history.SelectedItem is { } step) history.ScrollIntoView(step);
-            RefreshProperties();
+            if (updateProperties) RefreshProperties();
             RefreshLog();
         }
         finally { syncing = false; }
@@ -964,7 +973,8 @@ public partial class MainWindow : Window
         }
         canvas.ImageWidth = doc.Width;
         canvas.ImageHeight = doc.Height;
-        if (preview is null && editingText?.Draft is null && paintGesture is null && !active.KeepPaintFrame && !active.KeepTextFrame) canvas.Frame = active.Frame is { } priorFrame &&
+        if (preview is null && editingText?.Draft is null && paintGesture is null && !active.KeepPaintFrame && !active.KeepTextFrame &&
+            active.MaskOnly is null && !active.VectorMaskOnly && active.ChannelView is null or "composite") canvas.Frame = active.Frame is { } priorFrame &&
             priorFrame.PixelWidth == doc.Width && priorFrame.PixelHeight == doc.Height ? priorFrame : null;
         canvas.Guides = preferences.ShowGuides ? doc.Guides : [];
         var visibleSelection = interactiveTransform is not null ? preview ?? doc : doc;
@@ -978,7 +988,7 @@ public partial class MainWindow : Window
         canvas.InvalidateVisual();
         if (rendering) return;
         rendering = true;
-        bool modalRender = active.CommittedTonalFrame is null && canvas.PendingBrush.Count == 0 && canvas.MovingText is null && !active.KeepTextFrame && gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
+        bool modalRender = !LiveComboNavigation.IsNavigating && active.CommittedTonalFrame is null && canvas.PendingBrush.Count == 0 && canvas.MovingText is null && !active.KeepTextFrame && gesture is null && preview is null && editingText is null && paintGesture is null && effectDialog is not { IsVisible: true };
         blockRenderInput = modalRender;
         if (modalRender)
         {

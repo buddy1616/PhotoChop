@@ -32,6 +32,7 @@ public partial class MainWindow
             LayerKind.Path => "M 2,13 C 14,12 2,4 14,3 M 1,12 L 3,12 3,14 1,14 Z M 13,2 L 15,2 15,4 13,4 Z",
             LayerKind.Chop => "M 3,1 L 10,1 14,5 14,14 3,14 Z M 10,1 L 10,5 14,5 M 5,9 L 12,9",
             LayerKind.Fill => "M 2,2 L 14,2 14,14 2,14 Z",
+            LayerKind.Text => "M 1,1 L 15,1 15,15 1,15 Z M 4,6 L 4,4 12,4 12,6 M 8,4 L 8,12 M 6,12 L 10,12",
             _ => null
         };
         public Visibility TypeVisibility => TypeIcon is null ? Visibility.Collapsed : Visibility.Visible;
@@ -138,10 +139,8 @@ public partial class MainWindow
         {
             if (RowAt(e.OriginalSource) is not { Layer: var clicked } || IsButton(e.OriginalSource) || active is null) return;
             active.ActiveId = clicked.Id;
-            if (clicked is { Kind: LayerKind.Fill } fill && ColorPickerDialog.Show(this, "Fill layer color", fill.Color) is { } color)
-                Run("layer.fill", color, fill.Id);
-            else if (clicked.Kind == LayerKind.Text) EditText(clicked);
-            else if (clicked.Kind != LayerKind.Fill) Rename();
+            if (clicked.Kind == LayerKind.Text) EditText(clicked);
+            else Rename();
             e.Handled = true;
         };
         layers.PreviewMouseLeftButtonDown += (_, e) =>
@@ -483,7 +482,12 @@ public partial class MainWindow
             ? active.VectorMaskOnly ? " · Vector mask selected (mask only)" : " · Vector mask selected"
             : active?.MaskTarget == layer.Id ? " · Mask selected" : ""));
         var modes = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = layer.Blend, Margin = new Thickness(2) };
-        modes.SelectionChanged += (_, _) => { if (modes.SelectedItem is Blend blend) RunLayer("layer.blend", blend); };
+        LiveComboNavigation.Enable(modes);
+        modes.SelectionChanged += (_, _) =>
+        {
+            if (modes.SelectedItem is Blend blend && ActiveLayer()?.Id == layer.Id)
+                Run("layer.blend", blend, layer.Id, updateProperties: false);
+        };
         Caption("Blend mode");
         properties.Children.Add(modes);
         if (layer.Kind == LayerKind.Group)
@@ -523,19 +527,25 @@ public partial class MainWindow
         if (effectEditor is not { } panel) return;
         panel.Children.Clear();
         AddChopProperties(layer, panel);
+        if (layer.Kind == LayerKind.Fill)
+            panel.Children.Add(Button("Fill color…", () =>
+            {
+                if (ColorPickerDialog.Show(effectDialog ?? EditorOwner, "Fill layer color", layer.Color) is { } color)
+                    Run("layer.fill", color, layer.Id);
+            }));
         var transformRow = new WrapPanel();
         transformRow.Children.Add(Button("Transform…", EditTransform, "Edit the layer’s combined transform"));
         transformRow.Children.Add(Button("Reset Transform", () =>
         {
             if (Confirm("Reset the layer transform to its defaults?")) RunLayer("layer.resetTransform", 0);
         }));
-        if (layer.Kind != LayerKind.Effect) panel.Children.Add(transformRow);
+        if (layer.Kind is not (LayerKind.Effect or LayerKind.Fill)) panel.Children.Add(transformRow);
         panel.Children.Add(new TextBlock { Text = "Effects", FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 8, 2, 4) });
         var effectKinds = new ComboBox
         {
             ItemsSource = Enum.GetValues<EffectKind>()
                 .Where(kind => kind != EffectKind.BlendMode && (kind != EffectKind.PathFill || layer.Kind == LayerKind.Path) &&
-                    (kind != EffectKind.Transform || layer.Kind != LayerKind.Effect))
+                    (kind != EffectKind.Transform || layer.Kind is not (LayerKind.Effect or LayerKind.Fill)))
                 .Select(kind => new { Kind = kind, Name = EffectName(kind) })
                 .OrderBy(effect => effect.Name, StringComparer.CurrentCultureIgnoreCase).ToArray(),
             DisplayMemberPath = "Name", SelectedValuePath = "Kind", SelectedIndex = 0, Margin = new Thickness(2)
@@ -570,7 +580,7 @@ public partial class MainWindow
 
     private void EditTransform()
     {
-        if (ActiveLayer() is not { } layer || layer.Kind == LayerKind.Effect) return;
+        if (ActiveLayer() is not { } layer || layer.Kind is LayerKind.Effect or LayerKind.Fill) return;
         var p = layer.Placement;
         var placement = new Projective(p.ScaleX, 0, p.X, 0, p.ScaleY, p.Y);
         var matrix = layer.Transform.NativeMatrix().Then(placement)

@@ -188,6 +188,7 @@ public partial class MainWindow
                     break;
                 case "Move":
                     if (ActiveLayer() is not { Locked: false } target || !Editable(doc, target.Id)) { Say("Select an unlocked layer to move."); return; }
+                    if (target.Kind == LayerKind.Fill) { Say("Fill layers cover the canvas and cannot be moved."); return; }
                     if (target.Kind is not (LayerKind.Chop or LayerKind.Path or LayerKind.Text) && doc.Selection is { } selected)
                     {
                         if (target.Kind != LayerKind.Raster || !doc.Selected((int)Math.Floor(point.X), (int)Math.Floor(point.Y)) || point.X < selected.X || point.X >= selected.X + selected.Width ||
