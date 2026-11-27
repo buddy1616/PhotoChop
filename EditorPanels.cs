@@ -371,10 +371,11 @@ public partial class MainWindow
         Run("layer.duplicate", id, source, id);
     }
 
-    private void Rename()
+    private void Rename(bool returnToText = false)
     {
         if (ActiveLayer() is not { } layer) return;
-        var dialog = new Window { Owner = this, Title = "Layer Properties", Width = 440, Height = 480,
+        var session = active;
+        var dialog = new Window { Owner = EditorOwner, Title = "Layer Properties", Width = 440, Height = 480,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
         var shell = new DockPanel { Margin = new Thickness(14) };
         var header = new StackPanel();
@@ -398,6 +399,9 @@ public partial class MainWindow
         effectDialog = dialog;
         try { dialog.ShowDialog(); }
         finally { effectEditor = null; effectDialog = null; }
+        if (returnToText && ReferenceEquals(active, session) && ActiveLayer() is { Kind: LayerKind.Text } text &&
+            text.Id == layer.Id)
+            BeginTextEdit(null, text);
     }
 
     private string NextLayerName(string prefix)

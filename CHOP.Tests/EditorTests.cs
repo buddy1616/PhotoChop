@@ -91,6 +91,23 @@ public sealed class EditorTests : IDisposable
         Assert.Equal(pixels, renderer.Composite(reopened).Rgba);
     }
 
+    [Theory]
+    [InlineData("#00000000", 0)]
+    [InlineData("#80000000", 128)]
+    public void ColorOverlayAlphaChangesFillWithoutRemovingTheOutsideStroke(string color, byte alpha)
+    {
+        var engine = NewEngine(18, 18);
+        Layer(engine, new("shape", "Shape", LayerKind.Rectangle,
+            Transform: new(5, 5), Width: 8, Height: 8, Color: "#FFFFFFFF"));
+        engine.Execute(Command.Of("effect.add", new Effect("overlay", EffectKind.ColorOverlay, Ink: color), "shape"));
+        engine.Execute(Command.Of("effect.add", new Effect("stroke", EffectKind.Stroke, A: 3), "shape"));
+
+        var frame = renderer.Composite(engine.Current!);
+        Assert.Equal(alpha, frame.Rgba[(8 * frame.Width + 8) * 4 + 3]);
+        Assert.Equal(new byte[] { 0, 0, 0, 255 }, frame.Rgba.AsSpan((8 * frame.Width + 3) * 4, 4).ToArray());
+        Assert.Equal(0, frame.Rgba[(8 * frame.Width + 1) * 4 + 3]);
+    }
+
     [Fact]
     public void DefaultSixteenBitGradientAndBrushRetainPrecisionInNativePatchResources()
     {

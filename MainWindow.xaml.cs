@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.IO;
+using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -492,7 +493,7 @@ public partial class MainWindow : Window
         Item(newLayer, "Chop Layer…", CreateChopLayer);
         Item(newLayer, "Path", () => CreateNewPath());
         Item(layer, "Duplicate selected layer", Duplicate);
-        Item(layer, "Rename selected layer…", Rename);
+        Item(layer, "Rename selected layer…", () => Rename());
         Item(layer, "Delete selected layer", DeleteLayer);
         Item(layer, "Group selected layers", Group, "Ctrl+G");
         Item(layer, "Ungroup", () => RunLayer("layer.ungroup", 0));
@@ -551,10 +552,41 @@ public partial class MainWindow : Window
         };
         Item(window, "Reset workspace", ResetLayout);
         var help = Menu("Help");
-        Item(help, "Report an issue on GitHub…", () => OpenSupportLink("https://github.com/buddy1616/PhotoChop/issues/new"));
+        Item(help, "Report an issue on GitHub…", () => OpenSupportLink("https://github.com/buddy1616/PhotoChop/issues/new"))
+            .ToolTip = "Requires a GitHub account. You can also send feedback by email.";
         Item(help, "Email feedback…", () => OpenSupportLink("mailto:buddy.wagner@hotmail.com?subject=PhotoChop%20feedback"));
         Item(help, "Editing controls", () => MessageBox.Show(this,
             "Use the wheel to zoom. Pan with the middle mouse button or Space + drag.\nDrag layers to reorder. Drop onto the center of a group to move into it.\nDrag inside a selection to move its outline with the Selection tool. Use Ctrl or Shift to select multiple layers or log entries.", "CHOP"));
+        help.Items.Add(new Separator());
+        Item(help, "About PhotoChop", ShowAboutPhotoChop);
+    }
+
+    private void ShowAboutPhotoChop()
+    {
+        var assembly = typeof(MainWindow).Assembly;
+        var version = assembly.GetCustomAttribute<AssemblyFileVersionAttribute>()?.Version;
+        string displayVersion = Version.TryParse(version, out var build) && build.Revision == 0
+            ? build.ToString(3) : version ?? "Unknown";
+        string copyright = assembly.GetCustomAttribute<AssemblyCopyrightAttribute>()?.Copyright ?? "";
+
+        var content = new StackPanel { Margin = new Thickness(20) };
+        if (Icon is { } icon)
+            content.Children.Add(new Image { Source = icon, Width = 48, Height = 48, HorizontalAlignment = HorizontalAlignment.Left });
+        content.Children.Add(new TextBlock { Text = "PhotoChop", FontSize = 24, FontWeight = FontWeights.SemiBold });
+        content.Children.Add(new TextBlock { Text = $"Version {displayVersion}", Margin = new Thickness(0, 4, 0, 12) });
+        content.Children.Add(new TextBlock { Text = copyright, TextWrapping = TextWrapping.Wrap });
+        content.Children.Add(new TextBlock { Text = "GNU General Public License v3.0" });
+        var actions = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
+        content.Children.Add(actions);
+        var dialog = new Window { Owner = EditorOwner, Icon = Icon, Title = "About PhotoChop",
+            Content = content, Width = 360, SizeToContent = SizeToContent.Height,
+            ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        actions.Children.Add(Button("GitHub", () => OpenSupportLink("https://github.com/buddy1616/PhotoChop")));
+        var close = Button("Close", dialog.Close);
+        close.IsCancel = true;
+        close.IsDefault = true;
+        actions.Children.Add(close);
+        dialog.ShowDialog();
     }
 
     private void OpenSupportLink(string link) => Guard(() =>

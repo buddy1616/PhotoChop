@@ -744,6 +744,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             Evaluation? input = null;
             var silhouette = new Frame(source, x, y);
             bool trackSilhouette = effects.Any(effect => effect.Enabled && effect.Kind == EffectKind.BevelEmboss);
+            Frame? strokeSilhouette = null;
             IEnumerable<Effect> sequence = effects;
             if (effects.All(effect => effect.PhotoshopStyle) &&
                 effects.Select(effect => effect.PhotoshopOrder()).SequenceEqual(effects.Select(effect => effect.PhotoshopOrder()).Order()))
@@ -751,15 +752,19 @@ public sealed partial class SkiaRenderer : IRasterBackend
             foreach (var effect in sequence)
             {
                 if (!ProcessesPixels(effect)) continue;
+                if (ReducesOverlayCoverage(effect)) strokeSilhouette ??= input?.Frame ?? silhouette;
                 var node = cache.Nodes.Find(item => item.Effect == effect && ReferenceEquals(item.Input, input) && item.X == x && item.Y == y);
                 if (node is null)
                 {
-                    node = new Evaluation(ApplyEffect(input?.Frame ?? silhouette, effect, silhouette), effect, input, x, y);
+                    node = new Evaluation(ApplyEffect(input?.Frame ?? silhouette, effect,
+                        effect.Kind == EffectKind.Stroke ? strokeSilhouette : silhouette), effect, input, x, y);
                     cache.Nodes.Add(node);
                 }
                 if (trackSilhouette && effect.Kind == EffectKind.Transform)
                     silhouette = input is null || ReferenceEquals(input.Frame.Pixels, silhouette.Pixels)
                         ? node.Frame : ApplyEffect(silhouette, effect);
+                if (strokeSilhouette is { } geometry && effect.Kind == EffectKind.Transform)
+                    strokeSilhouette = ApplyEffect(geometry, effect);
                 input = node;
             }
             const long budget = 64 * 1024 * 1024;
@@ -774,6 +779,10 @@ public sealed partial class SkiaRenderer : IRasterBackend
             return input?.Frame ?? new Frame(source, x, y);
         }
     }
+
+    private static bool ReducesOverlayCoverage(Effect effect) =>
+        effect.Enabled && effect.Kind == EffectKind.ColorOverlay && !effect.PhotoshopStyle &&
+        effect.Opacity > 0 && (Format.Color(effect.Ink) >> 24) < 255;
 
     private Frame ApplyEffect(Frame frame, Effect effect, Frame? silhouette = null)
     {
@@ -802,7 +811,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
             EffectKind.GradientOverlay or EffectKind.PatternOverlay) return RenderLayerStyle(frame, effect, silhouette);
         if (effect.Kind == EffectKind.GaussianBlur) return Blur(frame, effect.A);
         if (effect.Kind == EffectKind.MotionBlur) return MotionBlur(frame, effect.A, effect.B);
-        if (effect.Kind == EffectKind.Stroke) return StrokeEffect(frame, effect);
+        if (effect.Kind == EffectKind.Stroke) return StrokeEffect(frame, effect, silhouette);
         if (effect.Kind == EffectKind.DropShadow) return ShadowEffect(frame, effect);
         if (effect.Kind == EffectKind.BitCrush)
         {
@@ -830,7 +839,9 @@ public sealed partial class SkiaRenderer : IRasterBackend
         }
         var buffer = new PixelBuffer(source.Width, source.Height, PixelBuffer.Settings(source));
         var ink = effect.Kind == EffectKind.ColorOverlay ? PixelValue.FromArgb(Format.Color(effect.Ink)) : default;
-        double amount = ink.A * effect.Opacity;
+        bool replaceCoverage = ReducesOverlayCoverage(effect);
+        double amount = (replaceCoverage ? 1 : ink.A) * effect.Opacity;
+        double coverage = replaceCoverage ? 1 - effect.Opacity * (1 - ink.A) : 1;
         var perceptualInk = effect.Kind == EffectKind.ColorOverlay && effect.Mode == Blend.Color && effect.CmykInk is not null
             ? PerceptualLab(ink) : (Lab?)null;
         static double MixOverlay(double original, double color, double amount) => original + (color - original) * amount;
@@ -874,7 +885,7 @@ public sealed partial class SkiaRenderer : IRasterBackend
                 case EffectKind.Grayscale: r = g = b = 0.2126 * r + 0.7152 * g + 0.0722 * b; break;
             }
             if (effect.Kind == EffectKind.Opacity) buffer.CopyWithAlpha(source, i, i, sample.A * effect.A);
-            else buffer.Set(i, new(r, g, b, sample.A));
+            else buffer.Set(i, new(r, g, b, sample.A * coverage));
         }
         return frame with { Pixels = buffer.Finish() };
     }
@@ -975,18 +986,19 @@ public sealed partial class SkiaRenderer : IRasterBackend
         return new(Unpremultiply(output, precision), x, y);
     }
 
-    private Frame StrokeEffect(Frame frame, Effect effect)
+    private Frame StrokeEffect(Frame frame, Effect effect, Frame? silhouette = null)
     {
         int total = (int)Math.Round(effect.A);
         int outside = effect.Alignment switch { StrokeAlignment.Outside => total, StrokeAlignment.Center => total / 2, _ => 0 };
         int inside = total - outside;
         var ink = Format.Color(effect.Ink);
-        var outer = AlphaEffect(frame, outside, true, ink, effect.Opacity, outside);
+        var shape = silhouette ?? frame;
+        var outer = AlphaEffect(shape, outside, true, ink, effect.Opacity, outside);
         Frame Style(Frame outline) => effect.Stops is { Length: > 0 }
             ? RenderLayerStyle(outline, effect with { Kind = EffectKind.GradientOverlay, A = effect.B, Mode = Blend.Normal, Opacity = 1 })
             : outline;
-        if (outside == total) return StackFrames(Style(outer), frame);
-        var inner = AlphaEffect(frame, inside, false, 0xFFFFFFFF, 1, inside);
+        if (outside == total && silhouette is null) return StackFrames(Style(outer), frame);
+        var inner = inside == 0 ? shape : AlphaEffect(shape, inside, false, 0xFFFFFFFF, 1, inside);
         PixelBuffer? native = WorkingPrecision(outer.Pixels) is { } precision
             ? new(outer.Pixels.Width, outer.Pixels.Height, precision) : null;
         native?.Copy(outer.Pixels, 0, 0, outer.Pixels.Width * outer.Pixels.Height);
@@ -1003,7 +1015,8 @@ public sealed partial class SkiaRenderer : IRasterBackend
             else outer.Pixels.Rgba[i * 4 + 3] = (byte)(outer.Pixels.Rgba[i * 4 + 3] *
                 (255 - inner.Pixels.Rgba[maskIndex * 4 + 3]) / 255);
         }
-        return StackFrames(frame, Style(native is null ? outer : outer with { Pixels = native.Finish() }), effect.Mode);
+        var outline = Style(native is null ? outer : outer with { Pixels = native.Finish() });
+        return outside == total ? StackFrames(outline, frame) : StackFrames(frame, outline, effect.Mode);
     }
 
     private static Frame ShadowEffect(Frame frame, Effect effect)

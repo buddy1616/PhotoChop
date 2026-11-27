@@ -39,6 +39,7 @@ internal sealed class EditorCanvas : FrameworkElement
     {
         public string LayerId { get; } = layerId;
         public BitmapSource Image { get; } = image;
+        public Brush Silhouette { get; } = Frozen(new ImageBrush(image));
         public Matrix Placement { get; } = placement;
         public double Opacity { get; } = opacity;
         public BitmapSource? Underlay { get; set; }
@@ -118,9 +119,20 @@ internal sealed class EditorCanvas : FrameworkElement
             matrix.Translate(moving.Delta.X, moving.Delta.Y);
             matrix.Scale(Zoom, Zoom);
             matrix.Translate(Offset.X, Offset.Y);
+            var bounds = new Rect(0, 0, moving.Image.PixelWidth, moving.Image.PixelHeight);
+            if (moving.Delta.LengthSquared > 0)
+            {
+                var shadow = matrix;
+                shadow.Translate(1.5, 1.5);
+                dc.PushTransform(new MatrixTransform(shadow));
+                dc.PushOpacityMask(moving.Silhouette);
+                dc.DrawRectangle(Brushes.Black, null, bounds);
+                dc.Pop();
+                dc.Pop();
+            }
             dc.PushTransform(new MatrixTransform(matrix));
             dc.PushOpacity(moving.Underlay is null && !moving.ShowAtOrigin ? moving.Opacity * .65 : moving.Opacity);
-            dc.DrawImage(moving.Image, new Rect(0, 0, moving.Image.PixelWidth, moving.Image.PixelHeight));
+            dc.DrawImage(moving.Image, bounds);
             dc.Pop();
             dc.Pop();
         }
