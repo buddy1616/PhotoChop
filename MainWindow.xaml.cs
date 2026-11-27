@@ -105,7 +105,7 @@ public partial class MainWindow : Window
     private readonly DockPanel layersPanel = new();
     private readonly ListBox layers = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended, AllowDrop = true };
     private readonly ListBox history = new();
-    private readonly StackPanel properties = new() { Margin = new Thickness(8) };
+    private readonly StackPanel properties = new() { Margin = new Thickness(4, 2, 4, 3) };
     private readonly DockPanel logPanel = new();
     private readonly ListBox commandLog = new() { SelectionMode = System.Windows.Controls.SelectionMode.Extended };
     private readonly Dictionary<string, FrameworkElement> panelContent = [];

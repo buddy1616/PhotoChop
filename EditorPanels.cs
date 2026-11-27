@@ -77,7 +77,7 @@ public partial class MainWindow
 
     private void BuildPanels()
     {
-        var layerButtons = new WrapPanel { Margin = new Thickness(5) };
+        var layerButtons = new WrapPanel { Margin = new Thickness(3, 1, 3, 1) };
         var rasterButton = LayerIconButton("+", "New Raster Layer", () => CreateLayer(LayerKind.Raster), glyph: false);
         var groupButton = LayerArtButton("New Group", () =>
         {
@@ -101,10 +101,9 @@ public partial class MainWindow
         BindLayerDrop(maskButton, "Add mask here", rows => Run("mask.add", 0, rows[0].Layer.Id, rows[0].Layer.Id), copy: false, single: true);
         layerButtons.Children.Add(maskButton);
         layerButtons.Children.Add(deleteButton);
-        var propertyScroll = new ScrollViewer { Content = properties, Height = 218, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        DockPanel.SetDock(propertyScroll, System.Windows.Controls.Dock.Top);
+        DockPanel.SetDock(properties, System.Windows.Controls.Dock.Top);
         DockPanel.SetDock(layerButtons, System.Windows.Controls.Dock.Bottom);
-        layersPanel.Children.Add(propertyScroll);
+        layersPanel.Children.Add(properties);
         layersPanel.Children.Add(layerButtons);
         layers.ItemTemplate = (DataTemplate)FindResource("LayerRowTemplate");
         var itemStyle = new Style(typeof(ListBoxItem));
@@ -476,53 +475,75 @@ public partial class MainWindow
     private void RefreshProperties()
     {
         properties.Children.Clear();
-        if (ActiveLayer() is not { } layer)
+        if (ActiveLayer() is not { } layer) return;
+
+        string? maskStatus = active?.VectorMaskTarget == layer.Id
+            ? active.VectorMaskOnly ? "Vector mask selected (mask only)" : "Vector mask selected"
+            : active?.MaskTarget == layer.Id ? "Mask selected" : null;
+        if (maskStatus is not null)
+            properties.Children.Add(new TextBlock { Text = maskStatus, TextWrapping = TextWrapping.Wrap });
+
+        void AddLabel(DockPanel row, string text)
         {
-            Caption("Select a layer to edit its properties.");
-            return;
+            var label = new TextBlock { Text = text, Width = 48, VerticalAlignment = VerticalAlignment.Center };
+            DockPanel.SetDock(label, System.Windows.Controls.Dock.Left);
+            row.Children.Add(label);
         }
 
-        Caption(layer.Name + (active?.VectorMaskTarget == layer.Id
-            ? active.VectorMaskOnly ? " · Vector mask selected (mask only)" : " · Vector mask selected"
-            : active?.MaskTarget == layer.Id ? " · Mask selected" : ""));
-        var modes = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = layer.Blend, Margin = new Thickness(2) };
+        var blendRow = new DockPanel { Margin = new Thickness(0, 0, 0, 2) };
+        AddLabel(blendRow, "Blend");
+        var modes = new ComboBox { ItemsSource = Enum.GetValues<Blend>(), SelectedItem = layer.Blend,
+            MinHeight = 0, Padding = new Thickness(4, 1, 4, 1), ToolTip = "Blend mode" };
+        System.Windows.Automation.AutomationProperties.SetName(modes, "Blend mode");
         LiveComboNavigation.Enable(modes);
         modes.SelectionChanged += (_, _) =>
         {
             if (modes.SelectedItem is Blend blend && ActiveLayer()?.Id == layer.Id)
                 Run("layer.blend", blend, layer.Id, updateProperties: false);
         };
-        Caption("Blend mode");
-        properties.Children.Add(modes);
         if (layer.Kind == LayerKind.Group)
         {
-            var pass = new CheckBox { Content = "Pass through", IsChecked = layer.PassThrough, Margin = new Thickness(2),
+            var pass = new CheckBox { Content = "Pass through", IsChecked = layer.PassThrough,
+                Margin = new Thickness(5, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center,
                 ToolTip = "Blend the group's children through to layers below when the group has no masks or effects and is fully opaque." };
             pass.Click += (_, _) => RunLayer("layer.passThrough", pass.IsChecked == true);
-            properties.Children.Add(pass);
+            DockPanel.SetDock(pass, System.Windows.Controls.Dock.Right);
+            blendRow.Children.Add(pass);
         }
+        blendRow.Children.Add(modes);
+        properties.Children.Add(blendRow);
 
-        void AddOpacity(string label, string command, double value)
+        void AddOpacity(string label, string name, string command, double value)
         {
-            Caption(label);
+            var row = new DockPanel { Margin = new Thickness(0, 0, 0, 2), ToolTip = name };
+            AddLabel(row, label);
             var control = StyleFields.Range(value * 100, 0, 100);
+            control.Row.Margin = new Thickness(0);
+            control.Input.Width = 52;
+            control.Input.MinHeight = 0;
+            control.Input.Padding = new Thickness(3, 1, 3, 1);
+            control.Input.TextAlignment = TextAlignment.Right;
+            control.Slider.MinHeight = 0;
+            System.Windows.Automation.AutomationProperties.SetName(control.Input, name);
+            System.Windows.Automation.AutomationProperties.SetName(control.Slider, name);
             void Save()
             {
                 var selected = ActiveLayer();
                 if (selected?.Id != layer.Id) return;
                 double current = command == "layer.opacity" ? selected.Opacity : selected.FillOpacity;
                 if (Math.Abs(control.Slider.Value / 100 - current) > 1e-8)
-                    RunLayer(command, control.Slider.Value / 100);
+                    Run(command, control.Slider.Value / 100, layer.Id, updateProperties: false);
             }
             control.Slider.AddHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler((_, _) => Save()));
             control.Slider.PreviewKeyUp += (_, _) => Save();
             control.Slider.PreviewMouseLeftButtonUp += (_, _) => Save();
             control.Input.LostKeyboardFocus += (_, _) => Save();
             control.Input.AddHandler(UIElement.PreviewMouseWheelEvent, new System.Windows.Input.MouseWheelEventHandler((_, _) => Save()), true);
-            properties.Children.Add(control.Row);
+            row.Children.Add(control.Row);
+            properties.Children.Add(row);
         }
-        AddOpacity("Fill opacity (%)", "layer.fillOpacity", layer.FillOpacity);
-        AddOpacity("Opacity (%)", "layer.opacity", layer.Opacity);
+        AddOpacity("Opacity", "Opacity (%)", "layer.opacity", layer.Opacity);
+        AddOpacity("Fill", "Fill opacity (%)", "layer.fillOpacity", layer.FillOpacity);
         if (effectEditor is not null) PopulateEffects(layer);
     }
 
@@ -578,9 +599,6 @@ public partial class MainWindow
             panel.Children.Add(rowActions);
         }
     }
-
-    private void Caption(string text) => properties.Children.Add(new TextBlock
-        { Text = text, Margin = new Thickness(2, 7, 2, 3), FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
 
     private void EditTransform()
     {
