@@ -69,7 +69,7 @@ public sealed partial class SkiaRenderer
                 }
 
                 if (layer.Kind != LayerKind.Raster ||
-                    overlays.Any(effect => effect.Kind != EffectKind.ColorOverlay || effect.Mode != Blend.Normal || effect.CmykInk is null) ||
+                    overlays.Any(effect => effect.Kind != EffectKind.ColorOverlay || effect.Mode != Blend.Normal || effect.CmykInk is null || ReducesOverlayCoverage(effect)) ||
                     matrix != SKMatrix.CreateTranslation(matrix.TransX, matrix.TransY) ||
                     matrix.TransX != MathF.Truncate(matrix.TransX) || matrix.TransY != MathF.Truncate(matrix.TransY) ||
                     matrix.TransX is < -32768 or > 32768 || matrix.TransY is < -32768 or > 32768)

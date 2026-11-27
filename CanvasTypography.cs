@@ -100,7 +100,7 @@ public partial class MainWindow
         {
             string? id = edit.Layer?.Id ?? edit.Create?.Id;
             FinishTextEdit();
-            if (id is not null && ActiveLayer()?.Id == id) Rename();
+            if (id is not null && ActiveLayer()?.Id == id) Rename(returnToText: true);
         }, "Apply the text edit and open Layer Properties"));
         DockPanel.SetDock(formatting, System.Windows.Controls.Dock.Top);
         layout.Children.Add(formatting);
