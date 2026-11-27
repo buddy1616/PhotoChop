@@ -513,10 +513,15 @@ public partial class MainWindow
         blendRow.Children.Add(modes);
         properties.Children.Add(blendRow);
 
-        void AddOpacity(string label, string name, string command, double value)
+        var opacityRow = new Grid { Margin = new Thickness(0, 0, 0, 2) };
+        opacityRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        opacityRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        void AddOpacity(string label, string name, string command, double value, int column)
         {
-            var row = new DockPanel { Margin = new Thickness(0, 0, 0, 2), ToolTip = name };
-            AddLabel(row, label);
+            var row = new DockPanel { Margin = new Thickness(column == 0 ? 0 : 8, 0, 0, 0), ToolTip = name };
+            row.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 0, 4, 0),
+                VerticalAlignment = VerticalAlignment.Center });
             var control = StyleFields.Range(value * 100, 0, 100);
             control.Row.Margin = new Thickness(0);
             control.Input.Width = 52;
@@ -540,10 +545,12 @@ public partial class MainWindow
             control.Input.LostKeyboardFocus += (_, _) => Save();
             control.Input.AddHandler(UIElement.PreviewMouseWheelEvent, new System.Windows.Input.MouseWheelEventHandler((_, _) => Save()), true);
             row.Children.Add(control.Row);
-            properties.Children.Add(row);
+            Grid.SetColumn(row, column);
+            opacityRow.Children.Add(row);
         }
-        AddOpacity("Opacity", "Opacity (%)", "layer.opacity", layer.Opacity);
-        AddOpacity("Fill", "Fill opacity (%)", "layer.fillOpacity", layer.FillOpacity);
+        AddOpacity("Opacity", "Opacity (%)", "layer.opacity", layer.Opacity, 0);
+        AddOpacity("Fill", "Fill opacity (%)", "layer.fillOpacity", layer.FillOpacity, 1);
+        properties.Children.Add(opacityRow);
         if (effectEditor is not null) PopulateEffects(layer);
     }
 
