@@ -190,6 +190,7 @@ public interface IRasterBackend
     Pixels DecodePng(byte[] data);
     Pixels DecodeImage(byte[] data);
     byte[] ExportImage(Document document, ImageExportFormat format);
+    void ExportPsd(Document document, Stream output, bool flattenLayers = true);
     byte[] EncodePng(Pixels pixels, double? pixelsPerInch = null);
     Pixels Composite(Document document);
     Pixels CompositeForStorage(Document document);

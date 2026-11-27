@@ -18,8 +18,8 @@ public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? P
     string Color = "#FFFFFFFF", int Width = 100, int Height = 100, double TextBend = 0, RichText? Typography = null, bool CanvasAlignedText = false);
 public sealed record ImportArgs(string Id, string Name, byte[]? Png = null, string? Parent = null, string? Path = null);
 public sealed record PathArgs(string Path);
-public enum ImageExportFormat { Png, Jpeg, WebP, Svg, Ico }
-public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExportFormat.Png);
+public enum ImageExportFormat { Png, Jpeg, WebP, Svg, Ico, Psd }
+public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExportFormat.Png, bool FlattenLayers = true);
 public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null, string? Path = null,
     string? Parent = null, string? DocumentId = null);
 public sealed record OpenArgs(string Path, byte[]? Data = null);
@@ -249,7 +249,11 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "document.export":
                 var output = command.Read<ExportArgs>();
                 if (!Enum.IsDefined(output.Format)) throw new InvalidDataException("Unknown export format.");
-                WriteExport(output.Path, backend.ExportImage(current, output.Format));
+                WriteExport(output.Path, stream =>
+                {
+                    if (output.Format == ImageExportFormat.Psd) backend.ExportPsd(current, stream, output.FlattenLayers);
+                    else stream.Write(backend.ExportImage(current, output.Format));
+                });
                 return;
             case "history.undo": cursor = Math.Max(0, cursor - 1); return;
             case "history.redo": cursor = Math.Min(history.Count - 1, cursor + 1); return;
@@ -334,13 +338,13 @@ public sealed class CommandEngine(IRasterBackend backend)
         _ => command.Name
     };
 
-    private static void WriteExport(string path, byte[] data)
+    private static void WriteExport(string path, Action<Stream> write)
     {
         string target = System.IO.Path.GetFullPath(path);
         string temporary = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(target)!, $".{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllBytes(temporary, data);
+            using (var stream = File.Create(temporary)) write(stream);
             File.Move(temporary, target, overwrite: true);
         }
         finally

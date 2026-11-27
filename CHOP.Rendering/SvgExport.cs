@@ -15,6 +15,7 @@ public sealed partial class SkiaRenderer
         ImageExportFormat.WebP => EncodeImage(document, SKEncodedImageFormat.Webp),
         ImageExportFormat.Svg => EncodeSvg(document),
         ImageExportFormat.Ico => EncodeIco(document),
+        ImageExportFormat.Psd => EncodePsd(document),
         _ => throw new InvalidDataException("Unknown export format.")
     };
 
