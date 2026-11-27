@@ -409,6 +409,7 @@ public partial class MainWindow : Window
         Item(export, "JPEG", () => ExportImage("JPEG", ".jpg", "*.jpg;*.jpeg", ImageExportFormat.Jpeg));
         Item(export, "WebP", () => ExportImage("WebP", ".webp", "*.webp", ImageExportFormat.WebP));
         Item(export, "ICO", () => ExportImage("Windows Icon", ".ico", "*.ico", ImageExportFormat.Ico));
+        Item(export, "PSD…", ExportPsd);
         Item(export, "SVG", () => ExportImage("SVG", ".svg", "*.svg", ImageExportFormat.Svg));
         var close = Item(file, "_Close document", () => CloseSession(active), "Ctrl+W");
         save.IsEnabled = saveAs.IsEnabled = close.IsEnabled = false;
@@ -862,6 +863,43 @@ public partial class MainWindow : Window
         {
             MessageBox.Show(EditorOwner, error.Message, "Could not import image", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    private void ExportPsd()
+    {
+        if (active is null) return;
+        var flatten = new CheckBox { Content = "Flatten Layers", IsChecked = true };
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(flatten);
+        panel.Children.Add(new TextBlock
+        {
+            Text = "PSD export uses 8-bit RGB. Keeping layers preserves groups and bakes effects and transforms into raster pixels.",
+            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0)
+        });
+        var note = new TextBlock
+        {
+            Text = "Group and adjustment effects can look different when layers stay separate. Some transformed pixels outside the canvas may be cropped.",
+            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0), Visibility = Visibility.Collapsed
+        };
+        flatten.Unchecked += (_, _) => note.Visibility = Visibility.Visible;
+        flatten.Checked += (_, _) => note.Visibility = Visibility.Collapsed;
+        panel.Children.Add(note);
+        var dialog = new Window { Owner = EditorOwner, Title = "Export PSD", Width = 375, Content = panel,
+            SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var actions = new StackPanel { Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
+        var next = Button("Continue…", () => dialog.DialogResult = true);
+        next.IsDefault = true;
+        var cancel = Button("Cancel", () => dialog.DialogResult = false);
+        cancel.IsCancel = true;
+        actions.Children.Add(next);
+        actions.Children.Add(cancel);
+        panel.Children.Add(actions);
+        if (dialog.ShowDialog() != true) return;
+        var picker = new SaveFileDialog { Filter = "Photoshop document (*.psd)|*.psd", DefaultExt = ".psd", AddExtension = true };
+        if (picker.ShowDialog(EditorOwner) == true)
+            Run("document.export", new ExportArgs(picker.FileName, ImageExportFormat.Psd, flatten.IsChecked == true));
     }
 
     private void ExportPng() => ExportImage("PNG", ".png", "*.png", ImageExportFormat.Png);
