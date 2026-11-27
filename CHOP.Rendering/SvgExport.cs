@@ -50,7 +50,8 @@ public sealed partial class SkiaRenderer
             Attribute("height", Number(document.Height));
             Attribute("viewBox", $"0 0 {document.Width} {document.Height}");
 
-            if (document.Floating is null && document.Color.Mode != ChannelColorMode.Grayscale && document.Layers.All(Supported))
+            if (document.Floating is null && document.Color.Mode != ChannelColorMode.Grayscale && document.Layers.All(Supported) &&
+                !document.Layers.Any(layer => layer.Children.Any(ContainsFill)))
                 foreach (var layer in document.Layers) WriteLayer(layer);
             else WriteImage(Composite(document), 0, 0);
 
@@ -76,7 +77,7 @@ public sealed partial class SkiaRenderer
             void WriteLayer(Layer layer)
             {
                 if (!layer.Visible || layer.Opacity == 0) return;
-                var matrix = ExportMatrix(layer);
+                var matrix = layer.Kind == LayerKind.Fill ? SKMatrix.Identity : ExportMatrix(layer);
                 xml.WriteStartElement("g", ns);
                 Attribute("aria-label", layer.Name);
                 Attribute("opacity", Number(layer.Opacity));
@@ -90,8 +91,8 @@ public sealed partial class SkiaRenderer
                     case LayerKind.Rectangle:
                     case LayerKind.Fill:
                         xml.WriteStartElement("rect", ns);
-                        Attribute("width", Number(layer.Width));
-                        Attribute("height", Number(layer.Height));
+                        Attribute("width", Number(layer.Kind == LayerKind.Fill ? document.Width : layer.Width));
+                        Attribute("height", Number(layer.Kind == LayerKind.Fill ? document.Height : layer.Height));
                         Paint("fill", layer.Color);
                         xml.WriteEndElement();
                         break;
@@ -164,6 +165,8 @@ public sealed partial class SkiaRenderer
         var matrix = SKMatrix.Concat(SpatialMatrix(layer), LayerMatrix(layer, !layer.TransformsEnabled));
         return layer.RasterGrid is { } grid ? SKMatrix.Concat(matrix, ToSkia(grid)) : matrix;
     }
+
+    private static bool ContainsFill(Layer layer) => layer.Kind == LayerKind.Fill || layer.Children.Any(ContainsFill);
 
     private static bool Supported(Layer layer)
     {

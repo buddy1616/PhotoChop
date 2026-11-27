@@ -633,7 +633,7 @@ public sealed class CommandEngine(IRasterBackend backend)
         {
             var layer = Wanted();
             EnsureEditable(layers, layer.Id);
-            if (layer.Kind == LayerKind.Effect) throw new InvalidDataException("Effect layers do not have transforms.");
+            if (layer.Kind is LayerKind.Effect or LayerKind.Fill) throw new InvalidDataException("This layer type does not have transforms.");
             if (transform == Projective.Identity) return doc;
             if (layer.Kind is not (LayerKind.Chop or LayerKind.Path or LayerKind.Text) && doc.Selection is { } area)
                 return TransformSelected(doc, layer, area, transform);
@@ -1009,7 +1009,7 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.transformsEnabled":
                 return Edit(layer => layer with { TransformsEnabled = command.Read<bool>() });
             case "layer.move":
-                if (Wanted().Kind == LayerKind.Effect) throw new InvalidDataException("Effect layers do not have transforms.");
+                if (Wanted().Kind is LayerKind.Effect or LayerKind.Fill) throw new InvalidDataException("This layer type cannot be moved.");
                 var movement = command.Read<PointD>();
                 Range(movement.X, -1000000, 1000000);
                 Range(movement.Y, -1000000, 1000000);
@@ -1023,8 +1023,8 @@ public sealed class CommandEngine(IRasterBackend backend)
             case "layer.transform":
                 var transform = command.Read<Transform>();
                 CheckTransform(transform);
-                return Edit(layer => layer.Kind == LayerKind.Effect
-                    ? throw new InvalidDataException("Effect layers do not have transforms.") : layer with { Transform = transform });
+                return Edit(layer => layer.Kind is LayerKind.Effect or LayerKind.Fill
+                    ? throw new InvalidDataException("This layer type does not have transforms.") : layer with { Transform = transform });
             case "layer.text":
                 var text = command.Read<TextArgs>();
                 Format.Color(text.Color);
@@ -1286,8 +1286,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 CheckEffect(effect);
                 if (effect.Kind == EffectKind.PathFill && Wanted().Kind != LayerKind.Path)
                     throw new InvalidDataException("The Fill effect requires a Path layer.");
-                if (Wanted().Kind == LayerKind.Effect && effect.Kind == EffectKind.Transform)
-                    throw new InvalidDataException("Effect layers do not have transforms.");
+                if (effect.Kind == EffectKind.Transform && Wanted().Kind is (LayerKind.Effect or LayerKind.Fill))
+                    throw new InvalidDataException("This layer type does not have transforms.");
                 return UpdateLightForEffect(Edit(layer => layer.Effects.Any(item => item.Id == effect.Id)
                     ? throw new InvalidDataException("Effect ID already exists.") : layer with { Effects = [.. layer.Effects, effect] }), effect);
             case "effect.update":
@@ -1295,8 +1295,8 @@ public sealed class CommandEngine(IRasterBackend backend)
                 CheckEffect(update);
                 if (update.Kind == EffectKind.PathFill && Wanted().Kind != LayerKind.Path)
                     throw new InvalidDataException("The Fill effect requires a Path layer.");
-                if (Wanted().Kind == LayerKind.Effect && update.Kind == EffectKind.Transform)
-                    throw new InvalidDataException("Effect layers do not have transforms.");
+                if (update.Kind == EffectKind.Transform && Wanted().Kind is (LayerKind.Effect or LayerKind.Fill))
+                    throw new InvalidDataException("This layer type does not have transforms.");
                 return UpdateLightForEffect(Edit(layer => layer with { Effects = UpdateEffects(layer.Effects, update.Id, list =>
                     list[list.FindIndex(item => item.Id == update.Id)] = update) }), update);
             case "effect.remove":

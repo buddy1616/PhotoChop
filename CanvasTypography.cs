@@ -96,6 +96,12 @@ public partial class MainWindow
         }
         var formatting = new WrapPanel { Margin = new Thickness(0, 0, 0, 6) };
         AddTypographyTools(formatting);
+        formatting.Children.Add(Button("Layer Effects…", () =>
+        {
+            string? id = edit.Layer?.Id ?? edit.Create?.Id;
+            FinishTextEdit();
+            if (id is not null && ActiveLayer()?.Id == id) Rename();
+        }, "Apply the text edit and open Layer Properties"));
         DockPanel.SetDock(formatting, System.Windows.Controls.Dock.Top);
         layout.Children.Add(formatting);
         var typography = new TabControl { Width = 270, Margin = new Thickness(8, 0, 0, 0) };
@@ -315,12 +321,22 @@ public partial class MainWindow
         return textDefaults;
     }
 
-    private void SetTextProperty(DependencyProperty property, object value, Func<CharacterStyle, CharacterStyle> update)
+    private void SetTextProperty(DependencyProperty property, object value, Func<CharacterStyle, CharacterStyle> update,
+        bool applyToAllWhenNoSelection = false)
     {
         textDefaults = update(textDefaults);
         if (editingText is not { } edit) return;
-        if (!edit.Editor.Selection.IsEmpty) SetCustomTextStyle(update);
-        else edit.Editor.Selection.ApplyPropertyValue(property, value);
+        var editor = edit.Editor;
+        if (!editor.Selection.IsEmpty) SetCustomTextStyle(update);
+        else if (applyToAllWhenNoSelection && new TextRange(editor.Document.ContentStart, editor.Document.ContentEnd).Text.TrimEnd('\r', '\n').Length > 0)
+        {
+            int offset = editor.Document.ContentStart.GetOffsetToPosition(editor.CaretPosition);
+            editor.SelectAll();
+            SetCustomTextStyle(update);
+            var caret = editor.Document.ContentStart.GetPositionAtOffset(offset) ?? editor.Document.ContentEnd;
+            editor.Selection.Select(caret, caret);
+        }
+        else editor.Selection.ApplyPropertyValue(property, value);
         TextEditChanged(edit);
     }
 

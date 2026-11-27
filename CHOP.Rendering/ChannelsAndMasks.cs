@@ -84,7 +84,7 @@ public sealed partial class SkiaRenderer
         if (precision is not null)
         {
             RestoreCoverage(canvas, surface, basePixels, region, precision, opaque: true);
-            DrawUnclippedTier(surface, canvas, stack[1..], region, parent, precision);
+            DrawUnclippedTier(surface, canvas, stack[1..], region, parent, precision, withinClippingStack: true);
             RestoreCoverage(canvas, surface, basePixels, region, precision, opaque: false);
             canvas.Flush();
         }
@@ -96,7 +96,7 @@ public sealed partial class SkiaRenderer
             using var normalBase = Bitmap(basePixels with { Rgba = opaque });
             using var replace = new SKPaint { BlendMode = SKBlendMode.Src };
             canvas.DrawBitmap(normalBase, region.X, region.Y, replace);
-            DrawUnclippedTier(surface, canvas, clipped, region, parent);
+            DrawUnclippedTier(surface, canvas, clipped, region, parent, withinClippingStack: true);
             canvas.Flush();
             var mixed = Unpremultiply(surface);
             for (int i = 3; i < mixed.Rgba.Length; i += 4) mixed.Rgba[i] = basePixels.Rgba[i];

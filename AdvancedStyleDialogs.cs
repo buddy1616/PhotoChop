@@ -77,6 +77,7 @@ public partial class MainWindow
         shell.Children.Add(swatch);
         shell.Children.Add(actions);
         shell.Children.Add(new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        LiveComboNavigation.Enable(dialog);
         dialog.Content = shell;
         Draw();
         return dialog.ShowDialog() == true ? output : null;

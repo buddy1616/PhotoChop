@@ -39,7 +39,7 @@ public partial class MainWindow
     {
         if (active?.Engine.Current is not { } doc || ActiveLayer() is not { } layer) return;
         var selection = layer.Kind is LayerKind.Chop or LayerKind.Path or LayerKind.Text ? null : doc.Selection;
-        if (layer.Kind == LayerKind.Effect || !Editable(doc, layer.Id) || (selection is not null && layer.Kind != LayerKind.Raster))
+        if (layer.Kind is LayerKind.Effect or LayerKind.Fill || !Editable(doc, layer.Id) || (selection is not null && layer.Kind != LayerKind.Raster))
         {
             Say("Select an unlocked raster layer to transform selected pixels.");
             return;
