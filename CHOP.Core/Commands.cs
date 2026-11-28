@@ -19,7 +19,7 @@ public sealed record LayerArgs(string Id, string Name, LayerKind Kind, string? P
 public sealed record ImportArgs(string Id, string Name, byte[]? Png = null, string? Parent = null, string? Path = null);
 public sealed record PathArgs(string Path);
 public enum ImageExportFormat { Png, Jpeg, WebP, Svg, Ico, Psd }
-public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExportFormat.Png, bool FlattenLayers = true);
+public sealed record ExportArgs(string Path, ImageExportFormat Format = ImageExportFormat.Png, bool FlattenLayers = true, bool KeepLayersSeparate = true);
 public sealed record ImageImportArgs(string Id, string Name, byte[]? Data = null, string? Path = null,
     string? Parent = null, string? DocumentId = null);
 public sealed record OpenArgs(string Path, byte[]? Data = null);
@@ -251,7 +251,7 @@ public sealed class CommandEngine(IRasterBackend backend)
                 if (!Enum.IsDefined(output.Format)) throw new InvalidDataException("Unknown export format.");
                 WriteExport(output.Path, stream =>
                 {
-                    if (output.Format == ImageExportFormat.Psd) backend.ExportPsd(current, stream, output.FlattenLayers);
+                    if (output.Format == ImageExportFormat.Psd) backend.ExportPsd(current, stream, output.FlattenLayers, output.KeepLayersSeparate);
                     else stream.Write(backend.ExportImage(current, output.Format));
                 });
                 return;

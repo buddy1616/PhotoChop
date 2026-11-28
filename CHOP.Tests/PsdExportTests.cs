@@ -9,10 +9,11 @@ public sealed class PsdExportTests
     private readonly SkiaRenderer renderer = new();
 
     [Theory]
-    [InlineData(null)]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void ExportsPsdThroughCommandAndPreservesTransparencyAndLayerMetadata(bool? flattenLayers)
+    [InlineData(null, null)]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public void ExportsPsdThroughCommandAndPreservesTransparencyAndLayerMetadata(bool? flattenLayers, bool? keepLayersSeparate)
     {
         var engine = new CommandEngine(renderer);
         engine.Execute(Command.Of("document.create", new NewArgs("psd", 16, 12, PixelsPerInch: 300)));
@@ -30,14 +31,14 @@ public sealed class PsdExportTests
         string path = Path.Combine(folder.Path, "sample.psd");
         var original = engine.Current!;
         var command = flattenLayers is { } setting
-            ? Command.Of("document.export", new ExportArgs(path, ImageExportFormat.Psd, setting))
+            ? Command.Of("document.export", new ExportArgs(path, ImageExportFormat.Psd, setting, keepLayersSeparate!.Value))
             : Command.Of("document.export", new { path, format = "psd" });
         engine.Execute(command);
         Assert.Same(original, engine.Current);
         var data = File.ReadAllBytes(path);
         var result = PsdImport.Read(data, "roundtrip").Document;
         Assert.Equal((16, 12, 300d), (result.Width, result.Height, result.PixelsPerInch));
-        if (flattenLayers == false)
+        if (flattenLayers == true && keepLayersSeparate == false)
             Assert.Equal(LayerKind.Raster, Assert.Single(result.Layers).Kind);
         else
         {
@@ -52,7 +53,10 @@ public sealed class PsdExportTests
             Assert.Equal(128 / 255d, layer.FillOpacity);
             Assert.InRange(layer.Pixels!.Rgba[3], 126, 129);
             Assert.False(result.Layers[1].Visible);
-            Assert.NotNull(result.Layers[1].Pixels);
+            if (flattenLayers == false)
+                Assert.NotNull(result.Layers[1].VectorMask);
+            else
+                Assert.NotNull(result.Layers[1].Pixels);
         }
 
         var expected = renderer.Composite(original);
@@ -63,6 +67,44 @@ public sealed class PsdExportTests
         Assert.Equal(255, actual.Rgba[pixel + 1]);
         Assert.InRange(actual.Rgba[pixel + 3], expected.Rgba[pixel + 3] - 1, expected.Rgba[pixel + 3] + 1);
         Assert.Equal(0, actual.Rgba[3]);
+    }
+
+    [Fact]
+    public void EditablePsdRetainsRasterMasksShapePathsAndSupportedStyles()
+    {
+        var mask = new AlphaMask(2, 2, [0, 128, 255, 64], X: 1, Y: 1);
+        var style = new Effect("outline", EffectKind.Stroke, A: 2, Ink: "#FF123456", Opacity: .8);
+        var shape = new Layer("shape", "Ellipse", LayerKind.Ellipse)
+        {
+            Width = 8, Height = 6, Color = "#FFCC6600", Transform = new(3, 2),
+            Mask = mask, Effects = [style]
+        };
+        var unsupported = new Layer("blurred", "Blurred", LayerKind.Rectangle)
+        {
+            Width = 4, Height = 4, Effects = [new("blur", EffectKind.GaussianBlur, A: 1)], Mask = mask
+        };
+        var document = new Document("source", 20, 15) { Layers = [shape, unsupported] };
+        using var output = new MemoryStream();
+        renderer.ExportPsd(document, output, flattenLayers: false, keepLayersSeparate: false);
+
+        var imported = PsdImport.Read(output.ToArray(), "editable").Document;
+        var editable = imported.Layers[0];
+        Assert.Equal(LayerKind.Fill, editable.Kind);
+        Assert.Equal(shape.Color, editable.Color);
+        Assert.Equal((4, 3), (editable.Mask!.X, editable.Mask.Y));
+        Assert.Equal(mask.Alpha, editable.Mask.Alpha);
+        var path = Assert.Single(editable.VectorMask!.Contours);
+        Assert.True(path.Closed);
+        Assert.Equal(4, path.Nodes.Length);
+        Assert.Equal(7, path.Nodes[0].Point.X, precision: 5);
+        Assert.Equal(2, path.Nodes[0].Point.Y, precision: 5);
+        var exportedStyle = Assert.Single(editable.Effects);
+        Assert.Equal((style.Kind, style.A, style.Ink, style.Opacity),
+            (exportedStyle.Kind, exportedStyle.A, exportedStyle.Ink, exportedStyle.Opacity));
+        Assert.Equal(LayerKind.Raster, imported.Layers[1].Kind);
+        Assert.NotNull(imported.Layers[1].Pixels);
+        Assert.Null(imported.Layers[1].Mask);
+        Assert.Empty(imported.Layers[1].Effects);
     }
 
     private sealed class TemporaryFolder : IDisposable
