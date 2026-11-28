@@ -868,21 +868,16 @@ public partial class MainWindow : Window
     private void ExportPsd()
     {
         if (active is null) return;
-        var flatten = new CheckBox { Content = "Flatten Layers", IsChecked = true };
+        var flatten = new CheckBox { Content = "Flatten Layers (keep each layer separate)", IsChecked = true };
         var panel = new StackPanel { Margin = new Thickness(16) };
         panel.Children.Add(flatten);
-        panel.Children.Add(new TextBlock
-        {
-            Text = "PSD export uses 8-bit RGB. Keeping layers preserves groups and bakes effects and transforms into raster pixels.",
-            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0)
-        });
-        var note = new TextBlock
-        {
-            Text = "Group and adjustment effects can look different when layers stay separate. Some transformed pixels outside the canvas may be cropped.",
-            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0), Visibility = Visibility.Collapsed
-        };
-        flatten.Unchecked += (_, _) => note.Visibility = Visibility.Visible;
-        flatten.Checked += (_, _) => note.Visibility = Visibility.Collapsed;
+        var note = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+        void DescribeExport() => note.Text = flatten.IsChecked == true
+            ? "Exports 8-bit RGB with groups preserved and effects and transforms baked into each layer. Group and adjustment effects can look different, and some off-canvas pixels may be cropped."
+            : "Exports the visible image as a single merged 8-bit RGB layer.";
+        flatten.Checked += (_, _) => DescribeExport();
+        flatten.Unchecked += (_, _) => DescribeExport();
+        DescribeExport();
         panel.Children.Add(note);
         var dialog = new Window { Owner = EditorOwner, Title = "Export PSD", Width = 375, Content = panel,
             SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize, ShowInTaskbar = false,

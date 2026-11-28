@@ -78,7 +78,7 @@ The script is a JSON array of command objects with `name`, optional `target` (a 
 | Paste an image file | `layer.pastePixels` with `{ "id":"paste", "name":"Pasted", "path":"input.png", "x":10, "y":20 }` |
 | Add a linked Chop Layer | `layer.createChop` with `{ "id":"linked", "name":"Linked", "snapshot":{ "sourcePath":"source.chop" } }` |
 | Re-bake or replace a linked Chop Layer | `layer.rebakeChop` with the layer ID as `target` and `{ "sourcePath":"source.chop" }` as its arguments |
-| Export PSD | `document.export` with `{ "path":"output.psd", "format":"psd", "flattenLayers":false }`. Omit `flattenLayers` for a single flattened layer. PSD export uses 8-bit RGB. Layered export preserves groups and rasterizes layer contents, masks, effects, and transforms. Backdrop-dependent effects can look different. |
+| Export PSD | `document.export` with `{ "path":"output.psd", "format":"psd" }`. The default, `flattenLayers:true`, bakes each layer independently. Use `flattenLayers:false` for a single merged layer. PSD export uses 8-bit RGB. Layered export preserves groups and rasterizes layer contents, masks, effects, and transforms. Backdrop-dependent effects can look different. |
 | Export PNG, JPEG, WebP, or SVG | `document.export` with `{ "path":"output.webp", "format":"webP" }`. Supported format values are `png`, `jpeg`, `webP`, and `svg`. Omitting `format` exports PNG. |
 
 The command log records changes made from mouse, keyboard, and menu commands. Clipboard edits record the image or mask payload, so a replay can use those pixels without an operating-system clipboard. For scripts written by hand, inputs can be paths or embedded bytes. Layer commands that read paths capture their inputs so history edits can replay them even if the source file has changed.

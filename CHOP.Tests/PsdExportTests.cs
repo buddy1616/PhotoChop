@@ -9,9 +9,10 @@ public sealed class PsdExportTests
     private readonly SkiaRenderer renderer = new();
 
     [Theory]
+    [InlineData(null)]
     [InlineData(true)]
     [InlineData(false)]
-    public void ExportsPsdThroughCommandAndPreservesTransparencyAndLayerMetadata(bool flattenLayers)
+    public void ExportsPsdThroughCommandAndPreservesTransparencyAndLayerMetadata(bool? flattenLayers)
     {
         var engine = new CommandEngine(renderer);
         engine.Execute(Command.Of("document.create", new NewArgs("psd", 16, 12, PixelsPerInch: 300)));
@@ -28,15 +29,19 @@ public sealed class PsdExportTests
         using var folder = new TemporaryFolder();
         string path = Path.Combine(folder.Path, "sample.psd");
         var original = engine.Current!;
-        engine.Execute(Command.Of("document.export", new ExportArgs(path, ImageExportFormat.Psd, flattenLayers)));
+        var command = flattenLayers is { } setting
+            ? Command.Of("document.export", new ExportArgs(path, ImageExportFormat.Psd, setting))
+            : Command.Of("document.export", new { path, format = "psd" });
+        engine.Execute(command);
         Assert.Same(original, engine.Current);
         var data = File.ReadAllBytes(path);
         var result = PsdImport.Read(data, "roundtrip").Document;
         Assert.Equal((16, 12, 300d), (result.Width, result.Height, result.PixelsPerInch));
-        if (flattenLayers)
+        if (flattenLayers == false)
             Assert.Equal(LayerKind.Raster, Assert.Single(result.Layers).Kind);
         else
         {
+            Assert.Equal(2, result.Layers.Length);
             var group = result.Layers[0];
             Assert.Equal("Group Ω", group.Name);
             Assert.Equal(LayerKind.Group, group.Kind);
