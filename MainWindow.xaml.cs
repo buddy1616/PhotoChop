@@ -868,15 +868,25 @@ public partial class MainWindow : Window
     private void ExportPsd()
     {
         if (active is null) return;
-        var flatten = new CheckBox { Content = "Flatten Layers (keep each layer separate)", IsChecked = true };
+        var flatten = new CheckBox { Content = "Flatten Layers", IsChecked = true };
+        var separate = new CheckBox { Content = "Keep layers separate", IsChecked = true, Margin = new Thickness(22, 4, 0, 0) };
         var panel = new StackPanel { Margin = new Thickness(16) };
         panel.Children.Add(flatten);
+        panel.Children.Add(separate);
         var note = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
-        void DescribeExport() => note.Text = flatten.IsChecked == true
-            ? "Exports 8-bit RGB with groups preserved and effects and transforms baked into each layer. Group and adjustment effects can look different, and some off-canvas pixels may be cropped."
-            : "Exports the visible image as a single merged 8-bit RGB layer.";
-        flatten.Checked += (_, _) => DescribeExport();
-        flatten.Unchecked += (_, _) => DescribeExport();
+        void DescribeExport()
+        {
+            separate.IsEnabled = flatten.IsChecked == true;
+            note.Text = flatten.IsChecked != true
+                ? "Keeps groups, compatible styles, solid fills, basic shapes and masks editable. Other features are baked where possible. Exports 8-bit RGB."
+                : separate.IsChecked == true
+                    ? "Keeps groups and bakes each layer separately. Group and adjustment effects can look different. Exports 8-bit RGB."
+                    : "Exports the visible image as a single merged 8-bit RGB layer.";
+        }
+        flatten.Checked += (_, _) => { separate.IsChecked = true; DescribeExport(); };
+        flatten.Unchecked += (_, _) => { separate.IsChecked = false; DescribeExport(); };
+        separate.Checked += (_, _) => DescribeExport();
+        separate.Unchecked += (_, _) => DescribeExport();
         DescribeExport();
         panel.Children.Add(note);
         var dialog = new Window { Owner = EditorOwner, Title = "Export PSD", Width = 375, Content = panel,
@@ -894,7 +904,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() != true) return;
         var picker = new SaveFileDialog { Filter = "Photoshop document (*.psd)|*.psd", DefaultExt = ".psd", AddExtension = true };
         if (picker.ShowDialog(EditorOwner) == true)
-            Run("document.export", new ExportArgs(picker.FileName, ImageExportFormat.Psd, flatten.IsChecked == true));
+            Run("document.export", new ExportArgs(picker.FileName, ImageExportFormat.Psd, flatten.IsChecked == true, separate.IsChecked == true));
     }
 
     private void ExportPng() => ExportImage("PNG", ".png", "*.png", ImageExportFormat.Png);

@@ -8,7 +8,8 @@ namespace Chop.Rendering;
 
 public sealed partial class SkiaRenderer
 {
-    private sealed record PsdExportLayer(Layer Layer, int Section, Func<RasterEdit>? Render);
+    private sealed record PsdExportLayer(Layer Layer, int Section, Func<RasterEdit>? Render,
+        AlphaMask? EditableMask = null, Effect[]? EditableStyles = null, bool SolidFill = false, VectorMask? EditableVectorMask = null);
     private sealed record PsdExportRecord(PsdExportLayer Entry, long Bounds, long[] ChannelLengths);
 
     private byte[] EncodePsd(Document document)
@@ -18,7 +19,7 @@ public sealed partial class SkiaRenderer
         return output.ToArray();
     }
 
-    public void ExportPsd(Document document, Stream output, bool flattenLayers = true)
+    public void ExportPsd(Document document, Stream output, bool flattenLayers = true, bool keepLayersSeparate = true)
     {
         if (!output.CanWrite || !output.CanSeek)
             throw new ArgumentException("PSD export requires a writable, seekable stream.", nameof(output));
@@ -30,7 +31,7 @@ public sealed partial class SkiaRenderer
         Pixels CompositeImage() => merged ??= Composite(document);
 
         var entries = new List<PsdExportLayer>();
-        if (!flattenLayers || document.Layers.Length == 0)
+        if ((flattenLayers && !keepLayersSeparate) || document.Layers.Length == 0)
             entries.Add(new(new Layer("composite", "Composite", LayerKind.Raster), 0, () => new(CompositeImage(), 0, 0)));
         else
         {
@@ -62,6 +63,14 @@ public sealed partial class SkiaRenderer
                 writer.Short(1); // Pixels per inch.
                 writer.Short(1); // Display inches.
             }
+            if (!flattenLayers)
+            {
+                writer.Key("8BIM");
+                writer.Short(1037); // Global Lighting Angle
+                writer.Short(0);
+                writer.Int(4);
+                writer.Int((int)Math.Round(PsdLightAngle(document.GlobalLightAngle)));
+            }
         });
 
         var row = new byte[document.Width];
@@ -90,6 +99,15 @@ public sealed partial class SkiaRenderer
                         }
                         int length = checked((int)(output.Position - start));
                         writer.Patch(record.ChannelLengths[channel], () => writer.Int(length));
+                    }
+                    if (record.Entry.EditableMask is { } mask)
+                    {
+                        long start = output.Position;
+                        writer.Short(2);
+                        using (var zip = new ZLibStream(output, CompressionLevel.Fastest, leaveOpen: true))
+                            zip.Write(mask.Alpha);
+                        int length = checked((int)(output.Position - start));
+                        writer.Patch(record.ChannelLengths[4], () => writer.Int(length));
                     }
                     CheckSize();
                 }
@@ -124,7 +142,44 @@ public sealed partial class SkiaRenderer
                 }
                 var branch = parents.ToArray();
                 var below = layer.Kind == LayerKind.Effect ? layers[..index] : [];
-                Add(new(layer, 0, () => RenderLayer(layer, branch, below)));
+                var source = layer;
+                AlphaMask? mask = null;
+                Effect[]? styles = null;
+                bool fill = false;
+                VectorMask? vector = null;
+                if (!flattenLayers && layer.Kind is not LayerKind.Effect && EditablePsdBranch(branch) &&
+                    TryPsdTranslation(layer, branch, out int dx, out int dy))
+                {
+                    var activeEffects = layer.TransformsEnabled ? layer.Effects.Where(ProcessesPixels).ToArray() : [];
+                    bool editableStyles = activeEffects.Length > 0 && PsdStylesCanRemainEditable(activeEffects);
+                    bool effectsAllowMasks = activeEffects.Length == 0 || editableStyles;
+                    if (layer.VectorMask is { } originalVector && (effectsAllowMasks || !originalVector.Enabled) &&
+                        TryPsdVectorMask(originalVector, area, dx, dy) is { } mappedVector)
+                    {
+                        vector = mappedVector;
+                        source = source with { VectorMask = null };
+                    }
+                    if (layer.Mask is { } originalMask && layer.PixelShifts.Length == 0 &&
+                        (effectsAllowMasks || !layer.MaskEnabled))
+                    {
+                        mask = originalMask with { X = originalMask.X + dx, Y = originalMask.Y + dy };
+                        source = source with { Mask = null };
+                    }
+                    if (editableStyles)
+                    {
+                        styles = activeEffects;
+                        source = source with { Effects = [] };
+                    }
+                    bool opaqueFill = Format.Color(layer.Color) >> 24 == 255 && effectsAllowMasks &&
+                        (layer.Mask is null || mask is not null) && (layer.VectorMask is null || vector is not null);
+                    fill = opaqueFill && layer.Kind == LayerKind.Fill;
+                    if (opaqueFill && layer.VectorMask is null && layer.Kind is LayerKind.Rectangle or LayerKind.Ellipse)
+                    {
+                        vector = TryPsdVectorMask(PsdShapeMask(layer), area, dx, dy);
+                        fill = vector is not null;
+                    }
+                }
+                Add(new(layer, 0, () => RenderLayer(source, branch, below), mask, styles, fill, vector));
             }
         }
 
@@ -169,11 +224,12 @@ public sealed partial class SkiaRenderer
             var layer = entry.Layer;
             long bounds = output.Position;
             WriteBounds(default);
-            writer.Short(4);
-            var lengths = new long[4];
-            for (short channel = 0; channel < 4; channel++)
+            short channelCount = entry.EditableMask is null ? (short)4 : (short)5;
+            writer.Short(channelCount);
+            var lengths = new long[channelCount];
+            for (short channel = 0; channel < channelCount; channel++)
             {
-                writer.Short(channel == 3 ? (short)-1 : channel);
+                writer.Short(channel switch { 3 => (short)-1, 4 => (short)-2, _ => channel });
                 lengths[channel] = output.Position;
                 writer.Int(0);
             }
@@ -183,11 +239,18 @@ public sealed partial class SkiaRenderer
             writer.Key(blend);
             writer.Byte(Byte(layer.Opacity));
             writer.Byte(layer.Clipped ? (byte)1 : (byte)0);
-            writer.Byte((byte)((layer.Visible ? 0 : 2) | (entry.Section == 0 ? 8 : 24)));
+            writer.Byte((byte)((layer.Visible ? 0 : 2) | (entry.Section == 0 && !entry.SolidFill ? 8 : 24)));
             writer.Byte(0);
             writer.Block(() =>
             {
-                writer.Int(0); // Mask already baked.
+                writer.Block(() =>
+                {
+                    if (entry.EditableMask is not { } mask) return;
+                    WriteBounds(new(mask.X, mask.Y, mask.Width, mask.Height));
+                    writer.Byte(mask.Outside);
+                    writer.Byte(layer.MaskEnabled ? (byte)0 : (byte)2);
+                    writer.Short(0);
+                });
                 writer.Int(0); // No custom blending ranges.
                 var name = Encoding.ASCII.GetBytes(layer.Name[..Math.Min(layer.Name.Length, 255)]);
                 writer.Byte((byte)name.Length);
@@ -198,6 +261,12 @@ public sealed partial class SkiaRenderer
                     writer.Int(layer.Name.Length);
                     output.Write(Encoding.BigEndianUnicode.GetBytes(layer.Name));
                 });
+                if (entry.SolidFill)
+                    writer.Tag("SoCo", () => WritePsdSolidFill(writer, layer.Color));
+                if (entry.EditableVectorMask is { } vector)
+                    writer.Tag("vmsk", () => WritePsdVectorMask(writer, vector, area));
+                if (entry.EditableStyles is { } styles)
+                    writer.Tag("lfx2", () => WritePsdStyles(writer, styles));
                 if (layer.FillOpacity != 1)
                     writer.Tag("iOpa", () => { writer.Byte(Byte(layer.FillOpacity)); writer.Byte(0); writer.Short(0); });
                 if (layer.Locked)
@@ -270,11 +339,24 @@ public sealed partial class SkiaRenderer
             stream.Write(bytes);
         }
 
+        public void Double(double value)
+        {
+            Span<byte> bytes = stackalloc byte[8];
+            BinaryPrimitives.WriteInt64BigEndian(bytes, BitConverter.DoubleToInt64Bits(value));
+            stream.Write(bytes);
+        }
+
         public void Int(int value)
         {
             Span<byte> bytes = stackalloc byte[4];
             BinaryPrimitives.WriteInt32BigEndian(bytes, value);
             stream.Write(bytes);
+        }
+
+        public void Unicode(string value)
+        {
+            Int(value.Length);
+            stream.Write(Encoding.BigEndianUnicode.GetBytes(value));
         }
 
         public void Patch(long position, Action write)
