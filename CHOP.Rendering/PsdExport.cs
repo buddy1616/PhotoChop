@@ -30,7 +30,7 @@ public sealed partial class SkiaRenderer
         Pixels CompositeImage() => merged ??= Composite(document);
 
         var entries = new List<PsdExportLayer>();
-        if (flattenLayers || document.Layers.Length == 0)
+        if (!flattenLayers || document.Layers.Length == 0)
             entries.Add(new(new Layer("composite", "Composite", LayerKind.Raster), 0, () => new(CompositeImage(), 0, 0)));
         else
         {
@@ -105,7 +105,7 @@ public sealed partial class SkiaRenderer
         void CheckSize()
         {
             if (output.Position + (long)area.Width * area.Height * 4 > int.MaxValue)
-                throw new InvalidDataException("The export exceeds the 2 GB PSD limit. Try Flatten Layers or reduce the document size.");
+                throw new InvalidDataException("The export exceeds the 2 GB PSD limit. Try exporting a single merged layer or reducing the document size.");
         }
 
         void AddTier(Layer[] layers, List<Layer> parents)
